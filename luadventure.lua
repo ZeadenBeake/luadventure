@@ -41,8 +41,9 @@ function location:new(
     o.name = name or error("Location must have a name!", 2)
     o.directions = locations or {}
     return o
- end
+end
 
+ -- TODO: Break this out into a generic "character" class and make the player an instance of it.
 local player = {
     location = "village",
     stats = {
@@ -50,6 +51,8 @@ local player = {
         health = 10,
         max_health = 10, -- Modified by armor and possibly clothes
         dr = 0, -- Modified by some armors.
+        defense = 5, -- Modified by armor.
+        speed = 10, -- Modified by armor, usually negatively.
         weight = 0, -- How many things *currently* being held by the player.
         max_inventory = 5 -- Maximum things the player can carry, modified by clothes + possibly backpack
     },
