@@ -1,5 +1,4 @@
 -- Fuck it, why not? Sci-fi fantasy RPG game, in lua, designed for CraftOS.
--- penits
 
 local world = {} -- Gotta define this early...
 
