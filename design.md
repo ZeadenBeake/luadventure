@@ -295,6 +295,20 @@ table, no bespoke flag per encounter needed. `scene` is already a list, so
 multi-enemy encounters fall out for free whenever something spawns more
 than one foe at once - nothing does yet.
 
+### Combat menu & movement
+
+`promptAction` builds the "What will you do?" menu dynamically rather than
+drawing fixed numbered lines: **Fight**, **Reload** (only shown at all when
+`hasAmmoWeapon` says an equipped weapon actually uses ammo), **Ability**,
+**Belt**, **Idle**, **Flee**, numbered in that order with whichever entries
+apply. Movement isn't a menu entry - arrow keys reposition immediately,
+same turn cost and quickened/full gating as ever (a "You don't have time to
+move" rejection if quickened and reflex isn't fast enough, silently no-op
+on stepping into a wall), just without the extra "Move, then which way?"
+confirmation step that used to sit in between. A hint line ("Arrow keys to
+move (quick)" or "(full)", read off `getEffectiveReflex`) sits under the
+numbered options so this isn't a hidden control.
+
 ### Weapons
 
 `strike` (baseline unarmed - see "Inventory & equipment"), `chain_sword`
@@ -329,18 +343,20 @@ touching what's equipped there; a destroyed stinger just disables itself.
 A destroyed **hand** specifically goes one step further: whatever it was
 holding is knocked loose (`dropEquippedItem`, called from the enemy-attack
 branch of `runEncounter` - not from an arm being destroyed, only a hand).
-Dropped weapons are tracked per-encounter in `droppedItems`, not
-`player.inventory` - a new **Pick Up** combat action (always a full action)
-re-equips one straight to its original slot mid-fight (`pickDroppedItem`,
-same picker/Back convention as everywhere else), which is the only
-sensible option there's no time to open the full inventory screen -
-still unusable, same as a bare-handed Strike from that hand would be, until
-the hand itself heals. Anything left unclaimed when the encounter ends
-instead lands in the bag via its own `itemId` (see "Inventory & equipment"
-- weapons as items), letting the player re-equip it themselves once it's
-actually useful again. `dropEquippedItem` takes a slot directly, so a
-future disarm effect (an enemy skill, say - none exist yet) can reuse it
-without knowing anything about *why* something got dropped.
+A dropped weapon is tracked per-encounter in `droppedItems`, not
+`player.inventory` - the **Belt** action's empty-slot flow (see "Inventory
+& equipment") can holster one straight into another hand mid-fight, which
+is the only sensible option when there's no time to open the full
+inventory screen - still unusable, same as a bare-handed Strike from that
+hand would be, until the hand itself heals. Anything left unclaimed when
+the encounter ends instead lands in the bag via its own `itemId` (see
+"Inventory & equipment" - weapons as items), letting the player re-equip it
+themselves once it's actually useful again. A plain consumable held in a
+hand isn't "wielded" the same way, so it skips this whole dance - it just
+falls straight back into the bag on the spot instead, same as unequipping
+it manually would. `dropEquippedItem` takes a slot directly, so a future
+disarm effect (an enemy skill, say - none exist yet) can reuse it without
+knowing anything about *why* something got dropped.
 
 ### Ammo
 
@@ -398,18 +414,19 @@ Two keys do the work, split by what they mean rather than what they touch:
   which Enter alone can't express.
 - **`M` (Move)** - picks up whatever's in the selected row (its ammo, if it's
   a weapon with any loaded, travels right along with it), then places it
-  wherever you navigate to next and press `M` again. A weapon dropped on an
-  equip slot goes there; a weapon *or* plain item dropped on a belt slot
-  works the same way (a belt slot can hold a loaded weapon exactly like an
-  equip slot can - see below). Either way, whatever was already there is
-  displaced back to the bag (its ammo spilled loose first - see "Ammo" -
-  then its own item, via its `itemId`, unless it has none, like Strike, in
-  which case nothing is added back). Dropped anywhere else, it just lands
-  in the general bag instead (ammo included) - always a valid resting
-  place regardless of where it came from, which is also how unequipping
-  works: pick it up, then press `M` again without needing a matching slot
-  at all. Closing the inventory mid-carry safely undoes the pickup rather
-  than losing whatever was picked up.
+  wherever you navigate to next and press `M` again. A weapon *or* a plain
+  item dropped on an equip slot goes there - a hand can hold a consumable
+  exactly like a weapon (see below) - and a weapon or plain item dropped on
+  a belt slot works the same way (a belt slot can hold a loaded weapon
+  exactly like an equip slot can - see below). Either way, whatever was
+  already there is displaced back to the bag (its ammo spilled loose first
+  - see "Ammo" - then its own item, via its `itemId`, unless it has none,
+  like Strike, in which case nothing is added back). Dropped anywhere else,
+  it just lands in the general bag instead (ammo included) - always a valid
+  resting place regardless of where it came from, which is also how
+  unequipping works: pick it up, then press `M` again without needing a
+  matching slot at all. Closing the inventory mid-carry safely undoes the
+  pickup rather than losing whatever was picked up.
 
 **Weapons as items**: a weapon can have an `itemId` (chain_sword,
 laser_pistol so far) naming its carryable, bulk-having form in
@@ -431,14 +448,38 @@ have - only what's actually sitting loose in the bag does.
 combat-usable items, separate from the main bag - and, like an equip slot,
 able to hold a loaded weapon (its ammo tracked under the synthetic
 `character.ammo` key `"belt" .. index`, see "Ammo"). A holstered weapon's
-row shows its loaded count in place of the usual flat "1", and a new
-**Swap** combat action (`pickSwapTarget`, always a full action) lets the
-player draw one straight into a hand mid-fight - a true swap, not a drop:
-whatever was in that hand (if anything) goes into the vacated belt slot,
-ammo and all, rather than falling to the ground or needing the inventory
-screen at all. With only one belt slot right now this is really just
-"which hand", but `pickSwapTarget` lists every (limb, holstered weapon)
-pairing generically, so a second belt slot would fall out for free.
+row shows its loaded count in place of the usual flat "1". A plain
+consumable can also sit in a hand instead of the belt (an equip slot's
+`equipped[label]` holds either a weaponId or a plain itemId - whichever
+table recognizes it decides which it is; `getWieldedWeapon` naturally falls
+back to Strike for a hand holding a non-weapon, so attack resolution needs
+no special casing at all) - it acts exactly like a belt slot wherever that
+matters (`getSlotContents`/`getAllSlots`, shared by the inventory screen
+and the in-combat Belt action below).
+
+The in-combat **Belt** action (`runBeltAction`) replaced the older
+dedicated Swap/Pick Up actions with one unified flow: it lists every hand
+and belt slot together, then does whatever the chosen one's contents
+imply. A **weapon** prompts a destination (any other slot, shown with
+what's currently there) and does a true two-way exchange
+(`swapSlots`) - ammo travels with it, and whatever was at the destination
+comes back the other way, holstered rather than dropped. A **consumable**
+(hand or belt, no difference) is used on the spot - its ability's `effect`
+is called with the real `enemy`, so it shows its usual full-screen combat
+confirmation (see "Enter" above) rather than logging - and the slot is
+cleared on success. An **empty** slot instead offers to holster a weapon
+into it, sourced from any other slot currently holding one *or* anything
+sitting in `droppedItems` this fight (a hand destroyed mid-combat - see
+"Limb destruction & disarming"). Swapping and holstering are always full
+actions; using a consumable takes whatever speed its own ability declares
+(the salve is quick). Rather than filtering every slot up front by what
+sub-action it implies, a swap/holster attempted while quickened is simply
+rejected with a message and no turn spent, same pattern movement has
+always used for a full action mid a quick action's bonus turn - using a
+consumable isn't gated this way at all, since the one ability reachable
+through it (the salve) is quick regardless. With only one belt slot right
+now hand-to-hand is the common case, but every helper (`getAllSlots` and
+friends) is written generically, so a second belt slot falls out for free.
 
 ## Quests
 
