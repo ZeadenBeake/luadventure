@@ -296,13 +296,27 @@ without knowing anything about *why* something got dropped.
 
 Weapons with `ammoCapacity` need a matching ammo item to reload
 (`ammoClass`/`getAmmoItemId`) - `bullet` for kinetic weapons, `energy_charge`
-for energy weapons. Ammo is tracked per-equip-slot on the combatant
-(`character.ammo`), never on the weapon template itself. Energy ammo is
-deliberately fudged: there's no stateful partial-charge battery item,
-instead a carried `battery` just raises how many loose `energy_charge`
-items you're allowed to carry (`getMaxEnergyCharges`), which is what keeps
-energy weapons meaningfully lighter than their kinetic equivalents without
-tracking charge state per battery.
+for energy weapons. Ammo is tracked per-**named-slot** on the combatant
+(`character.ammo`) - an equip slot's own label, or a belt slot's synthetic
+`"beltN"` one (see "Inventory & equipment") - never on the weapon template
+itself, and never attached to the item sitting in the bag either, since
+there's no mechanism to hang per-instance data off an item id at all.
+Energy ammo is deliberately fudged: there's no stateful partial-charge
+battery item, instead a carried `battery` just raises how many loose
+`energy_charge` items you're allowed to carry (`getMaxEnergyCharges`),
+which is what keeps energy weapons meaningfully lighter than their kinetic
+equivalents without tracking charge state per battery.
+
+Since ammo lives on the *slot*, not the weapon, unequipping one (for any
+reason - swapping it for another, a destroyed hand, eventually looting an
+enemy's gun) has to do something with whatever was loaded. `depositAmmo`/
+`returnAmmoToInventory` convert it back into loose ammo items in the bag
+rather than leaving it stranded on a slot nothing occupies anymore -
+"ammo follows the weapon" in spirit, even though it can't literally follow
+the *item*. The one place this doesn't apply is a straight slot-to-slot
+move (an equip slot to a belt slot or back, see "Inventory & equipment") -
+there, the ammo count just travels along with the swap directly, since both
+ends are real tracked slots and nothing needs to spill.
 
 ## Inventory & equipment
 
@@ -327,37 +341,49 @@ Two keys do the work, split by what they mean rather than what they touch:
   Everything else (a spare weapon sitting in the bag, apparel, ammo itself,
   an equip slot) doesn't respond - equipping needs a chosen destination,
   which Enter alone can't express.
-- **`M` (Move)** - picks up whatever's in the selected row, then places it
+- **`M` (Move)** - picks up whatever's in the selected row (its ammo, if it's
+  a weapon with any loaded, travels right along with it), then places it
   wherever you navigate to next and press `M` again. A weapon dropped on an
-  equip slot goes there, swapping out whatever was already wielded (back to
-  the bag as its own item, via the *old* weapon's `itemId` - unless it has
-  none, like Strike, in which case nothing is added back); a plain item
-  dropped on a belt slot works the same way. Dropped anywhere else, it just
-  lands in the general bag instead - always a valid resting place
-  regardless of where it came from, which is also how unequipping works:
-  pick a weapon up off its equip slot, then press `M` again without
-  needing another slot to put it in at all. Closing the inventory
-  mid-carry safely undoes the pickup rather than losing whatever was
-  picked up.
+  equip slot goes there; a weapon *or* plain item dropped on a belt slot
+  works the same way (a belt slot can hold a loaded weapon exactly like an
+  equip slot can - see below). Either way, whatever was already there is
+  displaced back to the bag (its ammo spilled loose first - see "Ammo" -
+  then its own item, via its `itemId`, unless it has none, like Strike, in
+  which case nothing is added back). Dropped anywhere else, it just lands
+  in the general bag instead (ammo included) - always a valid resting
+  place regardless of where it came from, which is also how unequipping
+  works: pick it up, then press `M` again without needing a matching slot
+  at all. Closing the inventory mid-carry safely undoes the pickup rather
+  than losing whatever was picked up.
 
 **Weapons as items**: a weapon can have an `itemId` (chain_sword,
 laser_pistol so far) naming its carryable, bulk-having form in
 `itemEntries`, which in turn has a `weaponId` pointing back - the two
-together are what let the inventory screen swap between "wielded" and
-"sitting in the bag" at all. `strike` (the generic bare-handed fallback
-every MANIPULATE limb reverts to - renamed from "Fist", since not every
-species specifically punches) has neither; it's never a real, droppable
-item.
+together are what let the inventory screen swap a weapon between
+"wielded", "holstered", and "sitting loose in the bag". `strike` (the
+generic bare-handed fallback every MANIPULATE limb reverts to - renamed
+from "Fist", since not every species specifically punches) has neither;
+it's never a real, droppable item.
 
 **Bulk** is the carry-weight system (Pathfinder-esque): every item has a
 flat `bulk` cost except 0.1 ("Light", displayed as `L`). Capacity
 (`getBulkCapacity`) is `10 * average limb strength + bulkBonus` (equipment
-like a backpack would raise `bulkBonus`; nothing does yet). Equipped
-weapons don't count against it, same as worn clothes never have - only
-what's actually sitting in the bag does.
+like a backpack would raise `bulkBonus`; nothing does yet). Equipped (or
+holstered) weapons don't count against it, same as worn clothes never
+have - only what's actually sitting loose in the bag does.
 
-**Belt**: a fixed number of slots (`beltSize`, currently 1) for combat-
-usable items, separate from the main bag.
+**Belt**: a fixed number of slots (`beltSize`, currently 1) for
+combat-usable items, separate from the main bag - and, like an equip slot,
+able to hold a loaded weapon (its ammo tracked under the synthetic
+`character.ammo` key `"belt" .. index`, see "Ammo"). A holstered weapon's
+row shows its loaded count in place of the usual flat "1", and a new
+**Swap** combat action (`pickSwapTarget`, always a full action) lets the
+player draw one straight into a hand mid-fight - a true swap, not a drop:
+whatever was in that hand (if anything) goes into the vacated belt slot,
+ammo and all, rather than falling to the ground or needing the inventory
+screen at all. With only one belt slot right now this is really just
+"which hand", but `pickSwapTarget` lists every (limb, holstered weapon)
+pairing generically, so a second belt slot would fall out for free.
 
 ## Quests
 

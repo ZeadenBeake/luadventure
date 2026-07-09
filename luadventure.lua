@@ -953,6 +953,34 @@ local function reloadWeapon(combatant, slot)
     return loaded
 end
 
+-- Ammo can't ride along with a weapon the way it would in real life -
+-- there's no way to attach per-instance data to an item sitting in the
+-- inventory, only a fixed count per named slot (character.ammo, keyed by
+-- an equip slot's own label or a belt slot's synthetic "beltN" one - see
+-- the inventory screen). So rather than pretend otherwise, `amount` units
+-- of a weapon's ammo just convert into loose ammo items in the inventory.
+-- A no-op if the weapon doesn't use ammo at all (or there's no weapon).
+local function depositAmmo(combatant, weaponId, amount)
+    local weapon = weaponEntries[weaponId]
+    if not weapon or not weapon.ammoCapacity or not amount or amount <= 0 then
+        return
+    end
+    local ammoItemId = getAmmoItemId(weapon)
+    for _ = 1, amount do
+        table.insert(combatant.inventory, ammoItemId)
+    end
+end
+
+-- Unequipping a weapon (for any reason - swapping it out, a destroyed
+-- hand, eventually looting an enemy's gun) spills whatever it had loaded
+-- back into the inventory (see depositAmmo) and clears the slot's count -
+-- whatever ends up there next reloads from scratch, same as picking up a
+-- stranger's weapon in real life would need to.
+local function returnAmmoToInventory(combatant, weaponId, ammoKey)
+    depositAmmo(combatant, weaponId, combatant.ammo[ammoKey])
+    combatant.ammo[ammoKey] = nil
+end
+
 -- True if wearing this item wouldn't put it on the same layer as, and
 -- overlapping any area with, something already worn - clothing can't
 -- overlap. Not wired into any live "wear it" action yet (nothing offers one
@@ -1628,10 +1656,19 @@ local function getInventoryRows(combatant)
     for i = 1, combatant.beltSize do
         local itemId = combatant.belt[i]
         if itemId then
+            local item = itemEntries[itemId]
+            local countText = "1"
+            -- A holstered weapon (see the equip slots below - a belt slot
+            -- can hold one too, ammo and all) shows its own loaded count
+            -- instead of a flat "1", same convention as an ammo row.
+            if item.weaponId and weaponEntries[item.weaponId].ammoCapacity then
+                local weapon = weaponEntries[item.weaponId]
+                countText = (combatant.ammo["belt" .. i] or 0) .. "/" .. weapon.ammoCapacity
+            end
             table.insert(rows, {
-                kind = "belt", index = i, itemId = itemId,
-                name = "Belt: " .. itemEntries[itemId].name,
-                countText = "1", bulkText = formatBulk(itemEntries[itemId].bulk),
+                kind = "belt", index = i, itemId = itemId, weaponId = item.weaponId,
+                name = "Belt: " .. item.name,
+                countText = countText, bulkText = formatBulk(item.bulk),
             })
         else
             table.insert(rows, {
@@ -1746,7 +1783,19 @@ local function drawInventoryScreen(rows, selection, scrollOffset, pageBarVisible
 
         local detail = {}
         if selected.kind == "belt" then
-            if selected.itemId then
+            if selected.weaponId then
+                local weapon = weaponEntries[selected.weaponId]
+                table.insert(detail, "Damage: " .. formatDamageRange(weapon.damage) .. " " .. weapon.damageType)
+                table.insert(detail, "Range: " .. weapon.range)
+                if weapon.ammoCapacity then
+                    table.insert(detail, "Loaded: " .. selected.countText)
+                end
+                for _, abilityId in ipairs(weapon.abilities or {}) do
+                    table.insert(detail, "Grants: " .. abilityEntries[abilityId].name)
+                end
+                table.insert(detail, "")
+                table.insert(detail, "[Swap] to draw in combat")
+            elseif selected.itemId then
                 table.insert(detail, "Bulk: " .. formatBulk(itemEntries[selected.itemId].bulk))
                 for _, abilityId in ipairs(itemEntries[selected.itemId].abilities or {}) do
                     table.insert(detail, "Grants: " .. abilityEntries[abilityId].name)
@@ -1830,8 +1879,12 @@ local function runInventoryScreen()
             table.insert(player.inventory, carrying.itemId)
         elseif carrying.from.kind == "belt" then
             player.belt[carrying.from.index] = carrying.itemId
+            if carrying.weaponId then
+                player.ammo["belt" .. carrying.from.index] = carrying.ammo
+            end
         elseif carrying.from.kind == "equip" then
             player.equipped[carrying.from.slot] = carrying.weaponId
+            player.ammo[carrying.from.slot] = carrying.ammo
         end
         carrying = nil
     end
@@ -1864,7 +1917,11 @@ local function runInventoryScreen()
 
             if not carrying then
                 -- Pick up whatever's here, if anything - empty slots and
-                -- rows with nothing moveable just don't respond.
+                -- rows with nothing moveable just don't respond. A weapon's
+                -- own ammo (if it has any loaded) travels along with it -
+                -- an equip slot or a holstered belt slot both track one -
+                -- so a swap doesn't need to spill and immediately re-collect
+                -- the same rounds.
                 if entry then
                     if entry.kind == "inventory" then
                         local item = itemEntries[entry.itemId]
@@ -1875,14 +1932,22 @@ local function runInventoryScreen()
                         }
                     elseif entry.kind == "belt" and entry.itemId then
                         player.belt[entry.index] = nil
+                        local ammo = nil
+                        if entry.weaponId then
+                            ammo = player.ammo["belt" .. entry.index]
+                            player.ammo["belt" .. entry.index] = nil
+                        end
                         carrying = {
-                            itemId = entry.itemId, name = itemEntries[entry.itemId].name,
+                            weaponId = entry.weaponId, itemId = entry.itemId, ammo = ammo,
+                            name = itemEntries[entry.itemId].name,
                             from = { kind = "belt", index = entry.index },
                         }
                     elseif entry.kind == "equip" and entry.weaponId then
+                        local ammo = player.ammo[entry.slot]
+                        player.ammo[entry.slot] = nil
                         player.equipped[entry.slot] = "none"
                         carrying = {
-                            weaponId = entry.weaponId, itemId = weaponEntries[entry.weaponId].itemId,
+                            weaponId = entry.weaponId, itemId = weaponEntries[entry.weaponId].itemId, ammo = ammo,
                             name = weaponEntries[entry.weaponId].name,
                             from = { kind = "equip", slot = entry.slot },
                         }
@@ -1890,29 +1955,45 @@ local function runInventoryScreen()
                 end
             else
                 -- Drop it. A weapon dropped on an equip slot goes there,
-                -- swapping out whatever was already equipped (if anything,
-                -- and if it even has an item form to swap back to - Strike
-                -- doesn't); a plain item dropped on a belt slot works the
-                -- same way. Dropped anywhere else, it just lands in the
-                -- general inventory instead - always a valid resting place
-                -- regardless of where it came from, which is also how
-                -- "taking a weapon back out" works: pick it up here, then
-                -- press Move again without needing a matching slot at all.
+                -- swapping out whatever was already equipped (its ammo
+                -- spilled to the inventory first, then back to the bag as
+                -- its own item too - unless it has none, like Strike); a
+                -- weapon or plain item dropped on a belt slot works the
+                -- same way (a belt slot can hold a loaded weapon exactly
+                -- like an equip slot can - see "Inventory & equipment").
+                -- Dropped anywhere else, it just lands in the general
+                -- inventory instead (ammo included) - always a valid
+                -- resting place regardless of where it came from, which is
+                -- also how unequipping works: pick it up here, then press
+                -- Move again without needing a matching slot at all.
                 if carrying.weaponId and entry and entry.kind == "equip" then
                     if entry.weaponId then
+                        returnAmmoToInventory(player, entry.weaponId, entry.slot)
                         local oldItemId = weaponEntries[entry.weaponId].itemId
                         if oldItemId then
                             table.insert(player.inventory, oldItemId)
                         end
                     end
                     player.equipped[entry.slot] = carrying.weaponId
-                elseif carrying.itemId and not carrying.weaponId and entry and entry.kind == "belt" then
+                    player.ammo[entry.slot] = carrying.ammo
+                elseif entry and entry.kind == "belt" and (carrying.itemId or carrying.weaponId) then
                     if entry.itemId then
+                        if entry.weaponId then
+                            returnAmmoToInventory(player, entry.weaponId, "belt" .. entry.index)
+                        end
                         table.insert(player.inventory, entry.itemId)
                     end
                     player.belt[entry.index] = carrying.itemId
-                elseif carrying.itemId then
-                    table.insert(player.inventory, carrying.itemId)
+                    if carrying.weaponId then
+                        player.ammo["belt" .. entry.index] = carrying.ammo or 0
+                    end
+                else
+                    if carrying.itemId then
+                        table.insert(player.inventory, carrying.itemId)
+                    end
+                    if carrying.weaponId then
+                        depositAmmo(player, carrying.weaponId, carrying.ammo)
+                    end
                 end
                 carrying = nil
             end
@@ -2178,6 +2259,8 @@ local function promptAction(loc, enemy, restricted)
     combatWin.write("[6] Reload (quick)")
     combatWin.setCursorPos(1, nextLine + 9)
     combatWin.write("[7] Pick Up (full)")
+    combatWin.setCursorPos(1, nextLine + 10)
+    combatWin.write("[8] Swap (full)")
     combatWin.setVisible(true)
 
     while true do
@@ -2189,6 +2272,7 @@ local function promptAction(loc, enemy, restricted)
         elseif key == keys.five then return "ability"
         elseif key == keys.six then return "reload"
         elseif key == keys.seven then return "pickup"
+        elseif key == keys.eight then return "swap"
         end
     end
 end
@@ -2512,6 +2596,7 @@ local function dropEquippedItem(droppedItems, slot)
     if not weaponId or weaponId == "none" then
         return nil
     end
+    returnAmmoToInventory(player, weaponId, slot)
     player.equipped[slot] = "none"
     table.insert(droppedItems, { slot = slot, weaponId = weaponId })
     return weaponId
@@ -2546,6 +2631,59 @@ local function pickDroppedItem(droppedItems)
             return "back"
         elseif index and droppedItems[index] then
             return index
+        end
+    end
+end
+
+-- Every (limb, holstered weapon) pairing currently possible - with only one
+-- belt slot right now this is really just "which hand", but written to
+-- generalize if beltSize ever grows. Returns nil if there's nothing
+-- holstered to swap in at all, or "back" if the player explicitly backed
+-- out instead of picking one - same convention as pickReloadTarget.
+local function pickSwapTarget(combatant)
+    local beltWeapons = {}
+    for i = 1, combatant.beltSize do
+        local itemId = combatant.belt[i]
+        if itemId and itemEntries[itemId].weaponId then
+            table.insert(beltWeapons, i)
+        end
+    end
+
+    if #beltWeapons == 0 then
+        return nil
+    end
+
+    local options = {}
+    for _, limb in ipairs(getManipulateLimbs(combatant)) do
+        for _, beltIndex in ipairs(beltWeapons) do
+            table.insert(options, { handSlot = limb.label, beltIndex = beltIndex })
+        end
+    end
+
+    combatWin.setVisible(false)
+    combatWin.clear()
+    combatWin.setCursorPos(1, 1)
+    combatWin.write("Draw which holstered weapon?")
+    local row = 3
+    for i, option in ipairs(options) do
+        local heldWeaponId = combatant.equipped[option.handSlot]
+        local heldName = (heldWeaponId and heldWeaponId ~= "none") and weaponEntries[heldWeaponId].name or weaponEntries.strike.name
+        local beltWeaponId = itemEntries[combatant.belt[option.beltIndex]].weaponId
+        row = row + writeWrapped(combatWin, 1, row, ("[%s] %s (%s) <- %s (belt)"):format(
+            digitLabel(i), option.handSlot, heldName, weaponEntries[beltWeaponId].name
+        ))
+    end
+    local backIndex = #options + 1
+    writeWrapped(combatWin, 1, row, "[" .. digitLabel(backIndex) .. "] Back")
+    combatWin.setVisible(true)
+
+    while true do
+        local _, key = os.pullEvent("key")
+        local index = keyToNumber[key]
+        if index == backIndex then
+            return "back"
+        elseif index and options[index] then
+            return options[index]
         end
     end
 end
@@ -2929,6 +3067,49 @@ local function runEncounter(triggeringObject)
                     "",
                     "Press any key.",
                 }, true)
+                speed = "full"
+            end
+        end
+
+        if action == "swap" then
+            local target = pickSwapTarget(player)
+            if target == "back" then
+                -- cancelled, nothing happened
+            elseif not target then
+                showCombatMessage({ "Nothing holstered to draw.", "", "Press any key." }, true)
+            else
+                -- A true swap: whatever's currently in the hand (if
+                -- anything) goes into the vacated belt slot, ammo and all -
+                -- holstering it rather than dropping it, so drawing a
+                -- backup weapon doesn't cost you your primary.
+                local oldWeaponId = player.equipped[target.handSlot]
+                if oldWeaponId == "none" then
+                    oldWeaponId = nil
+                end
+                local oldAmmo = player.ammo[target.handSlot]
+                local newWeaponId = itemEntries[player.belt[target.beltIndex]].weaponId
+                local newAmmo = player.ammo["belt" .. target.beltIndex]
+
+                player.equipped[target.handSlot] = newWeaponId
+                player.ammo[target.handSlot] = newAmmo
+
+                if oldWeaponId then
+                    player.belt[target.beltIndex] = weaponEntries[oldWeaponId].itemId
+                    player.ammo["belt" .. target.beltIndex] = oldAmmo
+                    showCombatMessage({
+                        "You holster your " .. weaponEntries[oldWeaponId].name ..
+                            " and draw the " .. weaponEntries[newWeaponId].name .. "!",
+                        "", "Press any key.",
+                    }, true)
+                else
+                    player.belt[target.beltIndex] = nil
+                    player.ammo["belt" .. target.beltIndex] = nil
+                    showCombatMessage({
+                        "You draw the " .. weaponEntries[newWeaponId].name .. " from your belt!",
+                        "", "Press any key.",
+                    }, true)
+                end
+
                 speed = "full"
             end
         end
