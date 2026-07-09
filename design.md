@@ -111,22 +111,26 @@ adding a `build` function and an entry in the table.
 - **Insectoid** (`newInsectoidBody`) - chitin skin/bone instead of the human
   baseline (`chitin_skin`/`chitin_bone`); the bone organ is what actually
   grants `TAILED`/`WINGED` globally (swap it out and those slots would lock
-  again), unlocking the torso's tail slot for a `stinger` and leaving the
-  wing slots deliberately empty for now. The root part is relabeled
-  "abdomen" instead of "torso" (`body.rootLabel`, read by
+  again), unlocking the torso's tail slot for a `stinger` (see "Natural
+  weapons") and leaving the wing slots deliberately empty for now. The root
+  part is relabeled "abdomen" instead of "torso" (`body.rootLabel`, read by
   `collectLabeledParts` - purely cosmetic, doesn't change how anything
   works structurally) and, same as `newTorso` always sets up, is MORTAL.
-  The head (`insectoid_head`) has an antennae slot (also left unpopulated)
-  and installs a generic `insectoid_features` organ that grants `UNSIGHTLY`
-  globally - compound eyes, mandibles, the whole look, modeled as a generic
-  organ rather than a part-intrinsic tag since there's no mechanism for a
-  part's mere shape to grant a global tag outside the organ-grant system.
-  Chitin skin's tradeoff (small reflex penalty, small endurance bonus) is
-  split across two different mechanisms for two different reasons: the
-  reflex penalty is a flat `statAdjustments.reflex = -0.05` (there's no
-  per-part reflex modifier consumed by anything yet, so a real organ
-  modifier wouldn't do anything); the endurance bonus is a flat +10 to
-  every body part's max health, applied once after the whole body is built.
+  The head (`insectoid_head`) has an antennae slot, filled with a plain
+  `antenna` (does nothing on its own yet - body-part tuning is a later
+  pass), and installs a generic `insectoid_features` organ that grants
+  `UNSIGHTLY` globally - compound eyes, mandibles, the whole look, modeled
+  as a generic organ rather than a part-intrinsic tag since there's no
+  mechanism for a part's mere shape to grant a global tag outside the
+  organ-grant system. Chitin skin's tradeoff (small reflex penalty, small
+  endurance bonus) is split across two different mechanisms for two
+  different reasons: the reflex penalty is a flat
+  `statAdjustments.reflex = -0.05` (there's no per-part reflex modifier
+  consumed by anything yet, so a real organ modifier wouldn't do anything);
+  the endurance bonus is a flat 10% damage reduction (`part.endurance`,
+  read by `damagePart`) applied to every part once after the whole body is
+  built - real, immediate, and (unlike a type resistance) applies to every
+  damage type with no exception, untyped included.
 
 `UNSIGHTLY` doesn't affect anything mechanically yet beyond one hardcoded
 example (see "Dialogue templating") - the intent is NPC reactions and
@@ -151,9 +155,16 @@ anything yet.
 - **Melee damage**: `stats.strength * getLimbStrength(attacker, the limb
   doing the hitting)`. Ranged weapons don't scale with strength at all.
 - **Damage types**: `bludgeoning`, `piercing`, `slashing`, `fire`, `frost`,
-  `radiation`, `untyped`. A part can have `resistances` per type (a
-  multiplier, default 1); `untyped` never gets one, full stop - it's for
-  things like bleed that don't cleanly fit a "real" type.
+  `radiation`, `toxic` (poison's own damage type), `untyped`. A part can
+  have `resistances` per type (a multiplier, default 1); `untyped` never
+  gets one, full stop - it's for things like bleed/poison that don't
+  cleanly fit a "real" type.
+- **Endurance**: a part can also have a flat `endurance` (0-1, a percentage)
+  applied on top of - and independent from - type resistance, with no
+  exceptions: unlike resistance, it reduces untyped damage too. Insectoid's
+  chitin skin is the only source so far (see "Species"). Order of
+  operations in `damagePart`: `amount * resistance * (1 - endurance)`,
+  then apparel coverage subtracts a flat amount from that.
 
 ### Apparel & coverage
 
@@ -173,9 +184,9 @@ the uncovered `lower_body`/`pelvis` drag it back down. The `belt` area is
 excluded from this average entirely - reserved for future belt-slot-
 expanding items, unrelated to armor.
 
-Parts that can't be covered (horns, and by extension wings/antennae/stinger
-whenever they exist) inherit whatever coverage their parent's zone provides,
-via the same `getPartZone` fallback used everywhere else.
+Parts that can't be covered (horns, a stinger, antennae) inherit whatever
+coverage their parent's zone provides, via the same `getPartZone` fallback
+used everywhere else.
 
 ### Status effects
 
@@ -191,7 +202,9 @@ of how bleed works, there's no separate damage-over-time system.
 
 Currently defined: `fracture` (permanent, halves limb strength),
 `adrenaline` (character-wide, ignores condition penalties for its
-duration), `bleed` (stacking, untyped damage-per-stack).
+duration), `bleed` (stacking, untyped damage-per-stack), `poison` (stacking,
+toxic damage-per-stack - mechanically identical to bleed, just its own
+damage type and its own tick message, via `DOT_VERBS`).
 
 ### Abilities & action economy
 
@@ -236,8 +249,47 @@ than one foe at once - nothing does yet.
 
 `fist` (baseline unarmed), `chain_sword` (melee, slashing, applies 2 stacks
 of bleed on hit, grants Rev it up!), `laser_pistol` (ranged, fire damage,
-10-shot energy weapon, grants Charge Shot). `handedness` decides whether a
-normal attack with it is a quick or full action.
+10-shot energy weapon, grants Charge Shot), `stinger_sting` (melee,
+piercing, barely any damage but applies 5 stacks of poison - see "Natural
+weapons"). `handedness` decides whether a normal attack with it is a quick
+or full action.
+
+### Natural weapons
+
+Most attacks come from a MANIPULATE limb (a hand) using whatever's
+equipped there, or a bare fist if nothing is. A **natural weapon** is the
+other case: a part template with its own fixed `naturalWeapon` (a
+`weaponEntries` id) that attacks with it unconditionally - a stinger's
+sting, so far. `getAttackWeapon` picks between the two for any given part;
+`pickAttack` lists both kinds of attacker side by side. A natural weapon
+is never read from `equipped`, so unlike a held weapon it can't be swapped,
+dropped, or disarmed - the only way to take it away is destroying the part
+itself (see "Limb destruction & disarming", which every attacker - natural
+weapon or not - is already subject to).
+
+### Limb destruction & disarming
+
+A destroyed limb takes everything attached to it (further from the root)
+down with it: `isLimbFunctional` walks a part's whole ancestor chain, and
+if *any* of them (including itself) is at 0 health, nothing there can
+attack - `pickAttack` and weapon-granted abilities (`collectAbilities`)
+both check it. A destroyed arm disables the hand hanging off it without
+touching what's equipped there; a destroyed stinger just disables itself.
+
+A destroyed **hand** specifically goes one step further: whatever it was
+holding is knocked loose (`dropEquippedItem`, called from the enemy-attack
+branch of `runEncounter` - not from an arm being destroyed, only a hand).
+Dropped weapons are tracked per-encounter in `droppedItems` (never in
+`player.inventory` - the game has no "carry a spare unequipped weapon"
+concept, so there's nowhere else for one to go); a new **Pick Up** combat
+action (always a full action) re-equips one to its original slot
+(`pickDroppedItem`, same picker/Back convention as everywhere else) - still
+unusable, same as a bare-fisted punch from that hand would be, until the
+hand itself heals. Anything left unclaimed when the encounter ends is
+re-equipped automatically rather than actually ending up anywhere the
+player could interact with it. `dropEquippedItem` takes a slot directly, so
+a future disarm effect (an enemy skill, say - none exist yet) can reuse it
+without knowing anything about *why* something got dropped.
 
 ### Ammo
 
@@ -382,3 +434,12 @@ NPC-to-NPC conversation system.
   function plus a `speciesEntries` entry - nothing else references a
   species by name anywhere.
 - Save slots have no way to delete/rename, only overwrite.
+- The test dummy always attacks with a bare fist and doesn't go through
+  `equipped` at all, so limb destruction never disables *its* attacks and
+  it has nothing to drop - disarming (arm/hand destruction, a future disarm
+  skill) is a player-only mechanic for now, same as the dropped-weapon
+  system it's built on top of.
+- There's no way to carry a spare unequipped weapon in the inventory at
+  all - a dropped weapon not reclaimed mid-fight just re-equips itself when
+  the encounter ends rather than migrating anywhere the player could
+  interact with it directly.

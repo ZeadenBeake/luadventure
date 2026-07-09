@@ -142,11 +142,17 @@ local partEntries = {
     -- Neither of these have a zone of their own, same reasoning as horn
     -- above - a stinger or antenna can't be covered by apparel, so they
     -- inherit whatever protects the part they're attached to instead.
+    -- naturalWeapon marks a part as its own unarmed attack, separate from
+    -- (and not requiring) MANIPULATE/equipped-gear - see pickAttack. Unlike
+    -- a hand's weapon, it's never equipped and so can never be dropped or
+    -- disarmed; destroying the stinger itself is the only way to disable it
+    -- (see isLimbFunctional, which pickAttack already checks for everyone).
     stinger = {
         tags = {},
         health = 100,
         organSlots = { skin = "chitin_skin", bone = "chitin_bone", muscle = "human_muscle" },
         subSlots = {},
+        naturalWeapon = "stinger_sting",
     },
     antenna = {
         tags = {},
@@ -169,7 +175,9 @@ local partEntries = {
 -- we're going sci-fi) energy alike. Lasers will deal fire once they exist.
 -- untyped is the odd one out: it never gets a resistance multiplier of any
 -- kind, for stuff like bleeding that doesn't cleanly fit a "real" type.
-local damageTypes = { "bludgeoning", "piercing", "slashing", "fire", "frost", "radiation", "untyped" }
+-- toxic is poison's own damage type - a real one (unlike untyped), just one
+-- nothing resists yet.
+local damageTypes = { "bludgeoning", "piercing", "slashing", "fire", "frost", "radiation", "toxic", "untyped" }
 
 -- Every coverage zone (a body part category - see partEntries' `zone`) and
 -- the finer-grained areas within it. Areas only matter for apparel-vs-
@@ -216,6 +224,16 @@ local statusEntries = {
     fracture = { scope = "part", modifiers = { strength = 0.5 }, duration = -1 },
     adrenaline = { scope = "character", ignoresCondition = true, duration = 1 },
     bleed = { scope = "part", duration = 1, stacks = true, damagePerStack = "untyped" },
+    poison = { scope = "part", duration = 1, stacks = true, damagePerStack = "toxic" },
+}
+
+-- Verb for reporting a damagePerStack tick (see applyDamageOverTime) -
+-- keyed by statusId since "bleeds" wouldn't make sense for poison. Falls
+-- back to a generic phrase for any future damagePerStack status that
+-- doesn't bother adding its own.
+local DOT_VERBS = {
+    bleed = "bleeds",
+    poison = "is poisoned",
 }
 
 -- chain_sword's onHit is attached later, once applyPartStatus exists (see
@@ -246,6 +264,11 @@ local weaponEntries = {
         ammoClass = "energy",
         abilities = { "charge_shot" },
     },
+
+    -- A natural weapon (see partEntries.stinger), not equipment - barely
+    -- any direct damage, but onHit (attached below once applyPartStatus
+    -- exists) stacks a hefty dose of poison on every landed hit.
+    stinger_sting = { name = "Sting", damage = { min = 1, max = 1 }, type = "melee", range = 1, spread = 0, damageType = "piercing", handedness = "one-handed" },
 }
 
 -- Carried items, Pathfinder-style: bulk is a plain number, except 0.1
@@ -504,6 +527,7 @@ local function serializeBodyPart(part)
         health = part.health,
         maxHealth = part.maxHealth,
         rootLabel = part.rootLabel, -- only ever set on the root; nil elsewhere
+        endurance = part.endurance, -- a species trait, not template-derived (see newInsectoidBody) - nil for anyone without one
         organs = organs,
         genericOrgans = genericOrgans,
         statuses = statuses,
@@ -522,6 +546,7 @@ local function deserializeBodyPart(data, isRoot)
     part.health = data.health
     part.maxHealth = data.maxHealth
     part.rootLabel = data.rootLabel
+    part.endurance = data.endurance
     part.organs = {}
     for category, organId in pairs(data.organs) do
         part.organs[category] = organId
@@ -579,6 +604,12 @@ end
 -- didn't exist yet up there: a chain sword bites deep and keeps bleeding.
 weaponEntries.chain_sword.onHit = function(target)
     applyPartStatus(target, "bleed", 2)
+end
+
+-- Barely a scratch on its own, but 5 stacks of poison at once is a real
+-- threat over the next few rounds.
+weaponEntries.stinger_sting.onHit = function(target)
+    applyPartStatus(target, "poison", 5)
 end
 
 -- Ticks every active status on a combatant (itself and every part of its
@@ -752,6 +783,21 @@ local function isDead(torso)
         end
     end)
     return dead
+end
+
+-- A destroyed limb takes everything attached to it down with it - a
+-- destroyed arm can't attack, and neither can a perfectly healthy hand
+-- still hanging off the end of it. Checked by both pickAttack (unarmed or
+-- otherwise) and weapon-granted abilities.
+local function isLimbFunctional(part)
+    local current = part
+    while current do
+        if current.health <= 0 then
+            return false
+        end
+        current = current.parent
+    end
+    return true
 end
 
 -- Gives a child slot a side-qualified label when its parent has one, so e.g.
@@ -954,19 +1000,22 @@ end
 -- Applies damage to a single part, adjusted by that part's own resistance to
 -- the given damage type (1 if the part doesn't specify one) - except
 -- untyped, which never gets a resistance multiplier of any kind, full stop -
--- and then by the owner's worn coverage against that type, as a flat
--- reduction. Returns the actual amount applied, post-everything, so callers
--- can report it honestly. Otherwise doesn't do anything beyond tracking
--- health yet - stat penalties for damaged/destroyed limbs are a later
--- concern. Only a MORTAL part reaching 0 has any effect right now (see
--- isDead).
+-- then by `endurance` (a flat percentage, e.g. an insectoid's chitin shell
+-- at 0.1 - unlike resistance, this one applies to every damage type with no
+-- exception, untyped included), and then by the owner's worn coverage
+-- against that type, as a flat reduction. Returns the actual amount
+-- applied, post-everything, so callers can report it honestly. Otherwise
+-- doesn't do anything beyond tracking health yet - stat penalties for
+-- damaged/destroyed limbs are a later concern. Only a MORTAL part reaching
+-- 0 has any effect right now (see isDead).
 local function damagePart(owner, part, amount, damageType)
     local resistance = 1
     if damageType ~= "untyped" then
         resistance = (part.resistances and part.resistances[damageType]) or 1
     end
+    local endurance = part.endurance or 0
     local coverage = getCoverage(owner, part, damageType)
-    local applied = math.max(0, math.floor(amount * resistance - coverage + 0.5))
+    local applied = math.max(0, math.floor(amount * resistance * (1 - endurance) - coverage + 0.5))
     part.health = math.max(0, part.health - applied)
     return applied
 end
@@ -980,11 +1029,12 @@ local function healPart(part, amount)
 end
 
 -- Runs once a round, before decrementStatuses: any part-scoped status with
--- damagePerStack (bleed, for now) deals damage equal to its *current*
--- stack count to its own part, using that status's own damage type (bleed
--- is untyped). Returns a list of {label, dealt} for whatever ticked, so the
--- caller can report it - the actual stack removal is decrementStatuses'
--- ordinary decrement, run right after this.
+-- damagePerStack (bleed, poison) deals damage equal to its *current* stack
+-- count to its own part, using that status's own damage type. Returns a
+-- list of {label, dealt, statusId} for whatever ticked, so the caller can
+-- report it (statusId picks the right verb - see DOT_VERBS) - the actual
+-- stack removal is decrementStatuses' ordinary decrement, run right after
+-- this.
 local function applyDamageOverTime(combatant)
     local ticks = {}
     for _, entry in ipairs(collectLabeledParts(combatant.body)) do
@@ -992,7 +1042,7 @@ local function applyDamageOverTime(combatant)
             local def = statusEntries[statusId]
             if def.damagePerStack and duration > 0 then
                 local dealt = damagePart(combatant, entry.part, duration, def.damagePerStack)
-                table.insert(ticks, { label = entry.label, dealt = dealt })
+                table.insert(ticks, { label = entry.label, dealt = dealt, statusId = statusId })
             end
         end
     end
@@ -1048,15 +1098,17 @@ local function newInsectoidBody(globalTags)
     attachPart(body.subSlots.left_leg, "foot", "human_foot", unlockedTags)
     attachPart(body.subSlots.right_leg, "foot", "human_foot", unlockedTags)
     attachPart(body, "tail", "stinger", unlockedTags)
+    attachPart(body.subSlots.head, "antennae", "antenna", unlockedTags)
     installGenericOrgan(body.subSlots.head, "insectoid_features", unlockedTags)
 
-    -- The endurance side of chitin skin's tradeoff: a tougher shell nets
-    -- out to a small flat health bonus across the whole body. The reflex
-    -- penalty side is applied separately, to the character stat itself -
-    -- see speciesEntries.
+    -- The endurance side of chitin skin's tradeoff: not extra health, a
+    -- flat 10% damage reduction on every hit (see damagePart) - applied to
+    -- every part uniformly rather than baked into any one template, since
+    -- most of these parts (arms/legs/hands/feet) are shared with the human
+    -- body plan and shouldn't get it there. The reflex penalty side is
+    -- applied separately, to the character stat itself - see speciesEntries.
     walkBody(body, function(part)
-        part.maxHealth = part.maxHealth + 10
-        part.health = part.maxHealth
+        part.endurance = 0.1
     end)
 
     return body
@@ -1972,6 +2024,8 @@ local function promptAction(loc, enemy, restricted)
     combatWin.write("[5] Ability")
     combatWin.setCursorPos(1, nextLine + 8)
     combatWin.write("[6] Reload (quick)")
+    combatWin.setCursorPos(1, nextLine + 9)
+    combatWin.write("[7] Pick Up (full)")
     combatWin.setVisible(true)
 
     while true do
@@ -1982,6 +2036,7 @@ local function promptAction(loc, enemy, restricted)
         elseif key == keys.four then return "flee"
         elseif key == keys.five then return "ability"
         elseif key == keys.six then return "reload"
+        elseif key == keys.seven then return "pickup"
         end
     end
 end
@@ -2032,21 +2087,38 @@ local function getWieldedWeapon(equipped, label)
     return weaponEntries.fist
 end
 
--- Lists every MANIPULATE limb the attacker has (hands, by default) as a
--- weapon choice, but only the ones currently in range - range is a hard cap,
--- not a penalty. STRENGTH only scales melee weapons; spread is folded into
--- the shown hit chance for every weapon, melee included, since it's driven
--- by actual distance rather than weapon type. When restricted (mid a quick
--- action's bonus turn), two-handed weapons are left out entirely, same as
--- an out-of-range one - an out-of-ammo weapon is left out the same way.
--- Returns nil if nothing qualifies at all, or "back" (as the first value) if
--- the player explicitly backed out instead of picking one.
+-- Whatever a given limb would actually attack with: equipped gear (or a
+-- bare fist) for a MANIPULATE limb, or a fixed natural weapon for a part
+-- whose template declares one (a stinger's sting, so far). Natural weapons
+-- aren't equipment - never read from `equipped`, so they can't be swapped,
+-- dropped, or disarmed the way a held weapon can. Returns nil if this part
+-- has no way to attack at all.
+local function getAttackWeapon(entry, equipped)
+    if getPartLocalTags(entry.part).MANIPULATE then
+        return getWieldedWeapon(equipped, entry.label)
+    end
+    local template = partEntries[entry.part.template]
+    return template and template.naturalWeapon and weaponEntries[template.naturalWeapon] or nil
+end
+
+-- Lists every limb the attacker can actually fight with as a weapon choice
+-- - MANIPULATE limbs (hands, by default) plus anything with a natural
+-- weapon of its own (a stinger) - but only the ones currently in range and
+-- still functional (see isLimbFunctional: a destroyed arm takes its hand
+-- down with it, a destroyed stinger just takes itself). Range is a hard
+-- cap, not a penalty. STRENGTH only scales melee weapons; spread is folded
+-- into the shown hit chance for every weapon, melee included, since it's
+-- driven by actual distance rather than weapon type. When restricted (mid a
+-- quick action's bonus turn), two-handed weapons are left out entirely,
+-- same as an out-of-range one - an out-of-ammo weapon is left out the same
+-- way. Returns nil if nothing qualifies at all, or "back" (as the first
+-- value) if the player explicitly backed out instead of picking one.
 local function pickAttack(equipped, enemy, distance, restricted)
     local limbs = collectLabeledParts(player.body)
     local options = {}
     for _, entry in ipairs(limbs) do
-        if getPartLocalTags(entry.part).MANIPULATE then
-            local weapon = getWieldedWeapon(equipped, entry.label)
+        local weapon = getAttackWeapon(entry, equipped)
+        if weapon and isLimbFunctional(entry.part) then
             local isQuick = weapon.handedness ~= "two-handed"
             local hasAmmo = not weapon.ammoCapacity
                 or (player.ammo[entry.label] or 0) >= (weapon.ammoPerShot or 1)
@@ -2066,7 +2138,7 @@ local function pickAttack(equipped, enemy, distance, restricted)
     combatWin.write("Choose your attack: (distance " .. distance .. ")")
     local row = 3
     for i, entry in ipairs(options) do
-        local weapon = getWieldedWeapon(equipped, entry.label)
+        local weapon = getAttackWeapon(entry, equipped)
         local hitPercent = math.floor(getFinalHitChance(player, enemy, weapon, distance) * 100 + 0.5)
         local speedTag = weapon.handedness == "two-handed" and " (full)" or " (quick)"
         local ammoTag = weapon.ammoCapacity and (" [%d/%d ammo]"):format(player.ammo[entry.label] or 0, weapon.ammoCapacity) or ""
@@ -2095,7 +2167,7 @@ local function pickAttack(equipped, enemy, distance, restricted)
         if index == backIndex then
             return "back", nil
         elseif index and options[index] then
-            return options[index], getWieldedWeapon(equipped, options[index].label)
+            return options[index], getAttackWeapon(options[index], equipped)
         end
     end
 end
@@ -2177,7 +2249,12 @@ local function collectAbilities(combatant)
                     break
                 end
             end
-            tryAdd(weapon, handPart, nil, slot)
+            -- A weapon's abilities need a working hand to use it with, same
+            -- as an ordinary attack does (see pickAttack) - Rev it up!
+            -- shouldn't be usable out of a hand that's been destroyed.
+            if not handPart or isLimbFunctional(handPart) then
+                tryAdd(weapon, handPart, nil, slot)
+            end
         end
     end
 
@@ -2273,6 +2350,57 @@ local function pickReloadTarget(combatant)
             return "back"
         elseif index and options[index] then
             return options[index]
+        end
+    end
+end
+
+-- Knocks whatever's equipped in a slot right out of the player's hands -
+-- a destroyed hand (see runEncounter's enemy-attack branch), or later, some
+-- disarm effect. Removed from `equipped` entirely and tracked in
+-- `droppedItems` until it's picked back up mid-fight (see pickDroppedItem)
+-- or auto-returned to the inventory once the encounter ends. Returns the
+-- dropped weapon's id, or nil if that slot had nothing equipped to drop.
+-- Equipped slots only ever hold weapon ids (weaponEntries), never a plain
+-- itemEntries id, however "item"-sounding the field names get below.
+local function dropEquippedItem(droppedItems, slot)
+    local weaponId = player.equipped[slot]
+    if not weaponId or weaponId == "none" then
+        return nil
+    end
+    player.equipped[slot] = "none"
+    table.insert(droppedItems, { slot = slot, weaponId = weaponId })
+    return weaponId
+end
+
+-- Everything currently lying on the ground this encounter. Returns nil if
+-- there's nothing to pick up at all, or "back" if the player explicitly
+-- backed out instead of picking one - same convention as pickReloadTarget.
+local function pickDroppedItem(droppedItems)
+    if #droppedItems == 0 then
+        return nil
+    end
+
+    combatWin.setVisible(false)
+    combatWin.clear()
+    combatWin.setCursorPos(1, 1)
+    combatWin.write("Pick up which item?")
+    local row = 3
+    for i, dropped in ipairs(droppedItems) do
+        row = row + writeWrapped(combatWin, 1, row, ("[%s] %s (%s)"):format(
+            digitLabel(i), weaponEntries[dropped.weaponId].name, dropped.slot
+        ))
+    end
+    local backIndex = #droppedItems + 1
+    writeWrapped(combatWin, 1, row, "[" .. digitLabel(backIndex) .. "] Back")
+    combatWin.setVisible(true)
+
+    while true do
+        local _, key = os.pullEvent("key")
+        local index = keyToNumber[key]
+        if index == backIndex then
+            return "back"
+        elseif index and droppedItems[index] then
+            return index
         end
     end
 end
@@ -2465,6 +2593,21 @@ local function runEncounter(triggeringObject)
     -- full actions are off the table entirely for the rest of the round.
     local quickened = false
 
+    -- Whatever's currently lying on the ground this encounter (a weapon
+    -- knocked out of a destroyed hand - see the enemy-attack branch below).
+    -- Anything still here when the fight ends is re-equipped automatically
+    -- rather than staying equipped in a hand that's still gone - there's no
+    -- "carry a spare unequipped weapon" concept in the inventory system to
+    -- return it to instead, so this is the only place it can actually end
+    -- up. It'll simply be unusable again until that hand heals, same as an
+    -- unarmed punch from it would be (see isLimbFunctional).
+    local droppedItems = {}
+    local function returnUnclaimedDrops()
+        for _, dropped in ipairs(droppedItems) do
+            player.equipped[dropped.slot] = dropped.weaponId
+        end
+    end
+
     while true do
         -- The start of the player's turn: check the scene before prompting
         -- for an action at all, rather than each attack path guessing
@@ -2486,6 +2629,7 @@ local function runEncounter(triggeringObject)
                 end
             end
 
+            returnUnclaimedDrops()
             return false
         end
 
@@ -2493,6 +2637,7 @@ local function runEncounter(triggeringObject)
 
         if action == "flee" then
             showCombatMessage({ "You break off and flee.", "", "Press any key." }, true)
+            returnUnclaimedDrops()
             return false
         end
 
@@ -2617,6 +2762,24 @@ local function runEncounter(triggeringObject)
             end
         end
 
+        if action == "pickup" then
+            local index = pickDroppedItem(droppedItems)
+            if index == "back" then
+                -- cancelled, nothing happened
+            elseif not index then
+                showCombatMessage({ "Nothing to pick up.", "", "Press any key." }, true)
+            else
+                local dropped = table.remove(droppedItems, index)
+                player.equipped[dropped.slot] = dropped.weaponId
+                showCombatMessage({
+                    "You snatch up the " .. weaponEntries[dropped.weaponId].name .. " and get a grip on it again.",
+                    "",
+                    "Press any key.",
+                }, true)
+                speed = "full"
+            end
+        end
+
         -- nil: nothing happened, quickened untouched, prompt again.
         -- instant: another turn, quickened untouched either way.
         -- quick: first one just flips quickened true; a second one (already
@@ -2683,7 +2846,25 @@ local function runEncounter(triggeringObject)
                         }, true)
 
                         if dead then
+                            returnUnclaimedDrops()
                             return true
+                        end
+
+                        -- A destroyed hand can't hold onto anything - the
+                        -- weapon actually falls, rather than just sitting
+                        -- unusable in a slot attached to a ruined hand (an
+                        -- arm being destroyed instead just disables
+                        -- attacking - see isLimbFunctional/pickAttack -
+                        -- nothing gets dropped for that).
+                        if pick.part.health <= 0 then
+                            local droppedWeaponId = dropEquippedItem(droppedItems, pick.label)
+                            if droppedWeaponId then
+                                showCombatMessage({
+                                    "Your " .. pick.label .. " goes limp - the " .. weaponEntries[droppedWeaponId].name .. " clatters to the ground!",
+                                    "",
+                                    "Press any key.",
+                                }, true)
+                            end
                         end
                     end
                 end
@@ -2695,10 +2876,12 @@ local function runEncounter(triggeringObject)
             -- ticks damage before decrementing, like bleed) are concerned.
             local dotMessages = {}
             for _, tick in ipairs(applyDamageOverTime(player)) do
-                table.insert(dotMessages, "Your " .. tick.label .. " bleeds for " .. tick.dealt .. "!")
+                local verb = DOT_VERBS[tick.statusId] or "takes damage"
+                table.insert(dotMessages, "Your " .. tick.label .. " " .. verb .. " for " .. tick.dealt .. "!")
             end
             for _, tick in ipairs(applyDamageOverTime(enemy)) do
-                table.insert(dotMessages, "The " .. enemy.name .. "'s " .. tick.label .. " bleeds for " .. tick.dealt .. "!")
+                local verb = DOT_VERBS[tick.statusId] or "takes damage"
+                table.insert(dotMessages, "The " .. enemy.name .. "'s " .. tick.label .. " " .. verb .. " for " .. tick.dealt .. "!")
             end
             if #dotMessages > 0 then
                 table.insert(dotMessages, "")
@@ -2709,6 +2892,7 @@ local function runEncounter(triggeringObject)
 
             if isDead(player.body) then
                 showCombatMessage({ "You died.", "", "Press any key." }, true)
+                returnUnclaimedDrops()
                 return true
             end
 
