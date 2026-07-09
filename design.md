@@ -62,8 +62,9 @@ the root and is never swapped wholesale; everything else is a **part
 template** (`partEntries`) instantiated (`instantiatePart`) and attached
 into a named sub-slot (`attachPart`) - `head`, `left_arm`, `left_arm.hand`,
 and so on. Extra slots (a second pair of arms, wings, a tail) exist on the
-torso already, gated behind tags (`MULTI_LIMBED`, `WINGED`, `TAILED`) that
-nothing grants yet.
+torso already, gated behind tags (`MULTI_LIMBED`, `WINGED`, `TAILED`) -
+nothing grants `MULTI_LIMBED` yet, but the insectoid species grants
+`WINGED`/`TAILED` (see "Species").
 
 Each part has:
 
@@ -80,8 +81,8 @@ Each part has:
   engine-only (never shown on player-facing UI).
 - **Zone** - which apparel coverage zone this part's protection comes from
   (see "Apparel & coverage"). Parts that can't be covered by clothing at all
-  (horns are the one example so far) just don't set one, and inherit
-  whatever zone their parent has instead (`getPartZone` walks up the tree).
+  (horns, a stinger, antennae) just don't set one, and inherit whatever zone
+  their parent has instead (`getPartZone` walks up the tree).
 
 Organs and slots can `requires`/`conflicts` tags, and organs can
 `grantsLocal`/`grantsGlobal` tags of their own - that's the whole
@@ -95,6 +96,42 @@ upper arm makes the hand attached to it hit harder too, not just the arm
 itself. `getLimbStrength` combines that with each ancestor's own condition
 (current health / max health), so a fracture on the arm still throttles a
 perfectly healthy hand at the end of it.
+
+## Species
+
+`speciesEntries` - each has a `build(globalTags)` function (same signature
+as `newHumanBody`) that constructs a fresh body, and `statAdjustments`, flat
+one-time deltas applied to `character.stats` at creation (same granularity
+as character creation's own stat points, just species-driven). Chosen
+during character creation (see below); nothing about picking a species
+touches anything species-specific elsewhere, so adding a new one is just
+adding a `build` function and an entry in the table.
+
+- **Human** (`newHumanBody`) - the original baseline, unchanged.
+- **Insectoid** (`newInsectoidBody`) - chitin skin/bone instead of the human
+  baseline (`chitin_skin`/`chitin_bone`); the bone organ is what actually
+  grants `TAILED`/`WINGED` globally (swap it out and those slots would lock
+  again), unlocking the torso's tail slot for a `stinger` and leaving the
+  wing slots deliberately empty for now. The root part is relabeled
+  "abdomen" instead of "torso" (`body.rootLabel`, read by
+  `collectLabeledParts` - purely cosmetic, doesn't change how anything
+  works structurally) and, same as `newTorso` always sets up, is MORTAL.
+  The head (`insectoid_head`) has an antennae slot (also left unpopulated)
+  and installs a generic `insectoid_features` organ that grants `UNSIGHTLY`
+  globally - compound eyes, mandibles, the whole look, modeled as a generic
+  organ rather than a part-intrinsic tag since there's no mechanism for a
+  part's mere shape to grant a global tag outside the organ-grant system.
+  Chitin skin's tradeoff (small reflex penalty, small endurance bonus) is
+  split across two different mechanisms for two different reasons: the
+  reflex penalty is a flat `statAdjustments.reflex = -0.05` (there's no
+  per-part reflex modifier consumed by anything yet, so a real organ
+  modifier wouldn't do anything); the endurance bonus is a flat +10 to
+  every body part's max health, applied once after the whole body is built.
+
+`UNSIGHTLY` doesn't affect anything mechanically yet beyond one hardcoded
+example (see "Dialogue templating") - the intent is NPC reactions and
+harder social situations (a shop haggling worse, say) once there's more of
+either to react with.
 
 ## Stats & combat
 
@@ -271,10 +308,13 @@ folder, so nothing save-related touches this repo.
 
 Runs once at startup, before the very first render: name (free text),
 pronouns (Male/Female/Nonbinary presets, or "Custom pronouns" for two
-direct text fields), then 5 points to spend across
-strength/reflex/aim, each worth a flat +5% (`stats.x = stats.x +
-points*0.05`, not compounding). Confirm is locked until all 5 points are
-spent; a Reset option clears an in-progress allocation back to zero.
+direct text fields), species (see "Species" - this is where `player.body`
+actually gets built, since it needs a menu, which needs the game's windows
+to already exist), then 5 points to spend across strength/reflex/aim, each
+worth a flat +5% (`stats.x = stats.x + points*0.05`, not compounding,
+stacking on top of whatever the chosen species already adjusted). Confirm
+is locked until all 5 points are spent; a Reset option clears an
+in-progress allocation back to zero.
 
 ## Dialogue templating
 
@@ -285,8 +325,16 @@ reads most naturally, and it'll still come out matched to whoever's
 actually playing) against a character's `name`/`pronouns` fields. Wired
 transparently into `showInteraction`, so every blurb/greeting/quest line in
 the game gets substitution for free without any call site needing to
-remember to invoke it. Nothing else reads a player's pronouns yet - this is
-the first and so far only consumer.
+remember to invoke it.
+
+A greeting that depends on live player state (rather than always showing
+the same lines) can't just be a table sitting on the object - saving
+captures the whole world as plain data, and a function isn't serializable
+at all. `dynamicGreetings` holds these instead, keyed by a plain string id
+(`obj.greetingId`, same convention as `questId`/`itemId`/`saveId`) looked
+up and called at interaction time. The one example so far: the village's
+two gossiping NPCs (see "NPCs") say something different if the player is
+`UNSIGHTLY`.
 
 ## Digit/letter menus
 
@@ -311,9 +359,10 @@ door in the grasslands specifically so it doesn't interrupt ordinary
 exploration, but is still there to spar with on demand.
 
 Two purely-flavor "Villager" NPCs stand next to each other in the village
-sharing one gossip line about the player (see "Dialogue templating") -
-functionally two adjacent people who happen to say the exact same thing,
-not a real NPC-to-NPC conversation system.
+sharing one dynamic gossip line about the player (see "Dialogue
+templating") - functionally two adjacent people who happen to say the
+exact same thing (whichever variant currently applies), not a real
+NPC-to-NPC conversation system.
 
 ## Known gaps / likely next steps
 
@@ -325,5 +374,11 @@ not a real NPC-to-NPC conversation system.
 - Only one enemy type (the test dummy) and one quest exist; multi-enemy
   scenes work mechanically (`scene` is already a list) but nothing spawns
   more than one foe at a time yet.
-- Pronouns aren't consumed anywhere except the two gossiping villagers.
+- Pronouns are consumed by name/`{{subject}}`/`{{object}}` templating;
+  `UNSIGHTLY` by one hardcoded dialogue check. Neither affects anything
+  beyond that yet - social mechanics (haggling, reactions) wait on NPCs and
+  a shop system that don't exist yet either.
+- Only one non-human species exists. Adding another is just a `build`
+  function plus a `speciesEntries` entry - nothing else references a
+  species by name anywhere.
 - Save slots have no way to delete/rename, only overwrite.

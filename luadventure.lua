@@ -19,9 +19,21 @@ local organEntries = {
     human_vitals = { category = "vitals" },
     human_auxiliary = { category = "auxiliary" },
 
-    -- A handful of non-baseline examples, mostly to prove the
-    -- requires/conflicts/grants machinery actually works end to end.
-    chitin_bone = { category = "bone", grantsLocal = { "CHITIN" } },
+    -- Insectoid's skin/bone: chitin instead of the human baseline. The
+    -- exoskeleton is what actually supports a tail or wings at all, hence
+    -- granting TAILED/WINGED globally here rather than on the torso itself
+    -- - swap the bone organ out and those slots would lock again. The
+    -- species' own reflex penalty/endurance bonus (see speciesEntries)
+    -- isn't modeled as an organ modifier - there's no live system that
+    -- consumes a per-part reflex modifier yet, so it's just a flat
+    -- character-stat adjustment applied once at creation instead.
+    chitin_skin = { category = "skin", grantsLocal = { "SKIN" } },
+    chitin_bone = { category = "bone", grantsLocal = { "CHITIN" }, grantsGlobal = { "TAILED", "WINGED" } },
+
+    -- Compound eyes, mandibles, the general look - a generic organ (not a
+    -- swappable category slot) since it's about the head's fundamental
+    -- shape rather than something you could organ-swap away.
+    insectoid_features = { grantsGlobal = { "UNSIGHTLY" } },
 
     subdermal_plating = { -- generic organ, not tied to a hardcoded category
         requires = { "SKIN" },
@@ -103,13 +115,43 @@ local partEntries = {
         subSlots = {},
     },
 
-    -- Test case for coverage inheritance: no species has these for real yet,
-    -- but a horn can't be covered by anything, so it has no zone of its own
-    -- - getPartZone falls through to whatever's attached to (the head).
+    -- No species uses this one for real yet, but a horn can't be covered
+    -- by anything, so it has no zone of its own - getPartZone falls
+    -- through to whatever it's attached to (the head).
     horn = {
         tags = {},
         health = 100,
         organSlots = { skin = "human_skin", bone = "human_bone", muscle = "human_muscle" },
+        subSlots = {},
+    },
+
+    -- Insectoid's head - same shape as a human head (subSlots is where the
+    -- horns/antennae/etc difference actually lives), just chitin instead of
+    -- skin/bone, and unsettling enough to grant UNSIGHTLY globally (see
+    -- insectoid_features).
+    insectoid_head = {
+        tags = { MORTAL = true },
+        health = 100,
+        zone = "head",
+        organSlots = { skin = "chitin_skin", bone = "chitin_bone", muscle = "human_muscle" },
+        subSlots = {
+            antennae = { requires = {} },
+        },
+    },
+
+    -- Neither of these have a zone of their own, same reasoning as horn
+    -- above - a stinger or antenna can't be covered by apparel, so they
+    -- inherit whatever protects the part they're attached to instead.
+    stinger = {
+        tags = {},
+        health = 100,
+        organSlots = { skin = "chitin_skin", bone = "chitin_bone", muscle = "human_muscle" },
+        subSlots = {},
+    },
+    antenna = {
+        tags = {},
+        health = 100,
+        organSlots = { skin = "chitin_skin", bone = "chitin_bone", muscle = "human_muscle" },
         subSlots = {},
     },
 }
@@ -461,6 +503,7 @@ local function serializeBodyPart(part)
         template = part.template,
         health = part.health,
         maxHealth = part.maxHealth,
+        rootLabel = part.rootLabel, -- only ever set on the root; nil elsewhere
         organs = organs,
         genericOrgans = genericOrgans,
         statuses = statuses,
@@ -478,6 +521,7 @@ local function deserializeBodyPart(data, isRoot)
     local part = isRoot and newTorso() or instantiatePart(data.template)
     part.health = data.health
     part.maxHealth = data.maxHealth
+    part.rootLabel = data.rootLabel
     part.organs = {}
     for category, organId in pairs(data.organs) do
         part.organs[category] = organId
@@ -727,6 +771,9 @@ end
 -- The walk already visits a part's own children immediately after it and
 -- before any sibling's subtree, so this is already in proper depth-first
 -- tree order - nothing needed there, just carrying the depth along.
+-- `torso.rootLabel` lets a species call the root part something other than
+-- "torso" (an insectoid's is an abdomen) without changing anything about
+-- how it actually works structurally.
 local function collectLabeledParts(torso)
     local parts = {}
     local function walk(part, label, depth)
@@ -737,7 +784,7 @@ local function collectLabeledParts(torso)
             end
         end
     end
-    walk(torso, "torso", 0)
+    walk(torso, torso.rootLabel or "torso", 0)
     return parts
 end
 
@@ -970,6 +1017,69 @@ local function newHumanBody(globalTags)
     return body
 end
 
+-- Insectoid body plan: an abdomen (same shape as a torso, just relabeled -
+-- see collectLabeledParts) with chitin skin/bone, which is what unlocks its
+-- tail (filled with a stinger) and wing slots (deliberately left empty -
+-- nothing attaches there yet); a head with an antennae slot and an
+-- inherent UNSIGHTLY global tag. Arms/legs/hands/feet are unchanged from
+-- the human plan - nothing about this species is different there.
+local function newInsectoidBody(globalTags)
+    globalTags = globalTags or {}
+    local body = newTorso()
+    body.rootLabel = "abdomen"
+    installCategoryOrgan(body, "skin", "chitin_skin", globalTags)
+    installCategoryOrgan(body, "bone", "chitin_bone", globalTags)
+
+    -- chitin_bone's global grants (TAILED, WINGED) need to be knowable
+    -- right now to unlock the tail slot below, rather than waiting on the
+    -- caller's own post-construction recalcGlobalTags pass.
+    local unlockedTags = recalcGlobalTags(body)
+    for tag in pairs(globalTags) do
+        unlockedTags[tag] = true
+    end
+
+    attachPart(body, "head", "insectoid_head", unlockedTags)
+    attachPart(body, "left_arm", "human_arm", unlockedTags)
+    attachPart(body, "right_arm", "human_arm", unlockedTags)
+    attachPart(body, "left_leg", "human_leg", unlockedTags)
+    attachPart(body, "right_leg", "human_leg", unlockedTags)
+    attachPart(body.subSlots.left_arm, "hand", "human_hand", unlockedTags)
+    attachPart(body.subSlots.right_arm, "hand", "human_hand", unlockedTags)
+    attachPart(body.subSlots.left_leg, "foot", "human_foot", unlockedTags)
+    attachPart(body.subSlots.right_leg, "foot", "human_foot", unlockedTags)
+    attachPart(body, "tail", "stinger", unlockedTags)
+    installGenericOrgan(body.subSlots.head, "insectoid_features", unlockedTags)
+
+    -- The endurance side of chitin skin's tradeoff: a tougher shell nets
+    -- out to a small flat health bonus across the whole body. The reflex
+    -- penalty side is applied separately, to the character stat itself -
+    -- see speciesEntries.
+    walkBody(body, function(part)
+        part.maxHealth = part.maxHealth + 10
+        part.health = part.maxHealth
+    end)
+
+    return body
+end
+
+-- Every species a character can be built as. `build(globalTags)` mirrors
+-- newHumanBody's own signature; `statAdjustments` are flat, one-time deltas
+-- applied to character.stats once at creation - the same granularity as
+-- character creation's own +5%-per-point stat allocation, just
+-- species-driven instead of player-chosen.
+local speciesEntries = {
+    human = {
+        name = "Human",
+        build = newHumanBody,
+        statAdjustments = {},
+    },
+    insectoid = {
+        name = "Insectoid",
+        build = newInsectoidBody,
+        statAdjustments = { reflex = -0.05 },
+    },
+}
+
 local location = {
     name = "",
     directions = {
@@ -1097,15 +1207,12 @@ player.pronouns = { subject = "they", object = "them" }
 player.quests = {}
 player.killLog = {}
 
--- Player starts as a baseline human.
+-- Body/globalTags are built once species is actually chosen (see
+-- runCharacterCreation, run once at startup, right before the first
+-- render) - defaulted here only so nothing reads a nil body if that
+-- somehow doesn't happen first.
 player.globalTags = {}
 player.body = newHumanBody(player.globalTags)
-
--- A chest implant lets the player pop adrenaline for a turn on demand via
--- the Ability action, instead of it just being permanently on.
-installGenericOrgan(player.body, "adrenal_auto_injector", player.globalTags)
-
-player.globalTags = recalcGlobalTags(player.body)
 
 -- Starting loadout: a chain sword in the left hand, a laser pistol in the
 -- right, starting fully loaded (reloading isn't built yet).
@@ -1195,30 +1302,34 @@ local questEntries = {
     },
 }
 
--- Plain array copy - used so two map objects can share the exact same
--- dialogue text without sharing the exact same table. Saving the world
--- snapshot serializes every location's objects as one big structure, and
--- textutils.serialize refuses to serialize a table that shows up more than
--- once in there (it can't represent shared identity, only tree-shaped
--- data), so anything reused across multiple objects needs its own copy.
-local function copyLines(lines)
-    local copy = {}
-    for i, line in ipairs(lines) do
-        copy[i] = line
-    end
-    return copy
-end
-
--- Two villagers gossiping about the player right in front of them, without
--- realizing {{subject}} can hear every word - functionally just two
--- adjacent people who happen to say the exact same thing (see dialogue()),
--- rather than a real NPC-to-NPC conversation system. Each gets its own copy
--- of the lines (see copyLines) rather than sharing one table.
-local villagerGossip = {
-    "\"Psst - have you heard about {{name}}?\"",
-    "\"They say {{subject}} walked right up to that",
-    "test dummy without blinking. Word is nothing",
-    "rattles {{object}} one bit!\"",
+-- Greetings that depend on live player state (rather than always showing
+-- the same lines) can't just be a table sitting on the object - a save
+-- captures the whole world snapshot as plain data, and a function isn't
+-- serializable at all. So a dynamic greeting is a plain string id
+-- (`greetingId`, same convention as questId/itemId/saveId) looked up in
+-- here at interaction time instead - never stored on the object itself.
+local dynamicGreetings = {
+    -- Two villagers gossiping about the player right in front of them,
+    -- without realizing {{subject}} can hear every word - functionally
+    -- just two adjacent people who happen to say the exact same thing (see
+    -- dialogue()), rather than a real NPC-to-NPC conversation system. An
+    -- UNSIGHTLY player (an insectoid's freaky-looking head, so far - see
+    -- speciesEntries/insectoid_features) gets gossiped about differently.
+    villager_gossip = function()
+        if player.globalTags.UNSIGHTLY then
+            return {
+                "\"Psst - have you seen {{name}}?\"",
+                "\"Something about {{object}} just... unsettles",
+                "me. Can't put my finger on why.\"",
+            }
+        end
+        return {
+            "\"Psst - have you heard about {{name}}?\"",
+            "\"They say {{subject}} walked right up to that",
+            "test dummy without blinking. Word is nothing",
+            "rattles {{object}} one bit!\"",
+        }
+    end,
 }
 
 -- Environment interactions: * is anything you can walk up to and interact
@@ -1234,8 +1345,8 @@ world.village.objects = {
     { kind = "person", x = 2, y = 4, name = "Villager",
       greeting = { "\"Nice weather we're having, isn't it?\"" } },
     { kind = "save_point", x = 6, y = 4, saveId = "village_terminal" },
-    { kind = "person", x = 1, y = 5, name = "Villager", greeting = copyLines(villagerGossip) },
-    { kind = "person", x = 2, y = 5, name = "Villager", greeting = copyLines(villagerGossip) },
+    { kind = "person", x = 1, y = 5, name = "Villager", greetingId = "villager_gossip" },
+    { kind = "person", x = 2, y = 5, name = "Villager", greetingId = "villager_gossip" },
 }
 
 -- A short wall with a door in it, hiding the test dummy in a small back
@@ -2668,7 +2779,8 @@ end
 -- !)" cycle every time.
 local function interactWithPerson(obj)
     if not obj.questId then
-        showInteraction(obj.greeting or { "\"...\"" }, { "Leave" })
+        local greeting = obj.greetingId and dynamicGreetings[obj.greetingId]() or obj.greeting
+        showInteraction(greeting or { "\"...\"" }, { "Leave" })
         return
     end
 
@@ -2716,7 +2828,8 @@ local function writeSaveSlot(slot, data)
     end
     local h = fs.open(getSaveSlotPath(slot), "w")
     -- allow_repetitions: nothing in save data should genuinely be a shared
-    -- table (see copyLines), but this is cheap insurance against a future
+    -- table (see dynamicGreetings for how conditional dialogue avoids this
+    -- exact problem), but this is cheap insurance against a future
     -- accidental one triggering the same "cannot serialize table with
     -- repeated entries" error again instead of just duplicating the data.
     h.write(textutils.serialize(data, { allow_repetitions = true }))
@@ -3121,6 +3234,19 @@ local function pickPronouns()
     return subject, object
 end
 
+-- Display order for the species menu - speciesEntries (defined alongside
+-- newHumanBody/newInsectoidBody) has everything else about each one.
+local SPECIES_ORDER = { "human", "insectoid" }
+
+local function pickSpecies()
+    local options = {}
+    for i, id in ipairs(SPECIES_ORDER) do
+        options[i] = speciesEntries[id].name
+    end
+    local choice = showInteraction({ "Choose your species:" }, options)
+    return SPECIES_ORDER[choice]
+end
+
 -- Five points, each worth a flat +5% to one of strength/reflex/aim (added
 -- once, in runCharacterCreation - not compounding, so 3 points in strength
 -- is stats.strength = 1 + 3*0.05 = 1.15). "Reset" clears all of them back to
@@ -3169,9 +3295,11 @@ local function runStatAllocation()
     end
 end
 
--- Runs once at startup: name, pronouns, then stat points - everything
--- character creation is responsible for, applied straight onto the live
--- player object.
+-- Runs once at startup: name, pronouns, species, then stat points -
+-- everything character creation is responsible for, applied straight onto
+-- the live player object. Species is built here (not in the early player
+-- setup above) since it needs the species menu, which needs combatWin,
+-- which doesn't exist until after that setup runs.
 local function runCharacterCreation()
     combatWin.setVisible(false)
     combatWin.clear()
@@ -3181,6 +3309,20 @@ local function runCharacterCreation()
     player.name = promptText(combatWin, 1, 2, 20)
 
     player.pronouns.subject, player.pronouns.object = pickPronouns()
+
+    local species = speciesEntries[pickSpecies()]
+    player.globalTags = {}
+    player.body = species.build(player.globalTags)
+
+    -- A chest implant lets the player pop adrenaline for a turn on demand
+    -- via the Ability action, instead of it just being permanently on -
+    -- every species starts with one, same as before species existed at all.
+    installGenericOrgan(player.body, "adrenal_auto_injector", player.globalTags)
+    player.globalTags = recalcGlobalTags(player.body)
+
+    for stat, delta in pairs(species.statAdjustments) do
+        player.stats[stat] = player.stats[stat] + delta
+    end
 
     local points = runStatAllocation()
     player.stats.strength = player.stats.strength + points.strength * STAT_ALLOCATION_STEP
