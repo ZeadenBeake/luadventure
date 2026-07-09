@@ -249,8 +249,18 @@ local DOT_VERBS = {
 -- template every wielder of this weapon would otherwise be reading/draining
 -- from together.
 local weaponEntries = {
-    fist = { name = "Fist", damage = { min = 10, max = 10 }, type = "melee", range = 1, spread = 0, damageType = "bludgeoning", handedness = "one-handed" },
-    chain_sword = { name = "Chain Sword", damage = { min = 15, max = 25 }, type = "melee", range = 1, spread = 0, damageType = "slashing", handedness = "one-handed", abilities = { "rev_it_up" } },
+    -- The generic bare-handed attack any MANIPULATE limb falls back to when
+    -- nothing (or nothing anymore - see the inventory's equip slots) is
+    -- equipped there. Named generically ("Strike") rather than "Fist" since
+    -- not every species punches with a fist specifically.
+    strike = { name = "Strike", damage = { min = 10, max = 10 }, type = "melee", range = 1, spread = 0, damageType = "bludgeoning", handedness = "one-handed" },
+
+    -- `itemId` is what lets a weapon exist outside a hand at all - the
+    -- carryable, inventory-and-bulk-having form it becomes when unequipped
+    -- (see itemEntries), looked up by the inventory screen's equip-slot
+    -- swapping. Strike has none - it's never a real, droppable item, just
+    -- what an empty hand always falls back to.
+    chain_sword = { name = "Chain Sword", damage = { min = 15, max = 25 }, type = "melee", range = 1, spread = 0, damageType = "slashing", handedness = "one-handed", abilities = { "rev_it_up" }, itemId = "chain_sword" },
     laser_pistol = {
         name = "Laser Pistol",
         damage = { min = 10, max = 15 },
@@ -263,6 +273,7 @@ local weaponEntries = {
         ammoPerShot = 1,
         ammoClass = "energy",
         abilities = { "charge_shot" },
+        itemId = "laser_pistol",
     },
 
     -- A natural weapon (see partEntries.stinger), not equipment - barely
@@ -284,6 +295,14 @@ local itemEntries = {
         bulk = 1,
         abilities = { "use_dermoregenesis_salve" },
     },
+
+    -- A weapon's carryable form - `weaponId` is what tells the inventory
+    -- screen "moving this into an equip slot means wielding that weapon",
+    -- the reverse of the weapon's own `itemId` (used going the other way,
+    -- putting a *displaced* weapon back into the bag). Name is duplicated
+    -- from the weapon entry rather than looked up, same as any other item.
+    chain_sword = { name = "Chain Sword", bulk = 2, weaponId = "chain_sword" },
+    laser_pistol = { name = "Laser Pistol", bulk = 1, weaponId = "laser_pistol" },
 
     -- Kinetic ammo: a bullet is one shot, plain and simple, reloaded exactly
     -- like you'd expect - pull however many are missing from the gun out of
@@ -1572,16 +1591,37 @@ end
 -- it's a one-line change if enter turns out to be the wrong call.
 local ACTIVATE_KEY = keys.enter
 
--- Fixed iteration order for equip slots, so the ammo rows in the inventory
--- list show up in the same order every time rather than whatever pairs()
--- happens to give.
-local EQUIP_SLOTS_ORDER = { "left_hand", "right_hand" }
+-- Moved up from beside pickAttack (which also uses it) so the inventory
+-- screen's equip-slot detail panel can use it too.
+local function formatDamageRange(range)
+    if range.min == range.max then
+        return tostring(range.min)
+    end
+    return range.min .. "-" .. range.max
+end
+
+-- Every MANIPULATE-tagged limb on a body, in the same stable depth-first
+-- order collectLabeledParts already produces - the set of slots a weapon
+-- can actually be equipped into (see the inventory's "equip" rows), rather
+-- than a hardcoded pair of hands that wouldn't generalize to some future
+-- multi-limbed species.
+local function getManipulateLimbs(combatant)
+    local limbs = {}
+    for _, entry in ipairs(collectLabeledParts(combatant.body)) do
+        if getPartLocalTags(entry.part).MANIPULATE then
+            table.insert(limbs, entry)
+        end
+    end
+    return limbs
+end
 
 -- Every row the inventory list can show: belt slots (always, even empty),
--- equipped weapons' ammo (only ones that actually use ammo), then main
--- inventory items grouped by id with a count - stackable stuff like energy
--- charges would otherwise need one row each. Each row carries enough to
--- both render its own list line and build a detail panel for it.
+-- one equip slot per MANIPULATE limb (showing whatever's wielded there, or
+-- Strike if nothing is), that limb's ammo (only shown if what's equipped
+-- there actually uses ammo), then main inventory items grouped by id with a
+-- count - stackable stuff like energy charges would otherwise need one row
+-- each. Each row carries enough to both render its own list line and build
+-- a detail panel for it.
 local function getInventoryRows(combatant)
     local rows = {}
 
@@ -1601,13 +1641,22 @@ local function getInventoryRows(combatant)
         end
     end
 
-    for _, slot in ipairs(EQUIP_SLOTS_ORDER) do
-        local weapon = weaponEntries[combatant.equipped[slot]]
-        if weapon and weapon.ammoCapacity then
+    for _, limb in ipairs(getManipulateLimbs(combatant)) do
+        local weaponId = combatant.equipped[limb.label]
+        if weaponId == "none" then
+            weaponId = nil
+        end
+        local weapon = weaponId and weaponEntries[weaponId] or weaponEntries.strike
+        table.insert(rows, {
+            kind = "equip", slot = limb.label, weaponId = weaponId,
+            name = limb.label .. ": " .. weapon.name,
+            countText = "", bulkText = "",
+        })
+        if weaponId and weapon.ammoCapacity then
             table.insert(rows, {
-                kind = "ammo", slot = slot, weapon = weapon,
+                kind = "ammo", slot = limb.label, weapon = weapon,
                 name = weapon.name .. " Ammo",
-                countText = (combatant.ammo[slot] or 0) .. "/" .. weapon.ammoCapacity,
+                countText = (combatant.ammo[limb.label] or 0) .. "/" .. weapon.ammoCapacity,
                 bulkText = "",
             })
         end
@@ -1656,7 +1705,7 @@ end
 -- detail on whatever's currently selected. Row 2 is the page-tab strip from
 -- Tab - a skeleton for now (just the one "Inventory" page), meant for
 -- whatever other pages come along later, exactly as originally pitched.
-local function drawInventoryScreen(rows, selection, scrollOffset, pageBarVisible, currentPage, pages)
+local function drawInventoryScreen(rows, selection, scrollOffset, pageBarVisible, currentPage, pages, carrying)
     inventoryWin.setVisible(false)
     inventoryWin.clear()
 
@@ -1664,7 +1713,7 @@ local function drawInventoryScreen(rows, selection, scrollOffset, pageBarVisible
     local rightX = leftW + 2
 
     inventoryWin.setCursorPos(1, 1)
-    inventoryWin.write("Inventory")
+    inventoryWin.write(carrying and ("Carrying: " .. carrying.name) or "Inventory")
     inventoryWin.setCursorPos(rightX, 1)
     inventoryWin.write(("Bulk %s/%s"):format(formatBulk(getTotalBulk(player)), formatBulk(getBulkCapacity(player))))
 
@@ -1708,6 +1757,17 @@ local function drawInventoryScreen(rows, selection, scrollOffset, pageBarVisible
         elseif selected.kind == "ammo" then
             table.insert(detail, "Class: " .. (selected.weapon.ammoClass or "n/a"))
             table.insert(detail, "Loaded: " .. selected.countText)
+        elseif selected.kind == "equip" then
+            local weapon = selected.weaponId and weaponEntries[selected.weaponId] or weaponEntries.strike
+            table.insert(detail, "Damage: " .. formatDamageRange(weapon.damage) .. " " .. weapon.damageType)
+            table.insert(detail, "Range: " .. weapon.range)
+            for _, abilityId in ipairs(weapon.abilities or {}) do
+                table.insert(detail, "Grants: " .. abilityEntries[abilityId].name)
+            end
+            if selected.weaponId then
+                table.insert(detail, "")
+                table.insert(detail, "[Move] to unequip")
+            end
         elseif selected.kind == "inventory" then
             table.insert(detail, "Bulk each: " .. selected.bulkText)
             table.insert(detail, "Carried: " .. selected.count)
@@ -1722,10 +1782,17 @@ local function drawInventoryScreen(rows, selection, scrollOffset, pageBarVisible
     end
 
     inventoryWin.setCursorPos(1, screenH)
-    inventoryWin.write("[Tab] pages  [Enter] move/reload  [I] close")
+    inventoryWin.write("[Tab] pages  [Enter] use  [M] move  [I] close")
 
     inventoryWin.setVisible(true)
 end
+
+-- The dedicated "pick this up, then press again somewhere else to put it
+-- down" key - needed once a weapon can go into more than one valid slot
+-- (any MANIPULATE limb), which a single "Enter does everything" key can't
+-- express unambiguously the way it could when there was only ever one
+-- destination (the belt).
+local MOVE_KEY = keys.m
 
 -- Blocks until the player closes the inventory (I again) - fully modal, like
 -- combat, rather than coexisting with the live game world.
@@ -1737,12 +1804,36 @@ local function runInventoryScreen()
     local pages = { "Inventory" } -- just the one for now; Tab's whole point is room to add more later
     local visibleCount = screenH - 1 - INVENTORY_LIST_TOP + 1
 
+    -- Whatever's currently picked up mid-move, or nil. `name` is just for
+    -- the "Carrying: X" header; `weaponId`/`itemId` is whichever of the two
+    -- actually identifies what's being carried (a weapon looking for an
+    -- equip slot, or a plain item looking for a belt slot); `from` is where
+    -- it came from, so an invalid drop can put it right back.
+    local carrying = nil
+
     local rows
     local function redraw()
         rows = getInventoryRows(player)
         selection = math.min(selection, math.max(1, #rows))
         scrollOffset = clampInventoryScroll(selection, scrollOffset, #rows, visibleCount)
-        drawInventoryScreen(rows, selection, scrollOffset, pageBarVisible, currentPage, pages)
+        drawInventoryScreen(rows, selection, scrollOffset, pageBarVisible, currentPage, pages, carrying)
+    end
+
+    -- Undoes a pickup exactly, used both for "drop somewhere invalid" and
+    -- for "close the inventory mid-move" (see the keys.i branch below) -
+    -- nothing carried should ever just vanish.
+    local function returnCarrying()
+        if not carrying then
+            return
+        end
+        if carrying.from.kind == "inventory" then
+            table.insert(player.inventory, carrying.itemId)
+        elseif carrying.from.kind == "belt" then
+            player.belt[carrying.from.index] = carrying.itemId
+        elseif carrying.from.kind == "equip" then
+            player.equipped[carrying.from.slot] = carrying.weaponId
+        end
+        carrying = nil
     end
 
     redraw()
@@ -1751,6 +1842,7 @@ local function runInventoryScreen()
         local _, key = os.pullEvent("key")
 
         if key == keys.i then
+            returnCarrying()
             return
         elseif key == keys.tab then
             pageBarVisible = not pageBarVisible
@@ -1767,25 +1859,85 @@ local function runInventoryScreen()
         elseif key == keys.down then
             selection = math.min(#rows, selection + 1)
             redraw()
+        elseif key == MOVE_KEY then
+            local entry = rows[selection]
+
+            if not carrying then
+                -- Pick up whatever's here, if anything - empty slots and
+                -- rows with nothing moveable just don't respond.
+                if entry then
+                    if entry.kind == "inventory" then
+                        local item = itemEntries[entry.itemId]
+                        removeInventoryItems(player, entry.itemId, 1)
+                        carrying = {
+                            weaponId = item.weaponId, itemId = entry.itemId,
+                            name = item.name, from = { kind = "inventory" },
+                        }
+                    elseif entry.kind == "belt" and entry.itemId then
+                        player.belt[entry.index] = nil
+                        carrying = {
+                            itemId = entry.itemId, name = itemEntries[entry.itemId].name,
+                            from = { kind = "belt", index = entry.index },
+                        }
+                    elseif entry.kind == "equip" and entry.weaponId then
+                        player.equipped[entry.slot] = "none"
+                        carrying = {
+                            weaponId = entry.weaponId, itemId = weaponEntries[entry.weaponId].itemId,
+                            name = weaponEntries[entry.weaponId].name,
+                            from = { kind = "equip", slot = entry.slot },
+                        }
+                    end
+                end
+            else
+                -- Drop it. A weapon dropped on an equip slot goes there,
+                -- swapping out whatever was already equipped (if anything,
+                -- and if it even has an item form to swap back to - Strike
+                -- doesn't); a plain item dropped on a belt slot works the
+                -- same way. Dropped anywhere else, it just lands in the
+                -- general inventory instead - always a valid resting place
+                -- regardless of where it came from, which is also how
+                -- "taking a weapon back out" works: pick it up here, then
+                -- press Move again without needing a matching slot at all.
+                if carrying.weaponId and entry and entry.kind == "equip" then
+                    if entry.weaponId then
+                        local oldItemId = weaponEntries[entry.weaponId].itemId
+                        if oldItemId then
+                            table.insert(player.inventory, oldItemId)
+                        end
+                    end
+                    player.equipped[entry.slot] = carrying.weaponId
+                elseif carrying.itemId and not carrying.weaponId and entry and entry.kind == "belt" then
+                    if entry.itemId then
+                        table.insert(player.inventory, entry.itemId)
+                    end
+                    player.belt[entry.index] = carrying.itemId
+                elseif carrying.itemId then
+                    table.insert(player.inventory, carrying.itemId)
+                end
+                carrying = nil
+            end
+
+            redraw()
         elseif key == ACTIVATE_KEY then
+            -- "Use it immediately" - reload for ammo, or whatever ability
+            -- an item/belt entry grants (the salve, so far); anything else
+            -- (a weapon sitting in inventory, apparel, ammo itself, an
+            -- equip slot) just doesn't respond - equipping a weapon needs a
+            -- chosen destination, which is what Move is for.
             local entry = rows[selection]
             if entry then
                 if entry.kind == "ammo" then
-                    -- Straight to the weapon, no need to route this through
-                    -- the combat reload action - nothing special happens on
-                    -- reload outside of it (and if it ever does, that'll be
-                    -- a combat-only concern, not this screen's).
                     reloadWeapon(player, entry.slot)
                 elseif entry.itemId then
-                    if entry.kind == "belt" then
-                        player.belt[entry.index] = nil
-                        table.insert(player.inventory, entry.itemId)
-                    elseif entry.kind == "inventory" then
-                        for i = 1, player.beltSize do
-                            if not player.belt[i] then
-                                player.belt[i] = entry.itemId
+                    local abilityId = itemEntries[entry.itemId].abilities and itemEntries[entry.itemId].abilities[1]
+                    local ability = abilityId and abilityEntries[abilityId]
+                    if ability and ability.effect then
+                        local result = ability.effect(player)
+                        if result ~= "noop" then
+                            if entry.kind == "belt" then
+                                player.belt[entry.index] = nil
+                            else
                                 removeInventoryItems(player, entry.itemId, 1)
-                                break
                             end
                         end
                     end
@@ -1829,7 +1981,7 @@ local testDummyType = npc:new()
 testDummyType.name = "test dummy"
 
 function testDummyType:decide(state)
-    if state.distance <= weaponEntries.fist.range then
+    if state.distance <= weaponEntries.strike.range then
         return { action = "attack" }
     end
 
@@ -2062,13 +2214,6 @@ local function promptMove(loc)
     end
 end
 
-local function formatDamageRange(range)
-    if range.min == range.max then
-        return tostring(range.min)
-    end
-    return range.min .. "-" .. range.max
-end
-
 local function scaleDamageRange(range, mult)
     return {
         min = math.floor(range.min * mult + 0.5),
@@ -2076,19 +2221,19 @@ local function scaleDamageRange(range, mult)
     }
 end
 
--- Whatever's equipped in a limb's matching equip slot, or a bare fist if
--- there's nothing there (items aren't tracked as real objects yet, just an
--- id string per hand).
+-- Whatever's equipped in a limb's matching equip slot, or a bare Strike if
+-- there's nothing there (or nothing anymore - see the inventory's equip
+-- slots).
 local function getWieldedWeapon(equipped, label)
     local weaponId = equipped and equipped[label]
     if weaponId and weaponId ~= "none" then
         return weaponEntries[weaponId]
     end
-    return weaponEntries.fist
+    return weaponEntries.strike
 end
 
 -- Whatever a given limb would actually attack with: equipped gear (or a
--- bare fist) for a MANIPULATE limb, or a fixed natural weapon for a part
+-- bare Strike) for a MANIPULATE limb, or a fixed natural weapon for a part
 -- whose template declares one (a stinger's sting, so far). Natural weapons
 -- aren't equipment - never read from `equipped`, so they can't be swapped,
 -- dropped, or disarmed the way a held weapon can. Returns nil if this part
@@ -2595,16 +2740,24 @@ local function runEncounter(triggeringObject)
 
     -- Whatever's currently lying on the ground this encounter (a weapon
     -- knocked out of a destroyed hand - see the enemy-attack branch below).
-    -- Anything still here when the fight ends is re-equipped automatically
-    -- rather than staying equipped in a hand that's still gone - there's no
-    -- "carry a spare unequipped weapon" concept in the inventory system to
-    -- return it to instead, so this is the only place it can actually end
-    -- up. It'll simply be unusable again until that hand heals, same as an
-    -- unarmed punch from it would be (see isLimbFunctional).
+    -- Anything still here when the fight ends just lands in the bag, via
+    -- its own itemId (see "Inventory & equipment" - weapons as items),
+    -- same as unequipping it manually would; the player can re-equip it
+    -- themselves once they're out of combat and it's actually useful again
+    -- (a hand still at 0 health can't wield anything anyway - see
+    -- isLimbFunctional).
     local droppedItems = {}
     local function returnUnclaimedDrops()
         for _, dropped in ipairs(droppedItems) do
-            player.equipped[dropped.slot] = dropped.weaponId
+            local itemId = weaponEntries[dropped.weaponId].itemId
+            if itemId then
+                table.insert(player.inventory, itemId)
+            else
+                -- No carryable form - shouldn't happen for anything that
+                -- could actually end up equipped, but re-equip rather than
+                -- lose it outright if it ever does.
+                player.equipped[dropped.slot] = dropped.weaponId
+            end
         end
     end
 
@@ -2815,7 +2968,7 @@ local function runEncounter(triggeringObject)
                     enemy.gridY = math.max(1, math.min(loc.height, enemy.gridY + decision.dy))
                     showCombatMessage({ "The " .. enemy.name .. " closes in!", "", "Press any key." }, true)
                 elseif decision.action == "attack" then
-                    local weapon = weaponEntries.fist
+                    local weapon = weaponEntries.strike
                     local distance = gridDistance(player.gridX, player.gridY, enemy.gridX, enemy.gridY)
                     local enemyHitChance = getFinalHitChance(enemy, player, weapon, distance)
                     local enemyHitPercent = math.floor(enemyHitChance * 100 + 0.5)

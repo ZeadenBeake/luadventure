@@ -247,17 +247,17 @@ than one foe at once - nothing does yet.
 
 ### Weapons
 
-`fist` (baseline unarmed), `chain_sword` (melee, slashing, applies 2 stacks
-of bleed on hit, grants Rev it up!), `laser_pistol` (ranged, fire damage,
-10-shot energy weapon, grants Charge Shot), `stinger_sting` (melee,
-piercing, barely any damage but applies 5 stacks of poison - see "Natural
-weapons"). `handedness` decides whether a normal attack with it is a quick
-or full action.
+`strike` (baseline unarmed - see "Inventory & equipment"), `chain_sword`
+(melee, slashing, applies 2 stacks of bleed on hit, grants Rev it up!),
+`laser_pistol` (ranged, fire damage, 10-shot energy weapon, grants Charge
+Shot), `stinger_sting` (melee, piercing, barely any damage but applies 5
+stacks of poison - see "Natural weapons"). `handedness` decides whether a
+normal attack with it is a quick or full action.
 
 ### Natural weapons
 
 Most attacks come from a MANIPULATE limb (a hand) using whatever's
-equipped there, or a bare fist if nothing is. A **natural weapon** is the
+equipped there, or a bare Strike if nothing is. A **natural weapon** is the
 other case: a part template with its own fixed `naturalWeapon` (a
 `weaponEntries` id) that attacks with it unconditionally - a stinger's
 sting, so far. `getAttackWeapon` picks between the two for any given part;
@@ -279,16 +279,17 @@ touching what's equipped there; a destroyed stinger just disables itself.
 A destroyed **hand** specifically goes one step further: whatever it was
 holding is knocked loose (`dropEquippedItem`, called from the enemy-attack
 branch of `runEncounter` - not from an arm being destroyed, only a hand).
-Dropped weapons are tracked per-encounter in `droppedItems` (never in
-`player.inventory` - the game has no "carry a spare unequipped weapon"
-concept, so there's nowhere else for one to go); a new **Pick Up** combat
-action (always a full action) re-equips one to its original slot
-(`pickDroppedItem`, same picker/Back convention as everywhere else) - still
-unusable, same as a bare-fisted punch from that hand would be, until the
-hand itself heals. Anything left unclaimed when the encounter ends is
-re-equipped automatically rather than actually ending up anywhere the
-player could interact with it. `dropEquippedItem` takes a slot directly, so
-a future disarm effect (an enemy skill, say - none exist yet) can reuse it
+Dropped weapons are tracked per-encounter in `droppedItems`, not
+`player.inventory` - a new **Pick Up** combat action (always a full action)
+re-equips one straight to its original slot mid-fight (`pickDroppedItem`,
+same picker/Back convention as everywhere else), which is the only
+sensible option there's no time to open the full inventory screen -
+still unusable, same as a bare-handed Strike from that hand would be, until
+the hand itself heals. Anything left unclaimed when the encounter ends
+instead lands in the bag via its own `itemId` (see "Inventory & equipment"
+- weapons as items), letting the player re-equip it themselves once it's
+actually useful again. `dropEquippedItem` takes a slot directly, so a
+future disarm effect (an enemy skill, say - none exist yet) can reuse it
 without knowing anything about *why* something got dropped.
 
 ### Ammo
@@ -307,17 +308,53 @@ tracking charge state per battery.
 
 Full-screen modal (`inventoryWin`/`runInventoryScreen`), not the original
 one-row bar - that bar still exists as a page-tab strip (`Tab` to toggle),
-just repurposed. The list groups items by id with a count (so five energy
-charges are one row, not five), shows belt slots first (always visible,
-even empty), then equipped weapons' ammo, then everything else. Enter on an
-ammo row reloads that weapon directly, bypassing the in-combat reload
-action entirely - nothing special happens on reload right now, so there's
-no reason to make the player go through combat for it.
+just repurposed. Rows, top to bottom: belt slots (always visible, even
+empty), one **equip slot** per MANIPULATE limb (`getManipulateLimbs`,
+derived from the body rather than a hardcoded pair of hands), that limb's
+ammo (only shown if what's wielded there actually uses ammo), then
+everything else in the bag, grouped by id with a count (five energy
+charges are one row, not five).
+
+Two keys do the work, split by what they mean rather than what they touch:
+
+- **`Enter`** - use immediately. Reload for an ammo row (bypassing the
+  in-combat reload action entirely - nothing special happens on reload, so
+  there's no reason to make the player go through combat for it); whatever
+  ability a belt/inventory entry grants otherwise (the salve, so far -
+  `ability.effect` is called directly, works outside combat since nothing
+  it does is combat-specific, and a cancelled limb-pick correctly doesn't
+  consume it, same `"noop"` convention combat abilities already use).
+  Everything else (a spare weapon sitting in the bag, apparel, ammo itself,
+  an equip slot) doesn't respond - equipping needs a chosen destination,
+  which Enter alone can't express.
+- **`M` (Move)** - picks up whatever's in the selected row, then places it
+  wherever you navigate to next and press `M` again. A weapon dropped on an
+  equip slot goes there, swapping out whatever was already wielded (back to
+  the bag as its own item, via the *old* weapon's `itemId` - unless it has
+  none, like Strike, in which case nothing is added back); a plain item
+  dropped on a belt slot works the same way. Dropped anywhere else, it just
+  lands in the general bag instead - always a valid resting place
+  regardless of where it came from, which is also how unequipping works:
+  pick a weapon up off its equip slot, then press `M` again without
+  needing another slot to put it in at all. Closing the inventory
+  mid-carry safely undoes the pickup rather than losing whatever was
+  picked up.
+
+**Weapons as items**: a weapon can have an `itemId` (chain_sword,
+laser_pistol so far) naming its carryable, bulk-having form in
+`itemEntries`, which in turn has a `weaponId` pointing back - the two
+together are what let the inventory screen swap between "wielded" and
+"sitting in the bag" at all. `strike` (the generic bare-handed fallback
+every MANIPULATE limb reverts to - renamed from "Fist", since not every
+species specifically punches) has neither; it's never a real, droppable
+item.
 
 **Bulk** is the carry-weight system (Pathfinder-esque): every item has a
 flat `bulk` cost except 0.1 ("Light", displayed as `L`). Capacity
 (`getBulkCapacity`) is `10 * average limb strength + bulkBonus` (equipment
-like a backpack would raise `bulkBonus`; nothing does yet).
+like a backpack would raise `bulkBonus`; nothing does yet). Equipped
+weapons don't count against it, same as worn clothes never have - only
+what's actually sitting in the bag does.
 
 **Belt**: a fixed number of slots (`beltSize`, currently 1) for combat-
 usable items, separate from the main bag.
@@ -434,12 +471,11 @@ NPC-to-NPC conversation system.
   function plus a `speciesEntries` entry - nothing else references a
   species by name anywhere.
 - Save slots have no way to delete/rename, only overwrite.
-- The test dummy always attacks with a bare fist and doesn't go through
+- The test dummy always attacks with a bare Strike and doesn't go through
   `equipped` at all, so limb destruction never disables *its* attacks and
   it has nothing to drop - disarming (arm/hand destruction, a future disarm
   skill) is a player-only mechanic for now, same as the dropped-weapon
   system it's built on top of.
-- There's no way to carry a spare unequipped weapon in the inventory at
-  all - a dropped weapon not reclaimed mid-fight just re-equips itself when
-  the encounter ends rather than migrating anywhere the player could
-  interact with it directly.
+- No apparel-equipping UI exists yet - worn items are still only ever set
+  directly in code (`spawnTestDummy`), never through anything the player
+  can reach. Only weapons got the "equip slot" treatment.
