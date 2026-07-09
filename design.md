@@ -40,8 +40,14 @@ which only ever grows; `drawLog` draws whatever tail end of it currently
 fits. This is specifically for things that happen **outside combat** -
 combat already has its own full-screen messaging (`showCombatMessage`) and
 doesn't need it. Right now that's: picking something up, a door opening or
-closing, and using an item outside a fight (the salve, so far - see
-"Inventory & equipment").
+closing, using an item outside a fight (the salve, so far - see "Inventory
+& equipment"), changing region, and the moment a fight actually starts,
+wins, or is fled from (not what happens *during* one - that's still all
+`showCombatMessage`; these four are logged right as the encounter begins or
+ends, so they're only visible once the full-screen fight itself is over).
+`joinEnemyNames` turns `scene` into "the test dummy" for one foe, an
+Oxford-comma list for more - nothing spawns more than one yet, but `scene`
+is already a list (see "Victory").
 
 ## World & movement
 

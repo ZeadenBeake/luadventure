@@ -2937,6 +2937,23 @@ local function showVictoryScreen(scene)
     showCombatMessage(lines, true)
 end
 
+-- "The test dummy" for one, "the test dummy and the goblin" for two, an
+-- Oxford-comma list for more - for the activity log's "fought" line, which
+-- otherwise reads oddly for a scene with more than one foe in it (nothing
+-- spawns more than one yet, but scene's already a list - see "Victory").
+local function joinEnemyNames(scene)
+    local names = {}
+    for _, foe in ipairs(scene) do
+        table.insert(names, "the " .. foe.name)
+    end
+    if #names == 1 then
+        return names[1]
+    elseif #names == 2 then
+        return names[1] .. " and " .. names[2]
+    end
+    return table.concat(names, ", ", 1, #names - 1) .. ", and " .. names[#names]
+end
+
 -- `triggeringObject` is whichever map object (an enemy-kind entry in the
 -- current location's objects) started this fight, if any - used purely so
 -- a win can remove it from the map afterward (see the victory branch
@@ -2957,6 +2974,7 @@ local function runEncounter(triggeringObject)
         end
     end
 
+    logActivity(dialogue("{{name}} fought " .. joinEnemyNames(scene) .. ".", player))
     showCombatMessage({ "A " .. enemy.name .. " attacks!", "", "Press any key." }, true)
 
     -- Action economy: a full action always ends the round. Quick actions are
@@ -2997,6 +3015,7 @@ local function runEncounter(triggeringObject)
         -- whether its own hit was the one that won the fight.
         if sceneCleared(scene) then
             showVictoryScreen(scene)
+            logActivity(dialogue("{{name}} won the fight!", player))
 
             -- Winning shouldn't leave you wherever the fight happened to
             -- wander to - back to the tile you were standing on when it
@@ -3020,6 +3039,7 @@ local function runEncounter(triggeringObject)
 
         if action == "flee" then
             showCombatMessage({ "You break off and flee.", "", "Press any key." }, true)
+            logActivity(dialogue("{{name}} fled.", player))
             returnUnclaimedDrops()
             return false
         end
@@ -3779,6 +3799,7 @@ local function tryMove(dir)
     end
     player.steps = player.steps + 1
     message = ""
+    logActivity(dialogue("{{name}} went to " .. nextLoc.name .. ".", player))
     return true, false, false
 end
 
