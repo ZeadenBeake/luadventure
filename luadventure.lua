@@ -1431,15 +1431,16 @@ local dynamicGreetings = {
     end,
 }
 
--- Environment interactions: * is anything you can walk up to and interact
--- with, items included; # is a solid wall (just a rectangle); !/?/0 are
--- people (quest not yet taken / quest active / nothing more to say); -/|
--- are doors (horizontal/vertical) that become plain floor once opened; $ is
--- a save point - `saveId` is how a save file remembers which one made it,
--- so loading knows where to put the player back (see findSavePointById).
+-- Environment interactions: * is an item, auto-collected (and logged, see
+-- logActivity) the moment the player steps onto it - no blurb needed
+-- anymore; # is a solid wall (just a rectangle); !/?/0 are people (quest
+-- not yet taken / quest active / nothing more to say); -/| are doors
+-- (horizontal/vertical), opened or closed with no prompt either (see
+-- tryMove/tryInteract) and shown as `.` while open; $ is a save point -
+-- `saveId` is how a save file remembers which one made it, so loading
+-- knows where to put the player back (see findSavePointById).
 world.village.objects = {
-    { kind = "item", x = 3, y = 3, itemId = "bullet",
-      blurb = { "A stray bullet glints in the dirt." } },
+    { kind = "item", x = 3, y = 3, itemId = "bullet" },
     { kind = "person", x = 5, y = 2, name = "Old Soldier", questId = "test_the_dummy" },
     { kind = "person", x = 2, y = 4, name = "Villager",
       greeting = { "\"Nice weather we're having, isn't it?\"" } },
@@ -1459,10 +1460,11 @@ world.grasslands.objects = {
 }
 
 --[[
-    Screen is split into three panes, per the layout we settled on:
-    top-left    - compact numeric stats
-    top-right   - sprite/portrait (placeholder for now)
-    bottom      - map/text/table area, currently the walkable grid
+    Screen is split into four corners:
+    top-left     - compact numeric stats
+    top-right    - sprite/portrait (placeholder for now)
+    bottom-left  - map/text/table area, currently the walkable grid
+    bottom-right - activity log (see logActivity)
 --]]
 
 math.randomseed(os.time())
@@ -1473,10 +1475,16 @@ local leftWidth = math.floor(screenW / 2)
 
 local statsWin = window.create(term.current(), 1, 1, leftWidth, topHeight)
 local spriteWin = window.create(term.current(), leftWidth + 1, 1, screenW - leftWidth, topHeight)
-local mainWin = window.create(term.current(), 1, topHeight + 1, screenW, screenH - topHeight)
+local mainWin = window.create(term.current(), 1, topHeight + 1, leftWidth, screenH - topHeight)
+
+-- Where anything that happens outside of combat gets reported - simple
+-- interactions (picking something up, opening/closing a door) don't
+-- interrupt movement with a prompt anymore, so this is where their
+-- feedback goes instead. See logActivity.
+local logWin = window.create(term.current(), leftWidth + 1, topHeight + 1, screenW - leftWidth, screenH - topHeight)
 
 -- Combat takes over the whole screen rather than fitting inside the normal
--- three panes - there's a real limb list to show, not just a status line.
+-- four corners - there's a real limb list to show, not just a status line.
 local combatWin = window.create(term.current(), 1, 1, screenW, screenH)
 
 -- The inventory is its own full-screen modal, same as combat - opening it
@@ -1485,6 +1493,85 @@ local combatWin = window.create(term.current(), 1, 1, screenW, screenH)
 local inventoryWin = window.create(term.current(), 1, 1, screenW, screenH)
 
 local message = ""
+
+-- Breaks `text` into however many lines are needed to fit `maxWidth`,
+-- breaking on word boundaries where possible - the pure logic behind both
+-- writeWrapped (below) and the activity log, which needs the lines as data
+-- (to keep in its own scrolling buffer) rather than written straight to a
+-- window.
+local function wrapText(text, maxWidth)
+    local lines = {}
+    while #text > maxWidth do
+        local breakAt = maxWidth
+        local spaceAt = text:sub(1, maxWidth):match(".*() ")
+        if spaceAt and spaceAt > 1 then
+            breakAt = spaceAt - 1
+        end
+        table.insert(lines, text:sub(1, breakAt))
+        text = text:sub(breakAt + 1):gsub("^%s+", "")
+    end
+    table.insert(lines, text)
+    return lines
+end
+
+-- Every wrapped line logged so far, oldest first - only the tail end that
+-- actually fits gets drawn (see drawLog), so this can just grow forever
+-- without needing to cap or scroll it manually.
+local activityLog = {}
+
+local function drawLog()
+    logWin.setVisible(false)
+    logWin.clear()
+    local width, height = logWin.getSize()
+    local startIndex = math.max(1, #activityLog - height + 1)
+    for i = startIndex, #activityLog do
+        logWin.setCursorPos(1, i - startIndex + 1)
+        logWin.write(activityLog[i])
+    end
+    logWin.setVisible(true)
+end
+
+-- Reports something that happened outside of combat - wrapped to the log
+-- pane's width and appended to the scrolling buffer. Combat has its own
+-- full-screen messaging (showCombatMessage) and doesn't need this; this is
+-- specifically for everything that used to need a "press any key" prompt
+-- but really didn't (picking something up, a door opening) or is otherwise
+-- worth a record of (using an item outside a fight).
+local function logActivity(message)
+    local width = logWin.getSize()
+    for _, line in ipairs(wrapText(message, width)) do
+        table.insert(activityLog, line)
+    end
+    drawLog()
+end
+
+-- {{token}} -> a bit of the given character's identity, for writing dialogue
+-- without hardcoding whichever name/pronouns the player picked at character
+-- creation. {{name}}, {{subject}}, and {{object}} are the real fields;
+-- {{he}}/{{she}} and {{him}}/{{her}} are just aliases for subject/object, so
+-- a line can be written with an imagined character in mind (he, she,
+-- whichever reads naturally) and still come out in whoever's actually
+-- playing. Unrecognized tokens are left alone rather than blanked out.
+-- Moved up here (from beside showInteraction, which also uses it) so
+-- logActivity's own callers - some of them well before that point in the
+-- file - can use it too.
+local DIALOGUE_ALIASES = {
+    subject = "subject", he = "subject", she = "subject",
+    object = "object", him = "object", her = "object",
+}
+
+local function dialogue(str, who)
+    return (str:gsub("{{(%a+)}}", function(token)
+        if token == "name" then
+            return who.name
+        end
+        local field = DIALOGUE_ALIASES[token]
+        if field then
+            return who.pronouns[field]
+        end
+        return "{{" .. token .. "}}"
+    end))
+end
 
 local function drawStats()
     statsWin.setVisible(false)
@@ -1589,6 +1676,11 @@ local function render()
     drawStats()
     drawSprite()
     drawMain()
+    -- Re-draws the log's corner from its own retained buffer - a full-
+    -- screen modal (combat, the inventory) draws right over it, and
+    -- toggling setVisible(true) alone is a no-op if it's already true, so
+    -- this can't just reassert visibility; it has to actually redraw.
+    drawLog()
 end
 
 -- A slim overlay strip - just the top two rows - for jumping straight to a
@@ -2170,30 +2262,18 @@ local function digitLabel(i)
 end
 
 -- Window writes don't wrap on their own - text just runs past the edge and
--- gets silently clipped. Writes `text` at (x, y), breaking on word
--- boundaries to fit the window's actual width, and returns how many rows it
--- used so the caller can stack whatever comes next below it instead of
--- assuming one line is always one row.
+-- gets silently clipped. Writes `text` at (x, y) using wrapText, and
+-- returns how many rows it used so the caller can stack whatever comes
+-- next below it instead of assuming one line is always one row.
 local function writeWrapped(win, x, y, text)
     local width = win.getSize()
     local maxWidth = math.max(1, width - x + 1)
-    local row = y
-
-    while #text > maxWidth do
-        local breakAt = maxWidth
-        local spaceAt = text:sub(1, maxWidth):match(".*() ")
-        if spaceAt and spaceAt > 1 then
-            breakAt = spaceAt - 1
-        end
-        win.setCursorPos(x, row)
-        win.write(text:sub(1, breakAt))
-        text = text:sub(breakAt + 1):gsub("^%s+", "")
-        row = row + 1
+    local lines = wrapText(text, maxWidth)
+    for i, line in ipairs(lines) do
+        win.setCursorPos(x, y + i - 1)
+        win.write(line)
     end
-
-    win.setCursorPos(x, row)
-    win.write(text)
-    return row - y + 1
+    return #lines
 end
 
 local function showCombatMessage(lines, wait)
@@ -2753,18 +2833,30 @@ abilityEntries.rev_it_up.effect = function(user, enemy, sourcePart)
 end
 
 -- Heals yourself, not the opponent - a wound-tending action, not an attack.
-abilityEntries.use_dermoregenesis_salve.effect = function(user)
+-- `enemy` is only ever real when this is called mid-fight (runEncounter
+-- always passes one; the inventory screen's own "use immediately" doesn't
+-- have one at all) - used here purely to decide how to report the result,
+-- not for anything about the heal itself.
+abilityEntries.use_dermoregenesis_salve.effect = function(user, enemy)
     local target, label = pickLimb("Target your own:", user.body)
     if not target then
         return "noop"
     end
     local healed = healPart(target, 25)
-    showCombatMessage({
-        "You apply the salve to your " .. label .. "!",
-        "Healed " .. healed .. " (" .. target.health .. "/" .. target.maxHealth .. ")",
-        "",
-        "Press any key.",
-    }, true)
+    if enemy then
+        showCombatMessage({
+            "You apply the salve to your " .. label .. "!",
+            "Healed " .. healed .. " (" .. target.health .. "/" .. target.maxHealth .. ")",
+            "",
+            "Press any key.",
+        }, true)
+    else
+        -- Outside a fight, there's nothing left to decide once the limb's
+        -- picked - a full-screen "press any key" would just be friction,
+        -- so this logs instead (see logActivity).
+        logActivity(dialogue("{{name}} used the Dermoregenesis Salve on {{him}}self.", user))
+        logActivity(dialogue("{{name}} healed for " .. healed .. ".", user))
+    end
 end
 
 -- A single heavy shot: double a normal shot's damage, three shots of ammo,
@@ -3238,31 +3330,6 @@ local function runEncounter(triggeringObject)
     end
 end
 
--- {{token}} -> a bit of the given character's identity, for writing dialogue
--- without hardcoding whichever name/pronouns the player picked at character
--- creation. {{name}}, {{subject}}, and {{object}} are the real fields;
--- {{he}}/{{she}} and {{him}}/{{her}} are just aliases for subject/object, so
--- a line can be written with an imagined character in mind (he, she,
--- whichever reads naturally) and still come out in whoever's actually
--- playing. Unrecognized tokens are left alone rather than blanked out.
-local DIALOGUE_ALIASES = {
-    subject = "subject", he = "subject", she = "subject",
-    object = "object", him = "object", her = "object",
-}
-
-local function dialogue(str, who)
-    return (str:gsub("{{(%a+)}}", function(token)
-        if token == "name" then
-            return who.name
-        end
-        local field = DIALOGUE_ALIASES[token]
-        if field then
-            return who.pronouns[field]
-        end
-        return "{{" .. token .. "}}"
-    end))
-end
-
 -- A blurb followed by a numbered menu of choices, for exploration-time
 -- interactions - same digit/letter scheme as everywhere else, just outside
 -- combat. Lines are run through dialogue() first, so any blurb/greeting/
@@ -3605,28 +3672,40 @@ local function interactWithSavePoint(obj)
     end
 end
 
--- Resolves walking into whatever's occupying the destination cell. Returns
--- (playerDied, quitRequested) - true playerDied if the player died fighting
--- an enemy object, true quitRequested if they chose to quit at a save
--- point; both bubble all the way back up to the main loop.
+-- Picking something off the ground has no downside, so it just happens the
+-- moment the player reaches it - no prompt, just a couple of log lines
+-- (see logActivity) instead of the old blurb-and-choice. Shared by tryMove
+-- (stepping onto it) and tryInteract (reaching for one still adjacent
+-- without stepping onto it).
+local function collectItem(loc, obj)
+    table.insert(player.inventory, obj.itemId)
+    for i, o in ipairs(loc.objects) do
+        if o == obj then
+            table.remove(loc.objects, i)
+            break
+        end
+    end
+    logActivity(dialogue("{{name}} picked up " .. itemEntries[obj.itemId].name .. ".", player))
+end
+
+-- Same idea for a door: opening (or closing) one is harmless enough not to
+-- need a prompt either - see tryMove (bumping a closed one opens it) and
+-- tryInteract (the only way to close one again). `open` names which state
+-- it's ending up in, purely for the log line.
+local function toggleDoor(obj, open)
+    obj.open = open
+    logActivity(dialogue("{{name}} " .. (open and "opened" or "closed") .. " the door.", player))
+end
+
+-- Resolves walking into whatever's occupying the destination cell -
+-- anything that still warrants an actual prompt (a person, a save point, a
+-- fight) rather than just happening. Returns (playerDied, quitRequested) -
+-- true playerDied if the player died fighting an enemy object, true
+-- quitRequested if they chose to quit at a save point; both bubble all the
+-- way back up to the main loop. Items and (closed) doors never reach this -
+-- both callers (tryMove, tryInteract) handle those themselves.
 local function interactWithObject(loc, obj)
-    if obj.kind == "item" then
-        local choice = showInteraction(obj.blurb, { "Pick it up", "Leave it" })
-        if choice == 1 then
-            table.insert(player.inventory, obj.itemId)
-            for i, o in ipairs(loc.objects) do
-                if o == obj then
-                    table.remove(loc.objects, i)
-                    break
-                end
-            end
-        end
-    elseif obj.kind == "door" then
-        local choice = showInteraction({ "A closed door blocks your way." }, { "Open it", "Leave it" })
-        if choice == 1 then
-            obj.open = true
-        end
-    elseif obj.kind == "person" then
+    if obj.kind == "person" then
         interactWithPerson(obj)
     elseif obj.kind == "save_point" then
         return interactWithSavePoint(obj)
@@ -3649,6 +3728,26 @@ local function tryMove(dir)
 
     if nx >= 1 and nx <= loc.width and ny >= 1 and ny <= loc.height then
         local obj = findObjectAt(loc, nx, ny)
+
+        if obj and obj.kind == "item" then
+            -- Walking onto it is the whole interaction - see collectItem.
+            player.gridX, player.gridY = nx, ny
+            player.steps = player.steps + 1
+            collectItem(loc, obj)
+            message = ""
+            return true, false, false
+        end
+
+        if obj and obj.kind == "door" and not obj.open then
+            -- Bumping a closed door just opens it, no prompt - but that's
+            -- the whole action for this turn, same as bumping into
+            -- anything else that was blocking the way; stepping through
+            -- happens on the *next* move, once it's actually open.
+            toggleDoor(obj, true)
+            message = ""
+            return false, false, false
+        end
+
         local blocked = obj and not (obj.kind == "door" and obj.open)
         if blocked then
             local playerDied, quitRequested = interactWithObject(loc, obj)
@@ -3681,6 +3780,35 @@ local function tryMove(dir)
     player.steps = player.steps + 1
     message = ""
     return true, false, false
+end
+
+-- The dedicated interact key: checks each of the four cardinal-adjacent
+-- tiles (never diagonals - keeps things precise if two interactables ever
+-- end up right next to each other) for something to interact with, and
+-- acts on the first one found (up, then down, left, right). Doors are the
+-- main reason this exists at all - opening one is automatic on a bump (see
+-- tryMove), but there's no other way to *close* one again. Returns
+-- (playerDied, quitRequested), same convention as tryMove/
+-- interactWithObject, since anything reachable this way could end the game
+-- the same way bumping into it would.
+local function tryInteract()
+    local loc = world[player.location]
+    for _, dir in ipairs({ "up", "down", "left", "right" }) do
+        local delta = dirDelta[dir]
+        local obj = findObjectAt(loc, player.gridX + delta.dx, player.gridY + delta.dy)
+        if obj then
+            if obj.kind == "item" then
+                collectItem(loc, obj)
+                return false, false
+            elseif obj.kind == "door" then
+                toggleDoor(obj, not obj.open)
+                return false, false
+            else
+                return interactWithObject(loc, obj)
+            end
+        end
+    end
+    return false, false
 end
 
 -- Reads a single line of free text at (x, y) in the given window - "char"
@@ -3882,6 +4010,12 @@ while true do
         drawTopBar()
     elseif key == keys.i then
         runInventoryScreen()
+        render()
+    elseif key == keys.space then
+        local playerDied, quitRequested = tryInteract()
+        if playerDied or quitRequested then
+            break
+        end
         render()
     else
         local dir = keyToDir[key]

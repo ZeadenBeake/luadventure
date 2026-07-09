@@ -12,14 +12,36 @@ otherwise.
 
 ## Screen layout
 
-Three panes while exploring: stats (top-left), a portrait placeholder
-(top-right, nothing draws here yet), and the walkable map (bottom). Combat,
-the inventory, and any blurb/dialogue interaction take over the whole screen
-as their own modal window instead of sharing the three panes.
+Four corners while exploring: stats (top-left), a portrait placeholder
+(top-right, nothing draws here yet), the walkable map (bottom-left, half the
+width it used to be), and the activity log (bottom-right - see "Activity
+log"). Combat, the inventory, and any blurb/dialogue interaction take over
+the whole screen as their own modal window instead of sharing the four
+corners.
 
-Controls: arrow keys move, `i` opens the inventory, `q` quits immediately.
-Menus almost everywhere use digit keys `1`-`9`/`0` then `a`-`z` for lists
-longer than ten items (see "Digit/letter menus" below).
+Controls: arrow keys move, `Space` interacts with whatever's cardinally
+adjacent (see "Environment objects & symbols"), `i` opens the inventory,
+`q` quits immediately. Menus almost everywhere use digit keys `1`-`9`/`0`
+then `a`-`z` for lists longer than ten items (see "Digit/letter menus"
+below).
+
+### Activity log
+
+A full-screen modal (combat, the inventory) draws right over this corner,
+so `render()` always redraws it from its own retained buffer
+(`activityLog`, `drawLog`) afterward rather than just reasserting
+visibility - toggling `setVisible(true)` alone is a no-op if it's already
+`true`, so that alone wouldn't actually restore anything a modal drew over
+it.
+
+`logActivity(message)` wraps a line to the log's width (`wrapText` - also
+what `writeWrapped` itself is built on now) and appends it to the buffer,
+which only ever grows; `drawLog` draws whatever tail end of it currently
+fits. This is specifically for things that happen **outside combat** -
+combat already has its own full-screen messaging (`showCombatMessage`) and
+doesn't need it. Right now that's: picking something up, a door opening or
+closing, and using an item outside a fight (the salve, so far - see
+"Inventory & equipment").
 
 ## World & movement
 
@@ -43,17 +65,39 @@ Each location has an `objects` list. `findObjectAt` resolves collisions,
 | Glyph | Kind | Notes |
 |---|---|---|
 | `#` | wall | Solid rectangle (`x1,y1,x2,y2`), blocks movement, no interaction |
-| `*` | item | Blurb + "Pick it up"/"Leave it"; removed from the map on pickup |
-| `-` / `\|` | door | Horizontal/vertical; "Open it" turns it into `.` (open, walkable) |
+| `*` | item | Auto-collected the moment you step onto it (`collectItem`) - logged, no prompt |
+| `-` / `\|` | door | Horizontal/vertical; see below - opens/closes without a prompt either |
 | `!` | person (quest) | Quest not yet taken, or done and ready to hand in |
 | `?` | person (quest) | Quest active, not yet ready to turn in |
 | `0` | person | Flavor-only NPC, or a quest giver with nothing left to give |
 | `E` | enemy | Walking into it starts `runEncounter()` |
 | `$` | save point | Save / Load / Quit Game (see "Save & load") |
 
-Walking into anything blocking calls `interactWithObject`, which dispatches
-on `obj.kind` and returns `(playerDied, quitRequested)` - both bubble all the
-way up to the main loop, since either one ends the program.
+Two different ways to trigger a reaction from something on the map:
+
+- **Bumping into it** (walking into a cell that isn't clear) - `tryMove`
+  handles an item or a closed door itself, without a prompt (see below);
+  anything else still blocking (a person, a save point, an enemy, a wall)
+  goes through `interactWithObject`, which dispatches on `obj.kind` and
+  returns `(playerDied, quitRequested)` - both bubble all the way up to the
+  main loop, since either one ends the program.
+- **`Space`** (`tryInteract`) - checks each of the four cardinal-adjacent
+  tiles (never diagonals, so two interactables sitting right next to each
+  other don't create ambiguity) and acts on the first one found. This is
+  the only way to *close* a door again - bumping one only ever opens it -
+  but works generically on anything adjacent, routing to the same
+  `interactWithObject` for a person/save point/enemy.
+
+Items and doors got simplified on the theory that there's no harm in just
+doing the thing: standing on an item just picks it up (`collectItem` -
+inserts it, removes the map object, logs it - see "Activity log"); bumping
+a closed door just opens it (`toggleDoor`), logged the same way, but that's
+the whole action for that move - stepping through still takes a second one,
+same as bumping into anything else that was blocking the way. Neither ever
+reaches `interactWithObject` at all anymore; both callers (`tryMove`,
+`tryInteract`) handle them directly. A person, a save point, and a fight
+still go through a real prompt - those have actual stakes or a meaningful
+back-and-forth, so simplifying them away wouldn't make sense.
 
 ## Body system
 
@@ -337,7 +381,12 @@ Two keys do the work, split by what they mean rather than what they touch:
   ability a belt/inventory entry grants otherwise (the salve, so far -
   `ability.effect` is called directly, works outside combat since nothing
   it does is combat-specific, and a cancelled limb-pick correctly doesn't
-  consume it, same `"noop"` convention combat abilities already use).
+  consume it, same `"noop"` convention combat abilities already use). An
+  ability that's ever usable both ways can tell which by whether it was
+  handed a real `enemy` (only `runEncounter` ever passes one) - the salve
+  uses this to show its usual full-screen confirmation in a fight, but just
+  log the result (see "Activity log") outside one, where a "press any key"
+  prompt would just be friction once the limb's already picked.
   Everything else (a spare weapon sitting in the bag, apparel, ammo itself,
   an equip slot) doesn't respond - equipping needs a chosen destination,
   which Enter alone can't express.
@@ -505,3 +554,8 @@ NPC-to-NPC conversation system.
 - No apparel-equipping UI exists yet - worn items are still only ever set
   directly in code (`spawnTestDummy`), never through anything the player
   can reach. Only weapons got the "equip slot" treatment.
+- The activity log isn't part of save data - it's session-only scrollback,
+  cleared on restart same as the screen itself would be.
+- Quest/NPC dialogue still always shows a full prompt, even the purely
+  flavor ones - only item pickup, doors, and outside-combat item use moved
+  to the activity log so far.
