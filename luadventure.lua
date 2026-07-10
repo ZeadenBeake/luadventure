@@ -2593,6 +2593,17 @@ function combatState.redrawPanes()
         drawCombatField(combatState.loc, combatState.scene)
         drawEnemyList(combatState.scene, combatState.selectedIndex)
         drawCombatLog()
+
+        -- The action menu itself isn't rebuilt here - reconstructing it
+        -- needs `restricted`, which isn't in scope from every call site
+        -- (an ability effect, runBeltAction) - but its pane still needs
+        -- clearing, or whatever a sub-picker just drew stays sitting there
+        -- until the next real promptAction call. Blank is a perfectly
+        -- valid resting state since nothing reads a selection out of it
+        -- mid-resolution anyway.
+        combatActionWin.setVisible(false)
+        combatActionWin.clear()
+        combatActionWin.setVisible(true)
     end
 end
 
@@ -4360,7 +4371,44 @@ local function runCharacterCreation()
     player.stats.aim = player.stats.aim + points.aim * STAT_ALLOCATION_STEP
 end
 
-runCharacterCreation()
+-- The title screen, shown once at startup before there's any character to
+-- speak of yet - showInteraction's dialogue() templating is safe to call
+-- this early since none of these lines actually contain a {{...}} token
+-- (dialogue only ever touches player.name/pronouns for a match it finds).
+-- Load Save applies straight onto the live player object via applySaveData
+-- - the same path the in-game save terminal's own Load uses - so loading
+-- doesn't need a throwaway character run through creation first. Returns
+-- "new", "load", or "quit".
+local function runMainMenu()
+    while true do
+        local choice = showInteraction({ "Luadventure", "" }, { "New Game", "Load Save", "Quit" })
+        if choice == 1 then
+            return "new"
+        elseif choice == 2 then
+            local slot = pickSaveSlot("Load which slot?")
+            if slot then
+                local data = readSaveSlot(slot)
+                if not data then
+                    showInteraction({ "That slot is empty." }, { "Continue" })
+                else
+                    applySaveData(data)
+                    return "load"
+                end
+            end
+            -- cancelled or empty: back to the main menu
+        else
+            return "quit"
+        end
+    end
+end
+
+local menuChoice = runMainMenu()
+if menuChoice == "quit" then
+    return
+end
+if menuChoice == "new" then
+    runCharacterCreation()
+end
 render()
 
 local topBarOpen = false

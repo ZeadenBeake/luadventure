@@ -84,13 +84,17 @@ flashes the target's map glyph red for the same `logDelay`
 (`combatState.flash`, straight ANSI color via `term`'s `colors` API - works
 fine through CraftOS-PC's ncurses CLI renderer). Since a fullscreen
 sub-picker (choosing an attack, a limb, an ability) draws right over the
-map/enemy *and* log panes, whatever was showing needs putting back the
-moment the picker closes - `combatState.redrawPanes` redraws all three
-(map, enemy list, log), called right after every such picker returns and
+map/enemy/log/action panes, whatever was showing needs putting back the
+moment the picker closes - `combatState.redrawPanes` redraws the map, enemy
+list, and log, and blanks the action pane (its actual content depends on
+`restricted`, which isn't in scope from every call site - a blank pane is a
+valid resting state since nothing reads a selection out of it
+mid-resolution anyway), called right after every such picker returns and
 before any of the paced logging above starts, so a flash never lands on
-stale picker text instead of the actual map; `promptAction` does the same
-at the top of every prompt, which is what catches an instant action like
-Look (nothing else logs afterward to trigger a redraw on its own).
+stale picker text instead of the actual map; `promptAction` redraws all of
+this itself too at the top of every prompt, which is what catches an
+instant action like Look (nothing else logs afterward to trigger a redraw
+on its own).
 `combatState` bundles all of this (the delay, the flash/redraw functions,
 and the current encounter's loc/scene/selection - so ability effects can
 reach them without loc/scene threaded through every function signature)
@@ -570,6 +574,20 @@ after turn-in; `nil` means they go quiet for good). Progress lives in
 `player.quests` (`"active"`/`"done"`, not-yet-taken is just absent). One
 quest exists so far: **Blunt the Blade**, offered by the Old Soldier in the
 village, ready once the test dummy's been beaten at least once.
+
+## Main menu
+
+The very first thing shown at startup (`runMainMenu`, a `showInteraction`
+loop) - **New Game** (runs "Character creation" below), **Load Save**, or
+**Quit** (a bare top-level `return`, ending the script the same way
+breaking out of the main loop already did). Load Save reuses
+`pickSaveSlot`/`readSaveSlot`/`applySaveData` (see "Save & load") exactly
+as the in-game save terminal's own Load does - since `applySaveData`
+overwrites the live `player` object outright rather than assuming one
+already went through creation, loading from here skips character creation
+entirely rather than needing a throwaway character run through it first.
+Cancelling out of the slot picker, or picking an empty slot, returns to the
+main menu rather than falling through to anything else.
 
 ## Save & load
 
