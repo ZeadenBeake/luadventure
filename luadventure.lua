@@ -2592,6 +2592,7 @@ function combatState.redrawPanes()
     if combatState.loc then
         drawCombatField(combatState.loc, combatState.scene)
         drawEnemyList(combatState.scene, combatState.selectedIndex)
+        drawCombatLog()
     end
 end
 
@@ -2616,6 +2617,7 @@ local ACTION_LABELS = {
 local function promptAction(loc, scene, selectedIndex, restricted)
     drawCombatField(loc, scene)
     drawEnemyList(scene, selectedIndex)
+    drawCombatLog()
 
     local moveTag = getEffectiveReflex(player) >= REFLEX_QUICK_THRESHOLD and "quick" or "full"
 
@@ -3476,6 +3478,13 @@ local function runEncounter(triggeringObject)
                 if nx >= 1 and nx <= loc.width and ny >= 1 and ny <= loc.height then
                     player.gridX, player.gridY = nx, ny
                     speed = moveIsQuick and "quick" or "full"
+
+                    -- The step itself should feel instant - redraw the map
+                    -- with the player already in the new spot right away,
+                    -- rather than leaving it showing the old position for
+                    -- as long as whatever comes next (the enemy's turn,
+                    -- with its own paced logCombat calls) takes to resolve.
+                    combatState.redrawPanes()
                 end
                 -- Stepping into a wall silently does nothing - same as
                 -- promptMove used to just ignore an out-of-bounds press
@@ -3645,7 +3654,6 @@ local function runEncounter(triggeringObject)
                         if weapon.onHit then
                             weapon.onHit(pick.part)
                         end
-                        drawStats()
 
                         logCombat("Hits your " .. pick.label .. " for " .. dealt .. "! (" .. pick.part.health .. "/" .. pick.part.maxHealth .. ")")
                         combatState.flash(player.gridX, player.gridY, "@")
@@ -3690,7 +3698,6 @@ local function runEncounter(triggeringObject)
                 logCombat("The " .. enemy.name .. "'s " .. tick.label .. " " .. verb .. " for " .. tick.dealt .. "!")
                 combatState.flash(enemy.gridX, enemy.gridY, "E")
             end
-            drawStats()
 
             if isDead(player.body) then
                 showCombatMessage({ "You died.", "", "Press any key." }, true)

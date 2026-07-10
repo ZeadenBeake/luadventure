@@ -84,15 +84,26 @@ flashes the target's map glyph red for the same `logDelay`
 (`combatState.flash`, straight ANSI color via `term`'s `colors` API - works
 fine through CraftOS-PC's ncurses CLI renderer). Since a fullscreen
 sub-picker (choosing an attack, a limb, an ability) draws right over the
-map/enemy panes, whatever was showing needs putting back the moment the
-picker closes - `combatState.redrawPanes` handles that, called right after
-every such picker returns and before any of the paced logging above starts,
-so a flash never lands on stale picker text instead of the actual map.
+map/enemy *and* log panes, whatever was showing needs putting back the
+moment the picker closes - `combatState.redrawPanes` redraws all three
+(map, enemy list, log), called right after every such picker returns and
+before any of the paced logging above starts, so a flash never lands on
+stale picker text instead of the actual map; `promptAction` does the same
+at the top of every prompt, which is what catches an instant action like
+Look (nothing else logs afterward to trigger a redraw on its own).
 `combatState` bundles all of this (the delay, the flash/redraw functions,
 and the current encounter's loc/scene/selection - so ability effects can
 reach them without loc/scene threaded through every function signature)
 into one table rather than several more top-level locals - see "A note on
 locals" below.
+
+Combat deliberately never calls `drawStats()` (the overworld's own
+top-left stats pane) - `render()` already refreshes it the moment control
+returns to the overworld, and `statsWin` occupies the exact same screen
+region as `combatMapWin`. Calling it mid-fight doesn't just waste the draw;
+it overwrites the live map with the overworld panel underneath whatever
+single cell a flash happens to repaint next, which briefly looks like the
+exploration screen bleeding through the fight.
 
 ## World & movement
 
@@ -354,7 +365,11 @@ quickened/full gating as ever (a "You don't have time to move" rejection if
 quickened and reflex isn't fast enough, silently no-op on stepping into a
 wall), just without a separate confirmation step in between. A hint line
 ("Arrow keys to move (quick)" or "(full)", read off `getEffectiveReflex`)
-sits under the numbered options so this isn't a hidden control.
+sits under the numbered options so this isn't a hidden control. A
+successful step calls `combatState.redrawPanes()` immediately, before
+whatever comes next (ending the round, the enemy's own paced turn) - the
+step itself should read as instant, not wait behind the round it might
+trigger.
 
 **Enemy selection**: the bottom-right pane (`drawEnemyList`) lists every foe
 in `scene`, health included, with whichever one's currently selected marked
