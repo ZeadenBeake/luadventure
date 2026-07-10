@@ -1483,8 +1483,22 @@ local mainWin = window.create(term.current(), 1, topHeight + 1, leftWidth, scree
 -- feedback goes instead. See logActivity.
 local logWin = window.create(term.current(), leftWidth + 1, topHeight + 1, screenW - leftWidth, screenH - topHeight)
 
--- Combat takes over the whole screen rather than fitting inside the normal
--- four corners - there's a real limb list to show, not just a status line.
+-- Combat's "idle" state (waiting on the player's next action) gets the same
+-- four-corner treatment as the overworld, rather than a single full-screen
+-- window - map top-left, the action menu bottom-left, a scrolling combat
+-- log top-right (see logCombat - routine events report here instead of
+-- interrupting with a prompt), and the enemies in the scene bottom-right
+-- (Tab cycles which one's selected - see drawEnemyList/promptAction).
+local combatMapWin = window.create(term.current(), 1, 1, leftWidth, topHeight)
+local combatLogWin = window.create(term.current(), leftWidth + 1, 1, screenW - leftWidth, topHeight)
+local combatActionWin = window.create(term.current(), 1, topHeight + 1, leftWidth, screenH - topHeight)
+local combatEnemyWin = window.create(term.current(), leftWidth + 1, topHeight + 1, screenW - leftWidth, screenH - topHeight)
+
+-- A full-screen takeover, shared by combat's own sub-pickers (choosing an
+-- attack, a limb, an ability, a reload/belt target), victory/death,
+-- dialogue (showInteraction), and character creation - anything that needs
+-- the player's full attention for a moment rather than coexisting with the
+-- four-corner layout above.
 local combatWin = window.create(term.current(), 1, 1, screenW, screenH)
 
 -- The inventory is its own full-screen modal, same as combat - opening it
@@ -2432,6 +2446,9 @@ local function writeWrapped(win, x, y, text)
     return #lines
 end
 
+-- Reserved for the moments that genuinely warrant taking over the whole
+-- screen and stopping the player in their tracks - victory, death - rather
+-- than every routine swing and status tick (see logCombat below for those).
 local function showCombatMessage(lines, wait)
     combatWin.setVisible(false)
     combatWin.clear()
@@ -2445,52 +2462,112 @@ local function showCombatMessage(lines, wait)
     end
 end
 
--- Shows the room grid with both combatants on it, so position (and thus
--- range/spread) is something the player can actually see and plan around.
-local function drawCombatField(loc, enemy)
-    combatWin.setCursorPos(1, 1)
-    combatWin.write(loc.name)
+-- Every wrapped line logged so far this encounter, oldest first - mirrors
+-- activityLog/drawLog/logActivity (see those), just scoped to a single
+-- fight and drawn into combatLogWin instead. Reset per encounter (see
+-- resetCombatLog) rather than left to grow across fights.
+local combatActivityLog = {}
+
+local function drawCombatLog()
+    combatLogWin.setVisible(false)
+    combatLogWin.clear()
+    local width, height = combatLogWin.getSize()
+    local startIndex = math.max(1, #combatActivityLog - height + 1)
+    for i = startIndex, #combatActivityLog do
+        combatLogWin.setCursorPos(1, i - startIndex + 1)
+        combatLogWin.write(combatActivityLog[i])
+    end
+    combatLogWin.setVisible(true)
+end
+
+-- Reports something routine that happened this fight - a swing landing or
+-- missing, a status tick, an enemy closing in - without interrupting with
+-- a "Press any key" prompt. showCombatMessage is still there for the small
+-- handful of moments that actually deserve the player's full attention.
+local function logCombat(message)
+    local width = combatLogWin.getSize()
+    for _, line in ipairs(wrapText(message, width)) do
+        table.insert(combatActivityLog, line)
+    end
+    drawCombatLog()
+end
+
+local function resetCombatLog()
+    combatActivityLog = {}
+    drawCombatLog()
+end
+
+-- Shows the room grid with every combatant in the scene on it, so position
+-- (and thus range/spread) is something the player can actually see and
+-- plan around. Drawn into its own top-left pane rather than sharing a
+-- full-screen window with the action menu.
+local function drawCombatField(loc, scene)
+    combatMapWin.setVisible(false)
+    combatMapWin.clear()
+    combatMapWin.setCursorPos(1, 1)
+    combatMapWin.write(loc.name)
     for y = 1, loc.height do
         local row = {}
         for x = 1, loc.width do
-            if x == player.gridX and y == player.gridY then
-                row[x] = "@"
-            elseif x == enemy.gridX and y == enemy.gridY then
-                row[x] = "E"
-            else
-                row[x] = "."
+            row[x] = "."
+        end
+        for _, foe in ipairs(scene) do
+            if foe.gridX >= 1 and foe.gridX <= loc.width and foe.gridY == y then
+                row[foe.gridX] = "E"
             end
         end
-        combatWin.setCursorPos(1, y + 1)
-        combatWin.write(table.concat(row))
+        if player.gridY == y then
+            row[player.gridX] = "@"
+        end
+        combatMapWin.setCursorPos(1, y + 1)
+        combatMapWin.write(table.concat(row))
     end
-    return loc.height + 2 -- next free line
+    combatMapWin.setVisible(true)
+end
+
+-- The bottom-right pane: every foe still in the scene, health included, with
+-- the currently-selected one marked - Tab cycles it (see promptAction).
+-- Fight/Look/an ability's targeting all act on whichever's selected here.
+local function drawEnemyList(scene, selectedIndex)
+    combatEnemyWin.setVisible(false)
+    combatEnemyWin.clear()
+    combatEnemyWin.setCursorPos(1, 1)
+    combatEnemyWin.write("Enemies (Tab to cycle)")
+    for i, foe in ipairs(scene) do
+        local marker = (i == selectedIndex) and ">" or " "
+        local status = isDead(foe.body) and " (dead)" or ""
+        writeWrapped(combatEnemyWin, 1, i + 2, ("%s%s  %d/%d%s"):format(
+            marker, foe.name, foe.body.health, foe.body.maxHealth, status
+        ))
+    end
+    combatEnemyWin.setVisible(true)
 end
 
 -- restricted is true mid a quick action's bonus turn: Fight/Ability still
--- show up (some of what they offer might still be quick/instant), and Idle
--- always does since it's always quick, but Move's tag reflects whether it
--- would actually be allowed right now.
+-- show up (some of what they offer might still be quick/instant), Look and
+-- Idle always do since both are always quick or better, but Move's tag
+-- reflects whether it would actually be allowed right now.
 local ACTION_LABELS = {
-    fight = "Fight", reload = "Reload (quick)", ability = "Ability",
-    belt = "Belt", idle = "Idle (quick)", flee = "Flee",
+    fight = "Fight", look = "Look (instant)", reload = "Reload (quick)",
+    ability = "Ability", belt = "Belt", idle = "Idle (quick)", flee = "Flee",
 }
 
--- The main in-combat menu: Fight/[Reload]/Ability/Belt/Idle/Flee, numbered
--- dynamically since Reload only appears when an equipped weapon actually
--- uses ammo (see hasAmmoWeapon). Movement isn't a menu entry at all anymore
--- - arrow keys reposition immediately, without a separate confirmation
+-- The main in-combat menu: Fight/Look/[Reload]/Ability/Belt/Idle/Flee,
+-- numbered dynamically since Reload only appears when an equipped weapon
+-- actually uses ammo (see hasAmmoWeapon). Movement isn't a menu entry at
+-- all - arrow keys reposition immediately, without a separate confirmation
 -- step, so the player never has to open a sub-prompt just to take a step.
--- Returns (action, moveDir); moveDir is only meaningful when
--- action == "move".
-local function promptAction(loc, enemy, restricted)
-    combatWin.setVisible(false)
-    combatWin.clear()
-    local nextLine = drawCombatField(loc, enemy)
+-- Tab cycles which enemy in the scene is selected (see drawEnemyList) right
+-- here in the same loop, without counting as a turn or an action of its
+-- own. Returns (action, moveDir, selectedIndex); moveDir is only
+-- meaningful when action == "move".
+local function promptAction(loc, scene, selectedIndex, restricted)
+    drawCombatField(loc, scene)
+    drawEnemyList(scene, selectedIndex)
 
     local moveTag = getEffectiveReflex(player) >= REFLEX_QUICK_THRESHOLD and "quick" or "full"
 
-    local options = { "fight" }
+    local options = { "fight", "look" }
     if hasAmmoWeapon(player) then
         table.insert(options, "reload")
     end
@@ -2499,27 +2576,41 @@ local function promptAction(loc, enemy, restricted)
     table.insert(options, "idle")
     table.insert(options, "flee")
 
-    combatWin.setCursorPos(1, nextLine + 1)
-    combatWin.write("What will you do?" .. (restricted and " (quick/instant only)" or ""))
-    local row = nextLine + 3
-    for i, action in ipairs(options) do
-        combatWin.setCursorPos(1, row)
-        combatWin.write("[" .. digitLabel(i) .. "] " .. ACTION_LABELS[action])
+    -- No "What will you do?" header - between this, the numbered options,
+    -- and the move hint, that's already everything this pane has room for
+    -- without needing to scroll (see "Combat menu & movement" in the
+    -- design doc).
+    combatActionWin.setVisible(false)
+    combatActionWin.clear()
+    local row = 1
+    if restricted then
+        combatActionWin.setCursorPos(1, row)
+        combatActionWin.write("(quick/instant only)")
         row = row + 1
     end
-    combatWin.setCursorPos(1, row + 1)
-    combatWin.write("Arrow keys to move (" .. moveTag .. ")")
-    combatWin.setVisible(true)
+    for i, action in ipairs(options) do
+        combatActionWin.setCursorPos(1, row)
+        combatActionWin.write("[" .. digitLabel(i) .. "] " .. ACTION_LABELS[action])
+        row = row + 1
+    end
+    combatActionWin.setCursorPos(1, row)
+    combatActionWin.write("Arrow keys to move (" .. moveTag .. ")")
+    combatActionWin.setVisible(true)
 
     while true do
         local _, key = os.pullEvent("key")
-        local dir = keyToDir[key]
-        if dir then
-            return "move", dir
-        end
-        local index = keyToNumber[key]
-        if index and options[index] then
-            return options[index], nil
+        if key == keys.tab then
+            selectedIndex = selectedIndex % #scene + 1
+            drawEnemyList(scene, selectedIndex)
+        else
+            local dir = keyToDir[key]
+            if dir then
+                return "move", dir, selectedIndex
+            end
+            local index = keyToNumber[key]
+            if index and options[index] then
+                return options[index], nil, selectedIndex
+            end
         end
     end
 end
@@ -2665,6 +2756,28 @@ local function pickLimb(prompt, torso)
             return parts[index].part, parts[index].label
         end
     end
+end
+
+-- A read-only version of pickLimb's list, for the Look action - a size-up,
+-- not a targeting prompt, so it never asks the player to choose one, just
+-- waits for any key to close.
+local function viewLimbs(prompt, torso)
+    local parts = collectLabeledParts(torso)
+
+    combatWin.setVisible(false)
+    combatWin.clear()
+    combatWin.setCursorPos(1, 1)
+    combatWin.write(prompt)
+    local row = 3
+    for _, entry in ipairs(parts) do
+        row = row + writeWrapped(combatWin, 1, row, ("%s%s  %d/%d"):format(
+            string.rep("  ", entry.depth), entry.label, entry.part.health, entry.part.maxHealth
+        ))
+    end
+    writeWrapped(combatWin, 1, row + 1, "Press any key.")
+    combatWin.setVisible(true)
+
+    os.pullEvent("key")
 end
 
 -- Every ability granted by any organ anywhere in the combatant's body, by
@@ -2880,7 +2993,7 @@ local function runBeltAction(combatant, droppedItems, enemy, restricted)
 
     if weaponId then
         if restricted then
-            showCombatMessage({ "You don't have time to swap weapons.", "", "Press any key." }, true)
+            logCombat("You don't have time to swap weapons.")
             return nil
         end
 
@@ -2915,20 +3028,11 @@ local function runBeltAction(combatant, droppedItems, enemy, restricted)
                 local destWeaponId, destItemId = getSlotContents(combatant, destination)
                 swapSlots(combatant, chosen, destination)
                 if destWeaponId then
-                    showCombatMessage({
-                        "You swap your " .. weaponEntries[weaponId].name .. " for the " .. weaponEntries[destWeaponId].name .. "!",
-                        "", "Press any key.",
-                    }, true)
+                    logCombat("You swap your " .. weaponEntries[weaponId].name .. " for the " .. weaponEntries[destWeaponId].name .. "!")
                 elseif destItemId then
-                    showCombatMessage({
-                        "You stow your " .. weaponEntries[weaponId].name .. " and take the " .. itemEntries[destItemId].name .. " in hand.",
-                        "", "Press any key.",
-                    }, true)
+                    logCombat("You stow your " .. weaponEntries[weaponId].name .. " and take the " .. itemEntries[destItemId].name .. " in hand.")
                 else
-                    showCombatMessage({
-                        "You holster your " .. weaponEntries[weaponId].name .. ".",
-                        "", "Press any key.",
-                    }, true)
+                    logCombat("You holster your " .. weaponEntries[weaponId].name .. ".")
                 end
                 return "full"
             end
@@ -2948,7 +3052,7 @@ local function runBeltAction(combatant, droppedItems, enemy, restricted)
         return ability.speed
     else
         if restricted then
-            showCombatMessage({ "You don't have time to holster a weapon.", "", "Press any key." }, true)
+            logCombat("You don't have time to holster a weapon.")
             return nil
         end
 
@@ -2964,7 +3068,7 @@ local function runBeltAction(combatant, droppedItems, enemy, restricted)
         end
 
         if #candidates == 0 then
-            showCombatMessage({ "Nothing to holster.", "", "Press any key." }, true)
+            logCombat("Nothing to holster.")
             return nil
         end
 
@@ -2996,10 +3100,7 @@ local function runBeltAction(combatant, droppedItems, enemy, restricted)
                     table.remove(droppedItems, candidate.index)
                     fillSlot(combatant, chosen, candidate.weaponId, nil, 0)
                 end
-                showCombatMessage({
-                    "You draw the " .. weaponEntries[candidate.weaponId].name .. "!",
-                    "", "Press any key.",
-                }, true)
+                logCombat("You draw the " .. weaponEntries[candidate.weaponId].name .. "!")
                 return "full"
             end
         end
@@ -3037,7 +3138,7 @@ end
 -- exist yet up there.
 abilityEntries.adrenaline_shot.effect = function(user)
     applyCharacterStatus(user, "adrenaline")
-    showCombatMessage({ "You use the Adrenal Auto-Injector!", "", "Press any key." }, true)
+    logCombat("You use the Adrenal Auto-Injector!")
 end
 
 -- A special attack in its own right rather than an instant buff: one single
@@ -3054,7 +3155,7 @@ abilityEntries.rev_it_up.effect = function(user, enemy, sourcePart)
     local distance = gridDistance(user.gridX, user.gridY, enemy.gridX, enemy.gridY)
 
     if distance > weapon.range then
-        showCombatMessage({ "Nothing is in range.", "", "Press any key." }, true)
+        logCombat("Nothing is in range.")
         return "noop"
     end
 
@@ -3065,17 +3166,12 @@ abilityEntries.rev_it_up.effect = function(user, enemy, sourcePart)
     local hitChance = getFinalHitChance(user, enemy, weapon, distance)
 
     if math.random() > hitChance then
-        showCombatMessage({
-            "You rev up your Chain Sword and swing at the " .. enemy.name .. "'s " .. label .. "...",
-            "You miss!",
-            "",
-            "Press any key.",
-        }, true)
+        logCombat("You rev up your Chain Sword and swing at the " .. enemy.name .. "'s " .. label .. "... You miss!")
         return "miss"
     end
 
     local strength = user.stats.strength * getLimbStrength(user, sourcePart)
-    local lines = { "The Chain Sword saws through the " .. enemy.name .. "'s " .. label .. "!" }
+    logCombat("The Chain Sword saws through the " .. enemy.name .. "'s " .. label .. "!")
 
     for i = 1, 5 do
         if isDead(enemy.body) then
@@ -3088,12 +3184,8 @@ abilityEntries.rev_it_up.effect = function(user, enemy, sourcePart)
         if weapon.onHit then
             weapon.onHit(target)
         end
-        table.insert(lines, "Cut " .. i .. " deals " .. dealt .. "!")
+        logCombat("Cut " .. i .. " deals " .. dealt .. "!")
     end
-
-    table.insert(lines, "")
-    table.insert(lines, "Press any key.")
-    showCombatMessage(lines, true)
 end
 
 -- Heals yourself, not the opponent - a wound-tending action, not an attack.
@@ -3108,16 +3200,10 @@ abilityEntries.use_dermoregenesis_salve.effect = function(user, enemy)
     end
     local healed = healPart(target, 25)
     if enemy then
-        showCombatMessage({
-            "You apply the salve to your " .. label .. "!",
-            "Healed " .. healed .. " (" .. target.health .. "/" .. target.maxHealth .. ")",
-            "",
-            "Press any key.",
-        }, true)
+        logCombat("You apply the salve to your " .. label .. "! Healed " .. healed .. " (" .. target.health .. "/" .. target.maxHealth .. ")")
     else
-        -- Outside a fight, there's nothing left to decide once the limb's
-        -- picked - a full-screen "press any key" would just be friction,
-        -- so this logs instead (see logActivity).
+        -- Outside a fight there's no combat log to report to (see
+        -- logCombat) - this goes to the overworld's activity log instead.
         logActivity(dialogue("{{name}} used the Dermoregenesis Salve on {{him}}self.", user))
         logActivity(dialogue("{{name}} healed for " .. healed .. ".", user))
     end
@@ -3133,12 +3219,12 @@ abilityEntries.charge_shot.effect = function(user, enemy, sourcePart, sourceSlot
     local distance = gridDistance(user.gridX, user.gridY, enemy.gridX, enemy.gridY)
 
     if distance > weapon.range then
-        showCombatMessage({ "Nothing is in range.", "", "Press any key." }, true)
+        logCombat("Nothing is in range.")
         return "noop"
     end
 
     if (user.ammo[sourceSlot] or 0) < CHARGE_SHOT_AMMO_COST then
-        showCombatMessage({ "Not enough ammo to charge a shot.", "", "Press any key." }, true)
+        logCombat("Not enough ammo to charge a shot.")
         return "noop"
     end
 
@@ -3152,24 +3238,17 @@ abilityEntries.charge_shot.effect = function(user, enemy, sourcePart, sourceSlot
     user.ammo[sourceSlot] = user.ammo[sourceSlot] - CHARGE_SHOT_AMMO_COST
 
     if math.random() > hitChance then
-        showCombatMessage({
-            "You charge the Laser Pistol and fire (" .. hitPercent .. "% to hit)...",
-            "You miss!",
-            "",
-            "Press any key.",
-        }, true)
+        logCombat("You charge the Laser Pistol and fire (" .. hitPercent .. "% to hit)... You miss!")
         return
     end
 
     local roll = math.random(weapon.damage.min, weapon.damage.max)
     local dealt = damagePart(enemy, target, roll * 2, weapon.damageType)
 
-    showCombatMessage({
-        "The charged shot hits the " .. enemy.name .. "'s " .. label .. " for " .. dealt .. "! (" .. hitPercent .. "% to hit)",
-        "(" .. target.health .. "/" .. target.maxHealth .. ")",
-        "",
-        "Press any key.",
-    }, true)
+    logCombat(
+        "The charged shot hits the " .. enemy.name .. "'s " .. label .. " for " .. dealt .. "! (" .. hitPercent .. "% to hit)" ..
+        " (" .. target.health .. "/" .. target.maxHealth .. ")"
+    )
 end
 
 -- "The scene" is whoever's left to fight this encounter - just one enemy
@@ -3228,6 +3307,12 @@ local function runEncounter(triggeringObject)
     local scene = { enemy }
     local loc = world[player.location]
 
+    -- Whichever entry in `scene` Fight/Look/an ability's targeting acts on
+    -- - Tab cycles this in promptAction. Only one foe exists yet, so this
+    -- never actually moves, but the plumbing's in place for whenever a
+    -- second one shows up.
+    local selectedEnemyIndex = 1
+
     -- Enemy spawns somewhere else in the same room; retry a few times to
     -- avoid landing right on the player, but don't sweat a tiny room.
     for _ = 1, 20 do
@@ -3238,8 +3323,9 @@ local function runEncounter(triggeringObject)
         end
     end
 
+    resetCombatLog()
     logActivity(dialogue("{{name}} fought " .. joinEnemyNames(scene) .. ".", player))
-    showCombatMessage({ "A " .. enemy.name .. " attacks!", "", "Press any key." }, true)
+    logCombat("A " .. enemy.name .. " attacks!")
 
     -- Action economy: a full action always ends the round. Quick actions are
     -- half an action each - the first one taken this round flips
@@ -3299,10 +3385,12 @@ local function runEncounter(triggeringObject)
             return false
         end
 
-        local action, moveDir = promptAction(loc, enemy, quickened)
+        local action, moveDir, newSelectedIndex = promptAction(loc, scene, selectedEnemyIndex, quickened)
+        selectedEnemyIndex = newSelectedIndex
+        local foe = scene[selectedEnemyIndex]
 
         if action == "flee" then
-            showCombatMessage({ "You break off and flee.", "", "Press any key." }, true)
+            logCombat("You break off and flee.")
             logActivity(dialogue("{{name}} fled.", player))
             returnUnclaimedDrops()
             return false
@@ -3316,7 +3404,7 @@ local function runEncounter(triggeringObject)
         if action == "move" then
             local moveIsQuick = getEffectiveReflex(player) >= REFLEX_QUICK_THRESHOLD
             if quickened and not moveIsQuick then
-                showCombatMessage({ "You don't have time to move.", "", "Press any key." }, true)
+                logCombat("You don't have time to move.")
             else
                 local delta = dirDelta[moveDir]
                 local nx, ny = player.gridX + delta.dx, player.gridY + delta.dy
@@ -3334,14 +3422,19 @@ local function runEncounter(triggeringObject)
             speed = "quick"
         end
 
+        if action == "look" then
+            viewLimbs("The " .. foe.name .. "'s condition:", foe.body)
+            speed = "instant"
+        end
+
         if action == "ability" then
             local entry = pickAbility(player, quickened)
             if entry == "back" then
                 -- cancelled, nothing happened
             elseif not entry then
-                showCombatMessage({ "You have nothing to use.", "", "Press any key." }, true)
+                logCombat("You have nothing to use.")
             else
-                local result = entry.ability.effect(player, enemy, entry.part, entry.slot)
+                local result = entry.ability.effect(player, foe, entry.part, entry.slot)
 
                 if result ~= "noop" then
                     if entry.itemId and entry.slot then
@@ -3370,18 +3463,18 @@ local function runEncounter(triggeringObject)
         end
 
         if action == "fight" then
-            local distance = gridDistance(player.gridX, player.gridY, enemy.gridX, enemy.gridY)
-            local attacker, weapon = pickAttack(player.equipped, enemy, distance, quickened)
+            local distance = gridDistance(player.gridX, player.gridY, foe.gridX, foe.gridY)
+            local attacker, weapon = pickAttack(player.equipped, foe, distance, quickened)
 
             if attacker == "back" then
                 -- cancelled, nothing happened
             elseif not attacker then
-                showCombatMessage({ "Nothing is in range.", "", "Press any key." }, true)
+                logCombat("Nothing is in range.")
             else
-                local target, label = pickLimb("Target the " .. enemy.name .. "'s:", enemy.body)
+                local target, label = pickLimb("Target the " .. foe.name .. "'s:", foe.body)
 
                 if target then
-                    local hitChance = getFinalHitChance(player, enemy, weapon, distance)
+                    local hitChance = getFinalHitChance(player, foe, weapon, distance)
                     local hitPercent = math.floor(hitChance * 100 + 0.5)
                     speed = weapon.handedness == "two-handed" and "full" or "quick"
 
@@ -3391,12 +3484,7 @@ local function runEncounter(triggeringObject)
                     end
 
                     if math.random() > hitChance then
-                        showCombatMessage({
-                            "Your " .. attacker.label .. " swings with " .. weapon.name .. " (" .. hitPercent .. "% to hit)...",
-                            "You miss!",
-                            "",
-                            "Press any key.",
-                        }, true)
+                        logCombat("Your " .. attacker.label .. " swings with " .. weapon.name .. " (" .. hitPercent .. "% to hit)... You miss!")
                     else
                         local strength = 1
                         if weapon.type == "melee" then
@@ -3404,17 +3492,15 @@ local function runEncounter(triggeringObject)
                         end
                         local roll = math.random(weapon.damage.min, weapon.damage.max)
                         local raw = math.floor(roll * strength + 0.5)
-                        local dealt = damagePart(enemy, target, raw, weapon.damageType)
+                        local dealt = damagePart(foe, target, raw, weapon.damageType)
                         if weapon.onHit then
                             weapon.onHit(target)
                         end
 
-                        showCombatMessage({
-                            "Your " .. attacker.label .. " hits the " .. enemy.name .. "'s " .. label .. " with " .. weapon.name .. " for " .. dealt .. "! (" .. hitPercent .. "% to hit)",
-                            "(" .. target.health .. "/" .. target.maxHealth .. ")",
-                            "",
-                            "Press any key.",
-                        }, true)
+                        logCombat(
+                            "Your " .. attacker.label .. " hits the " .. foe.name .. "'s " .. label .. " with " .. weapon.name ..
+                            " for " .. dealt .. "! (" .. hitPercent .. "% to hit) (" .. target.health .. "/" .. target.maxHealth .. ")"
+                        )
                     end
                 end
             end
@@ -3425,21 +3511,16 @@ local function runEncounter(triggeringObject)
             if target == "back" then
                 -- cancelled, nothing happened
             elseif not target then
-                showCombatMessage({ "Nothing to reload.", "", "Press any key." }, true)
+                logCombat("Nothing to reload.")
             else
                 local loaded = reloadWeapon(player, target.slot)
-                showCombatMessage({
-                    "You reload the " .. target.weapon.name .. ".",
-                    "Loaded " .. loaded .. " (" .. player.ammo[target.slot] .. "/" .. target.weapon.ammoCapacity .. ")",
-                    "",
-                    "Press any key.",
-                }, true)
+                logCombat("You reload the " .. target.weapon.name .. ". Loaded " .. loaded .. " (" .. player.ammo[target.slot] .. "/" .. target.weapon.ammoCapacity .. ")")
                 speed = "quick"
             end
         end
 
         if action == "belt" then
-            speed = runBeltAction(player, droppedItems, enemy, quickened)
+            speed = runBeltAction(player, droppedItems, foe, quickened)
         end
 
         -- nil: nothing happened, quickened untouched, prompt again.
@@ -3475,7 +3556,7 @@ local function runEncounter(triggeringObject)
                 if decision.action == "move" then
                     enemy.gridX = math.max(1, math.min(loc.width, enemy.gridX + decision.dx))
                     enemy.gridY = math.max(1, math.min(loc.height, enemy.gridY + decision.dy))
-                    showCombatMessage({ "The " .. enemy.name .. " closes in!", "", "Press any key." }, true)
+                    logCombat("The " .. enemy.name .. " closes in!")
                 elseif decision.action == "attack" then
                     local weapon = weaponEntries.strike
                     local distance = gridDistance(player.gridX, player.gridY, enemy.gridX, enemy.gridY)
@@ -3483,11 +3564,7 @@ local function runEncounter(triggeringObject)
                     local enemyHitPercent = math.floor(enemyHitChance * 100 + 0.5)
 
                     if math.random() > enemyHitChance then
-                        showCombatMessage({
-                            "The " .. enemy.name .. " attacks (" .. enemyHitPercent .. "% to hit) and misses!",
-                            "",
-                            "Press any key.",
-                        }, true)
+                        logCombat("The " .. enemy.name .. " attacks (" .. enemyHitPercent .. "% to hit) and misses!")
                     else
                         local parts = collectLabeledParts(player.body)
                         local pick = parts[math.random(#parts)]
@@ -3499,15 +3576,17 @@ local function runEncounter(triggeringObject)
                         end
                         drawStats()
 
-                        local dead = isDead(player.body)
-                        showCombatMessage({
-                            "The " .. enemy.name .. " hits your " .. pick.label .. " for " .. dealt .. "! (" .. enemyHitPercent .. "% to hit)",
-                            "(" .. pick.part.health .. "/" .. pick.part.maxHealth .. ")",
-                            "",
-                            dead and "You died." or "Press any key.",
-                        }, true)
+                        logCombat(
+                            "The " .. enemy.name .. " hits your " .. pick.label .. " for " .. dealt ..
+                            "! (" .. enemyHitPercent .. "% to hit) (" .. pick.part.health .. "/" .. pick.part.maxHealth .. ")"
+                        )
 
-                        if dead then
+                        -- Death is the one AI-turn outcome that still stops
+                        -- the player in their tracks with a full screen,
+                        -- same as victory - everything else here is routine
+                        -- enough for the log.
+                        if isDead(player.body) then
+                            showCombatMessage({ "You died.", "", "Press any key." }, true)
                             returnUnclaimedDrops()
                             return true
                         end
@@ -3521,11 +3600,7 @@ local function runEncounter(triggeringObject)
                         if pick.part.health <= 0 then
                             local droppedWeaponId = dropEquippedItem(droppedItems, pick.label)
                             if droppedWeaponId then
-                                showCombatMessage({
-                                    "Your " .. pick.label .. " goes limp - the " .. weaponEntries[droppedWeaponId].name .. " clatters to the ground!",
-                                    "",
-                                    "Press any key.",
-                                }, true)
+                                logCombat("Your " .. pick.label .. " goes limp - the " .. weaponEntries[droppedWeaponId].name .. " clatters to the ground!")
                             end
                         end
                     end
@@ -3536,21 +3611,15 @@ local function runEncounter(triggeringObject)
             -- A full round has now actually elapsed - this is "the start of
             -- your next turn" as far as status durations (and anything that
             -- ticks damage before decrementing, like bleed) are concerned.
-            local dotMessages = {}
             for _, tick in ipairs(applyDamageOverTime(player)) do
                 local verb = DOT_VERBS[tick.statusId] or "takes damage"
-                table.insert(dotMessages, "Your " .. tick.label .. " " .. verb .. " for " .. tick.dealt .. "!")
+                logCombat("Your " .. tick.label .. " " .. verb .. " for " .. tick.dealt .. "!")
             end
             for _, tick in ipairs(applyDamageOverTime(enemy)) do
                 local verb = DOT_VERBS[tick.statusId] or "takes damage"
-                table.insert(dotMessages, "The " .. enemy.name .. "'s " .. tick.label .. " " .. verb .. " for " .. tick.dealt .. "!")
+                logCombat("The " .. enemy.name .. "'s " .. tick.label .. " " .. verb .. " for " .. tick.dealt .. "!")
             end
-            if #dotMessages > 0 then
-                table.insert(dotMessages, "")
-                table.insert(dotMessages, "Press any key.")
-                showCombatMessage(dotMessages, true)
-                drawStats()
-            end
+            drawStats()
 
             if isDead(player.body) then
                 showCombatMessage({ "You died.", "", "Press any key." }, true)

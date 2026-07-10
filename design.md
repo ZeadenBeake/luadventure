@@ -15,9 +15,17 @@ otherwise.
 Four corners while exploring: stats (top-left), a portrait placeholder
 (top-right, nothing draws here yet), the walkable map (bottom-left, half the
 width it used to be), and the activity log (bottom-right - see "Activity
-log"). Combat, the inventory, and any blurb/dialogue interaction take over
-the whole screen as their own modal window instead of sharing the four
-corners.
+log"). The inventory and any blurb/dialogue interaction take over the whole
+screen as their own modal window instead of sharing the four corners.
+
+Combat gets its *own* four-corner layout rather than a single full-screen
+window - map (top-left), the action menu (bottom-left), a combat-scoped log
+(top-right - see "Activity log"), and the enemies in the scene (bottom-right
+- see "Combat menu & movement"). Combat's own sub-pickers (choosing an
+attack, a limb, an ability, a reload/belt target) and the two moments that
+still genuinely warrant stopping the player in their tracks (victory,
+death) fall back to the same full-screen window the inventory and dialogue
+use.
 
 Controls: arrow keys move, `Space` interacts with whatever's cardinally
 adjacent (see "Environment objects & symbols"), `i` opens the inventory,
@@ -27,27 +35,30 @@ below).
 
 ### Activity log
 
-A full-screen modal (combat, the inventory) draws right over this corner,
-so `render()` always redraws it from its own retained buffer
-(`activityLog`, `drawLog`) afterward rather than just reasserting
-visibility - toggling `setVisible(true)` alone is a no-op if it's already
-`true`, so that alone wouldn't actually restore anything a modal drew over
-it.
+Two separate logs sharing one pattern (`wrapText` wraps a line to the
+pane's width, an ever-growing buffer of already-wrapped lines, a draw
+function that redraws whatever tail end currently fits): `logActivity`/
+`activityLog`/`drawLog` for the overworld's bottom-right corner, and
+`logCombat`/`combatActivityLog`/`drawCombatLog` for combat's own top-right
+corner (reset per encounter via `resetCombatLog`). A full-screen modal
+draws right over whichever corner it's covering, so both `render()` (the
+overworld) and `promptAction` (combat) redraw their log from its retained
+buffer afterward rather than just reasserting visibility - toggling
+`setVisible(true)` alone is a no-op if it's already `true`, so that alone
+wouldn't actually restore anything a modal drew over it.
 
-`logActivity(message)` wraps a line to the log's width (`wrapText` - also
-what `writeWrapped` itself is built on now) and appends it to the buffer,
-which only ever grows; `drawLog` draws whatever tail end of it currently
-fits. This is specifically for things that happen **outside combat** -
-combat already has its own full-screen messaging (`showCombatMessage`) and
-doesn't need it. Right now that's: picking something up, a door opening or
-closing, using an item outside a fight (the salve, so far - see "Inventory
-& equipment"), changing region, and the moment a fight actually starts,
-wins, or is fled from (not what happens *during* one - that's still all
-`showCombatMessage`; these four are logged right as the encounter begins or
-ends, so they're only visible once the full-screen fight itself is over).
-`joinEnemyNames` turns `scene` into "the test dummy" for one foe, an
-Oxford-comma list for more - nothing spawns more than one yet, but `scene`
-is already a list (see "Victory").
+`logActivity` is for things that happen **outside combat**: picking
+something up, a door opening or closing, using an item outside a fight (the
+salve, so far - see "Inventory & equipment"), changing region, and the
+moment a fight actually starts, wins, or is fled from (not what happens
+*during* one - that's `logCombat`, in its own pane, visible for the whole
+fight rather than only once it's over). `logCombat` is for everything
+routine that happens mid-fight - a swing landing or missing, a status tick,
+an enemy closing in - so only the small handful of moments that actually
+warrant the player's full attention (`showCombatMessage` - victory, death)
+still interrupt. `joinEnemyNames` turns `scene` into "the test dummy" for
+one foe, an Oxford-comma list for more - nothing spawns more than one yet,
+but `scene` is already a list (see "Victory").
 
 ## World & movement
 
@@ -297,17 +308,38 @@ than one foe at once - nothing does yet.
 
 ### Combat menu & movement
 
-`promptAction` builds the "What will you do?" menu dynamically rather than
-drawing fixed numbered lines: **Fight**, **Reload** (only shown at all when
+`promptAction` builds the action menu dynamically rather than drawing fixed
+numbered lines: **Fight**, **Look**, **Reload** (only shown at all when
 `hasAmmoWeapon` says an equipped weapon actually uses ammo), **Ability**,
 **Belt**, **Idle**, **Flee**, numbered in that order with whichever entries
-apply. Movement isn't a menu entry - arrow keys reposition immediately,
-same turn cost and quickened/full gating as ever (a "You don't have time to
-move" rejection if quickened and reflex isn't fast enough, silently no-op
-on stepping into a wall), just without the extra "Move, then which way?"
-confirmation step that used to sit in between. A hint line ("Arrow keys to
-move (quick)" or "(full)", read off `getEffectiveReflex`) sits under the
-numbered options so this isn't a hidden control.
+apply - drawn into its own bottom-left pane with no "What will you do?"
+header, since between the numbered options and the move hint that's already
+everything the pane has room for without needing to scroll. Movement isn't
+a menu entry - arrow keys reposition immediately, same turn cost and
+quickened/full gating as ever (a "You don't have time to move" rejection if
+quickened and reflex isn't fast enough, silently no-op on stepping into a
+wall), just without a separate confirmation step in between. A hint line
+("Arrow keys to move (quick)" or "(full)", read off `getEffectiveReflex`)
+sits under the numbered options so this isn't a hidden control.
+
+**Enemy selection**: the bottom-right pane (`drawEnemyList`) lists every foe
+in `scene`, health included, with whichever one's currently selected marked
+- `Tab` cycles it, handled right inside `promptAction`'s own key loop
+(doesn't cost a turn or count as an action). **Fight** and **Look**, and
+whatever enemy an ability's own effect targets, all act on this selection
+rather than a hardcoded single opponent - `runEncounter` reads it back out
+as `foe` (`scene[selectedEnemyIndex]`) once `promptAction` returns. Only one
+enemy exists yet, so this never actually has anywhere to cycle *to*, but
+every part of the plumbing (the selection index itself, the list drawing,
+targeting reading off it instead of a bespoke variable) already treats
+`scene` as a real list rather than assuming exactly one - the next enemy
+type just has to show up in it.
+
+**Look** is an instant action (`viewLimbs`, a read-only version of
+`pickLimb` that shows the selected foe's whole limb list - health included
+- without prompting to choose one, since sizing up an opponent isn't a
+targeting decision). Being instant, it never touches `quickened` and always
+grants another turn, same as the Adrenal Auto-Injector.
 
 ### Weapons
 
