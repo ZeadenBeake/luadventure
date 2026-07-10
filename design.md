@@ -10,6 +10,18 @@ Sci-fi RPG, text-mode, single file, built against CraftOS-PC (a CC:Tweaked
 emulator). Everything below is implemented and playable unless it says
 otherwise.
 
+### A note on locals
+
+Lua's main chunk (the whole file, since none of this is wrapped in an outer
+function) has a hard ceiling of 200 local variables, and this file is
+already close to it - `luac -p` will refuse to compile at all, with a "too
+many local variables" error, if a change pushes it over. Before adding a
+new top-level `local` (a constant, a one-off helper function, a piece of
+state), check whether it can be a field on an existing table instead
+(`combatState` - see "Activity log" - is exactly this: several things that
+would otherwise be separate top-level locals, grouped into one) - a table
+field costs nothing against the limit, only bare locals do.
+
 ## Screen layout
 
 Four corners while exploring: stats (top-left), a portrait placeholder
@@ -59,6 +71,28 @@ warrant the player's full attention (`showCombatMessage` - victory, death)
 still interrupt. `joinEnemyNames` turns `scene` into "the test dummy" for
 one foe, an Oxford-comma list for more - nothing spawns more than one yet,
 but `scene` is already a list (see "Victory").
+
+**Pacing**: `logCombat` pauses for `combatState.logDelay` (0.5s, the one
+knob for all of this) after drawing each line, so a turn's events reveal
+one at a time instead of dumping the whole result at once - every call site
+gets this for free rather than remembering to pace itself. Anything that
+resolves in multiple steps (a swing, then a hit or miss; Rev it up!'s five
+separate cuts) logs each step as its own `logCombat` call rather than one
+combined line, so the delay actually paces them apart; a multi-hit ability
+also logs a "dealt N damage" summary line once it's done. Landing a hit also
+flashes the target's map glyph red for the same `logDelay`
+(`combatState.flash`, straight ANSI color via `term`'s `colors` API - works
+fine through CraftOS-PC's ncurses CLI renderer). Since a fullscreen
+sub-picker (choosing an attack, a limb, an ability) draws right over the
+map/enemy panes, whatever was showing needs putting back the moment the
+picker closes - `combatState.redrawPanes` handles that, called right after
+every such picker returns and before any of the paced logging above starts,
+so a flash never lands on stale picker text instead of the actual map.
+`combatState` bundles all of this (the delay, the flash/redraw functions,
+and the current encounter's loc/scene/selection - so ability effects can
+reach them without loc/scene threaded through every function signature)
+into one table rather than several more top-level locals - see "A note on
+locals" below.
 
 ## World & movement
 

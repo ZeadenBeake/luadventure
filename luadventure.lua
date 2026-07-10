@@ -2462,6 +2462,18 @@ local function showCombatMessage(lines, wait)
     end
 end
 
+-- Grab-bag of combat-only state that doesn't belong to any one function -
+-- Lua's main chunk has a hard 200-local ceiling and this file sits close
+-- to it, so this holds what would otherwise be several more top-level
+-- locals (the pacing knob, plus the current encounter's loc/scene/
+-- selection - see combatState.redrawPanes below - and the flash helper
+-- itself)
+-- as fields on one shared table instead.
+-- `logDelay`: how long each combat log line lingers before the next one
+-- appears, and how long a flashed map cell stays red - one shared knob for
+-- both, tweak here to make combat resolve faster/slower.
+local combatState = { logDelay = 0.5 }
+
 -- Every wrapped line logged so far this encounter, oldest first - mirrors
 -- activityLog/drawLog/logActivity (see those), just scoped to a single
 -- fight and drawn into combatLogWin instead. Reset per encounter (see
@@ -2484,12 +2496,16 @@ end
 -- missing, a status tick, an enemy closing in - without interrupting with
 -- a "Press any key" prompt. showCombatMessage is still there for the small
 -- handful of moments that actually deserve the player's full attention.
+-- Pauses for combatState.logDelay after drawing so each line has a moment
+-- to register before the next one appears - every call site gets this for
+-- free, rather than each one having to remember to pace itself.
 local function logCombat(message)
     local width = combatLogWin.getSize()
     for _, line in ipairs(wrapText(message, width)) do
         table.insert(combatActivityLog, line)
     end
     drawCombatLog()
+    sleep(combatState.logDelay)
 end
 
 local function resetCombatLog()
@@ -2525,6 +2541,20 @@ local function drawCombatField(loc, scene)
     combatMapWin.setVisible(true)
 end
 
+-- Briefly flips a single map cell to red, for a hit landing - the map's
+-- already sitting there visible from the last drawCombatField, so this
+-- just paints straight over the one cell rather than redrawing the whole
+-- pane, then paints it back once combatState.logDelay has passed.
+function combatState.flash(x, y, symbol)
+    combatMapWin.setTextColor(colors.red)
+    combatMapWin.setCursorPos(x, y + 1)
+    combatMapWin.write(symbol)
+    sleep(combatState.logDelay)
+    combatMapWin.setTextColor(colors.white)
+    combatMapWin.setCursorPos(x, y + 1)
+    combatMapWin.write(symbol)
+end
+
 -- The bottom-right pane: every foe still in the scene, health included, with
 -- the currently-selected one marked - Tab cycles it (see promptAction).
 -- Fight/Look/an ability's targeting all act on whichever's selected here.
@@ -2541,6 +2571,28 @@ local function drawEnemyList(scene, selectedIndex)
         ))
     end
     combatEnemyWin.setVisible(true)
+end
+
+-- `combatState.loc`/`.scene` don't change for the life of an encounter, and
+-- neither does `.selectedIndex` except via Tab - tracked here so anything
+-- mid-resolution (an ability effect, runBeltAction, a picker returning) can
+-- put the map/enemy panes back the way they should look without needing
+-- loc/scene threaded all the way through every call. Set once near the top
+-- of runEncounter and whenever the selection changes.
+
+-- A fullscreen sub-picker (choosing an attack, a limb, an ability, a
+-- reload/belt target) draws right over the map/enemy panes the same way
+-- showCombatMessage does - unlike showCombatMessage's old blocking
+-- "Press any key" though, resolution now continues straight into a paced
+-- sequence of logCombat/combatState.flash calls, so whatever picker was
+-- showing needs putting right first, or those would be flashing over stale
+-- picker text instead of the actual map. Call this right after any such
+-- picker returns, before resolution logging begins.
+function combatState.redrawPanes()
+    if combatState.loc then
+        drawCombatField(combatState.loc, combatState.scene)
+        drawEnemyList(combatState.scene, combatState.selectedIndex)
+    end
 end
 
 -- restricted is true mid a quick action's bonus turn: Fight/Ability still
@@ -2988,6 +3040,7 @@ local function runBeltAction(combatant, droppedItems, enemy, restricted)
             break
         end
     end
+    combatState.redrawPanes()
 
     local weaponId, itemId = getSlotContents(combatant, chosen)
 
@@ -3027,6 +3080,7 @@ local function runBeltAction(combatant, droppedItems, enemy, restricted)
                 local destination = destinations[index]
                 local destWeaponId, destItemId = getSlotContents(combatant, destination)
                 swapSlots(combatant, chosen, destination)
+                combatState.redrawPanes()
                 if destWeaponId then
                     logCombat("You swap your " .. weaponEntries[weaponId].name .. " for the " .. weaponEntries[destWeaponId].name .. "!")
                 elseif destItemId then
@@ -3100,6 +3154,7 @@ local function runBeltAction(combatant, droppedItems, enemy, restricted)
                     table.remove(droppedItems, candidate.index)
                     fillSlot(combatant, chosen, candidate.weaponId, nil, 0)
                 end
+                combatState.redrawPanes()
                 logCombat("You draw the " .. weaponEntries[candidate.weaponId].name .. "!")
                 return "full"
             end
@@ -3163,6 +3218,7 @@ abilityEntries.rev_it_up.effect = function(user, enemy, sourcePart)
     if not target then
         return "noop"
     end
+    combatState.redrawPanes()
     local hitChance = getFinalHitChance(user, enemy, weapon, distance)
 
     if math.random() > hitChance then
@@ -3173,6 +3229,7 @@ abilityEntries.rev_it_up.effect = function(user, enemy, sourcePart)
     local strength = user.stats.strength * getLimbStrength(user, sourcePart)
     logCombat("The Chain Sword saws through the " .. enemy.name .. "'s " .. label .. "!")
 
+    local totalDealt = 0
     for i = 1, 5 do
         if isDead(enemy.body) then
             break
@@ -3184,8 +3241,12 @@ abilityEntries.rev_it_up.effect = function(user, enemy, sourcePart)
         if weapon.onHit then
             weapon.onHit(target)
         end
+        totalDealt = totalDealt + dealt
         logCombat("Cut " .. i .. " deals " .. dealt .. "!")
+        combatState.flash(enemy.gridX, enemy.gridY, "E")
     end
+
+    logCombat("You dealt " .. totalDealt .. " damage to the " .. enemy.name .. "'s " .. label .. "!")
 end
 
 -- Heals yourself, not the opponent - a wound-tending action, not an attack.
@@ -3200,6 +3261,7 @@ abilityEntries.use_dermoregenesis_salve.effect = function(user, enemy)
     end
     local healed = healPart(target, 25)
     if enemy then
+        combatState.redrawPanes()
         logCombat("You apply the salve to your " .. label .. "! Healed " .. healed .. " (" .. target.health .. "/" .. target.maxHealth .. ")")
     else
         -- Outside a fight there's no combat log to report to (see
@@ -3232,23 +3294,24 @@ abilityEntries.charge_shot.effect = function(user, enemy, sourcePart, sourceSlot
     if not target then
         return "noop"
     end
+    combatState.redrawPanes()
     local hitChance = getFinalHitChance(user, enemy, weapon, distance)
     local hitPercent = math.floor(hitChance * 100 + 0.5)
 
     user.ammo[sourceSlot] = user.ammo[sourceSlot] - CHARGE_SHOT_AMMO_COST
 
+    logCombat("You charge the Laser Pistol and fire at the " .. enemy.name .. "'s " .. label .. " (" .. hitPercent .. "% to hit)...")
+
     if math.random() > hitChance then
-        logCombat("You charge the Laser Pistol and fire (" .. hitPercent .. "% to hit)... You miss!")
+        logCombat("You miss!")
         return
     end
 
     local roll = math.random(weapon.damage.min, weapon.damage.max)
     local dealt = damagePart(enemy, target, roll * 2, weapon.damageType)
 
-    logCombat(
-        "The charged shot hits the " .. enemy.name .. "'s " .. label .. " for " .. dealt .. "! (" .. hitPercent .. "% to hit)" ..
-        " (" .. target.health .. "/" .. target.maxHealth .. ")"
-    )
+    logCombat("The charged shot hits for " .. dealt .. "! (" .. target.health .. "/" .. target.maxHealth .. ")")
+    combatState.flash(enemy.gridX, enemy.gridY, "E")
 end
 
 -- "The scene" is whoever's left to fight this encounter - just one enemy
@@ -3312,6 +3375,7 @@ local function runEncounter(triggeringObject)
     -- never actually moves, but the plumbing's in place for whenever a
     -- second one shows up.
     local selectedEnemyIndex = 1
+    combatState.loc, combatState.scene, combatState.selectedIndex = loc, scene, selectedEnemyIndex
 
     -- Enemy spawns somewhere else in the same room; retry a few times to
     -- avoid landing right on the player, but don't sweat a tiny room.
@@ -3387,6 +3451,7 @@ local function runEncounter(triggeringObject)
 
         local action, moveDir, newSelectedIndex = promptAction(loc, scene, selectedEnemyIndex, quickened)
         selectedEnemyIndex = newSelectedIndex
+        combatState.selectedIndex = selectedEnemyIndex
         local foe = scene[selectedEnemyIndex]
 
         if action == "flee" then
@@ -3429,6 +3494,7 @@ local function runEncounter(triggeringObject)
 
         if action == "ability" then
             local entry = pickAbility(player, quickened)
+            combatState.redrawPanes()
             if entry == "back" then
                 -- cancelled, nothing happened
             elseif not entry then
@@ -3465,6 +3531,7 @@ local function runEncounter(triggeringObject)
         if action == "fight" then
             local distance = gridDistance(player.gridX, player.gridY, foe.gridX, foe.gridY)
             local attacker, weapon = pickAttack(player.equipped, foe, distance, quickened)
+            combatState.redrawPanes()
 
             if attacker == "back" then
                 -- cancelled, nothing happened
@@ -3472,6 +3539,7 @@ local function runEncounter(triggeringObject)
                 logCombat("Nothing is in range.")
             else
                 local target, label = pickLimb("Target the " .. foe.name .. "'s:", foe.body)
+                combatState.redrawPanes()
 
                 if target then
                     local hitChance = getFinalHitChance(player, foe, weapon, distance)
@@ -3483,8 +3551,10 @@ local function runEncounter(triggeringObject)
                         player.ammo[attacker.label] = player.ammo[attacker.label] - (weapon.ammoPerShot or 1)
                     end
 
+                    logCombat("Your " .. attacker.label .. " swings with " .. weapon.name .. " at the " .. foe.name .. "'s " .. label .. " (" .. hitPercent .. "% to hit)...")
+
                     if math.random() > hitChance then
-                        logCombat("Your " .. attacker.label .. " swings with " .. weapon.name .. " (" .. hitPercent .. "% to hit)... You miss!")
+                        logCombat("You miss!")
                     else
                         local strength = 1
                         if weapon.type == "melee" then
@@ -3497,10 +3567,8 @@ local function runEncounter(triggeringObject)
                             weapon.onHit(target)
                         end
 
-                        logCombat(
-                            "Your " .. attacker.label .. " hits the " .. foe.name .. "'s " .. label .. " with " .. weapon.name ..
-                            " for " .. dealt .. "! (" .. hitPercent .. "% to hit) (" .. target.health .. "/" .. target.maxHealth .. ")"
-                        )
+                        logCombat("Hits for " .. dealt .. "! (" .. target.health .. "/" .. target.maxHealth .. ")")
+                        combatState.flash(foe.gridX, foe.gridY, "E")
                     end
                 end
             end
@@ -3508,6 +3576,7 @@ local function runEncounter(triggeringObject)
 
         if action == "reload" then
             local target = pickReloadTarget(player)
+            combatState.redrawPanes()
             if target == "back" then
                 -- cancelled, nothing happened
             elseif not target then
@@ -3563,8 +3632,10 @@ local function runEncounter(triggeringObject)
                     local enemyHitChance = getFinalHitChance(enemy, player, weapon, distance)
                     local enemyHitPercent = math.floor(enemyHitChance * 100 + 0.5)
 
+                    logCombat("The " .. enemy.name .. " attacks (" .. enemyHitPercent .. "% to hit)...")
+
                     if math.random() > enemyHitChance then
-                        logCombat("The " .. enemy.name .. " attacks (" .. enemyHitPercent .. "% to hit) and misses!")
+                        logCombat("It misses!")
                     else
                         local parts = collectLabeledParts(player.body)
                         local pick = parts[math.random(#parts)]
@@ -3576,10 +3647,8 @@ local function runEncounter(triggeringObject)
                         end
                         drawStats()
 
-                        logCombat(
-                            "The " .. enemy.name .. " hits your " .. pick.label .. " for " .. dealt ..
-                            "! (" .. enemyHitPercent .. "% to hit) (" .. pick.part.health .. "/" .. pick.part.maxHealth .. ")"
-                        )
+                        logCombat("Hits your " .. pick.label .. " for " .. dealt .. "! (" .. pick.part.health .. "/" .. pick.part.maxHealth .. ")")
+                        combatState.flash(player.gridX, player.gridY, "@")
 
                         -- Death is the one AI-turn outcome that still stops
                         -- the player in their tracks with a full screen,
@@ -3614,10 +3683,12 @@ local function runEncounter(triggeringObject)
             for _, tick in ipairs(applyDamageOverTime(player)) do
                 local verb = DOT_VERBS[tick.statusId] or "takes damage"
                 logCombat("Your " .. tick.label .. " " .. verb .. " for " .. tick.dealt .. "!")
+                combatState.flash(player.gridX, player.gridY, "@")
             end
             for _, tick in ipairs(applyDamageOverTime(enemy)) do
                 local verb = DOT_VERBS[tick.statusId] or "takes damage"
                 logCombat("The " .. enemy.name .. "'s " .. tick.label .. " " .. verb .. " for " .. tick.dealt .. "!")
+                combatState.flash(enemy.gridX, enemy.gridY, "E")
             end
             drawStats()
 
