@@ -13,14 +13,40 @@ otherwise.
 ### A note on locals
 
 Lua's main chunk (the whole file, since none of this is wrapped in an outer
-function) has a hard ceiling of 200 local variables, and this file is
-already close to it - `luac -p` will refuse to compile at all, with a "too
-many local variables" error, if a change pushes it over. Before adding a
-new top-level `local` (a constant, a one-off helper function, a piece of
-state), check whether it can be a field on an existing table instead
-(`combatState` - see "Activity log" - is exactly this: several things that
-would otherwise be separate top-level locals, grouped into one) - a table
-field costs nothing against the limit, only bare locals do.
+function) has a hard ceiling of 200 local variables - `luac -p` refuses to
+compile at all, with a "too many local variables" error, if a change pushes
+it over. This isn't a global budget across the file, though: each *function*
+(including nested ones, and the main chunk itself) tracks its own currently-
+active locals independently, so a local declared inside a `local function`
+doesn't count against the main chunk's 200 at all, no matter how deeply
+nested - only bare top-level locals do (declaring one, using it, and never
+touching it again afterward doesn't help either: Lua only frees a slot once
+its lexical scope actually closes, and a top-level local referenced by
+anything defined later in the file - which is nearly everything here -
+never closes before EOF).
+
+Two things actually reduce the top-level count, then, both already in use:
+
+- **A separate file.** `require`d code is its own chunk with its own fresh
+  200-local ceiling - splitting `gamedata.lua` out (see its own header
+  comment) freed real headroom this way, not just organizational tidiness.
+- **A table.** Every engine-internal function that used to be its own
+  `local function` now lives as a field on one `local engine = {}` instead
+  (`function engine.foo(...) ... end`) - a table field costs nothing
+  against the limit no matter how many hang off it, only the one bare
+  `engine` local does. The same idea already covered *state* before this
+  (`combatState`, `debugConsole`, `SAVE` - several things that would
+  otherwise be separate top-level locals, grouped into one); `engine`
+  is the same pattern applied to nearly everything that used to be a
+  top-level `local function`, which is why call sites throughout this file
+  read `engine.foo(...)` rather than a bare `foo(...)`. A function that's
+  only ever called from exactly one other function is a third, narrower
+  case - nesting it directly inside its one caller (`pickWieldingHands`,
+  `changeGrip`) also costs the outer function's own local budget, not the
+  main chunk's, without needing to go through `engine` at all.
+
+Before adding a new top-level `local` (a constant, a piece of state that
+doesn't fit `engine`), check whether one of these already covers it.
 
 ## Screen layout
 

@@ -1,7 +1,7 @@
 -- Fuck it, why not? Sci-fi fantasy RPG game, in lua, designed for CraftOS.
 
 -- --debug unlocks the developer console (tilde - see debugConsole.run,
--- defined much later alongside promptText): arbitrary health/item/status
+-- defined much later alongside engine.promptText): arbitrary health/item/status
 -- commands that bypass normal game rules entirely, so they're opt-in only
 -- rather than always reachable. Args reach this top-level chunk via `...`
 -- exactly like any other CC program's command-line arguments
@@ -24,6 +24,17 @@ local world = {} -- Gotta define this early...
 Luadventure = {
 
 }
+
+-- Every engine-internal function (everything below that used to be its
+-- own `local function`) lives as a field on this one table instead - see
+-- "A note on locals" in the design doc: a table field costs nothing
+-- against the 200-local ceiling on this chunk, only a bare local does,
+-- and this file was already brushing up against it. Declared this early
+-- (before any of them) so `function engine.foo(...)` below can actually
+-- resolve `engine` at the point each one's defined - order among them
+-- doesn't matter beyond that, since every closure just captures this same
+-- table by reference, not each other's values at definition time.
+local engine = {}
 
 -- All game content - organs, body parts, damage types, coverage zones,
 -- statuses, weapons, items, abilities, species, the world map, quests, and
@@ -56,11 +67,11 @@ local metaTags = {
     TUTORIAL_LOCK = true,
 }
 
-local function isMetaTag(tag)
+function engine.isMetaTag(tag)
     return metaTags[tag] == true
 end
 
-local function shallowCopySet(set)
+function engine.shallowCopySet(set)
     local copy = {}
     for k, v in pairs(set or {}) do copy[k] = v end
     return copy
@@ -69,8 +80,8 @@ end
 -- A part's *local* tags are its own inherent tags plus whatever's granted by
 -- every organ currently installed in it, hardcoded category slots and
 -- generic slots alike.
-local function getPartLocalTags(part)
-    local tags = shallowCopySet(part.tags)
+function engine.getPartLocalTags(part)
+    local tags = engine.shallowCopySet(part.tags)
     for _, organId in pairs(part.organs) do
         for _, tag in ipairs(organEntries[organId].grantsLocal or {}) do
             tags[tag] = true
@@ -84,19 +95,19 @@ local function getPartLocalTags(part)
     return tags
 end
 
-local function walkBody(part, fn)
+function engine.walkBody(part, fn)
     fn(part)
     for _, sub in pairs(part.subSlots) do
-        if sub then walkBody(sub, fn) end
+        if sub then engine.walkBody(sub, fn) end
     end
 end
 
 -- Global tags are gathered from every organ anywhere on the body that grants
 -- one. Call this again after installing/removing any organ that touches
 -- globals - it isn't tracked incrementally.
-local function recalcGlobalTags(torso)
+function engine.recalcGlobalTags(torso)
     local tags = {}
-    walkBody(torso, function(part)
+    engine.walkBody(torso, function(part)
         for _, organId in pairs(part.organs) do
             for _, tag in ipairs(organEntries[organId].grantsGlobal or {}) do
                 tags[tag] = true
@@ -113,7 +124,7 @@ end
 
 -- Tag presence is checked against local and global tags identically - the two
 -- namespaces are assumed never to overlap, so there's nothing to disambiguate.
-local function tagsSatisfied(requiredTags, localTags, globalTags)
+function engine.tagsSatisfied(requiredTags, localTags, globalTags)
     for _, tag in ipairs(requiredTags or {}) do
         if not (localTags[tag] or globalTags[tag]) then
             return false
@@ -122,7 +133,7 @@ local function tagsSatisfied(requiredTags, localTags, globalTags)
     return true
 end
 
-local function tagsAbsent(forbiddenTags, localTags, globalTags)
+function engine.tagsAbsent(forbiddenTags, localTags, globalTags)
     for _, tag in ipairs(forbiddenTags or {}) do
         if localTags[tag] or globalTags[tag] then
             return false
@@ -132,10 +143,10 @@ local function tagsAbsent(forbiddenTags, localTags, globalTags)
 end
 
 -- `aimDifficulty` (default 1, most templates omit it) divides a part's
--- starting health here, and its hit chance later (see getFinalHitChance) -
+-- starting health here, and its hit chance later (see engine.getFinalHitChance) -
 -- the same factor both ways, so a part that's harder to land a hit on also
 -- folds faster once one actually connects.
-local function instantiatePart(templateId)
+function engine.instantiatePart(templateId)
     local template = partEntries[templateId] or error("Unknown part template: " .. tostring(templateId), 2)
     local organs = {}
     for category, organId in pairs(template.organSlots or {}) do
@@ -145,7 +156,7 @@ local function instantiatePart(templateId)
     local health = math.floor(template.health / aimDifficulty + 0.5)
     return {
         template = templateId,
-        tags = shallowCopySet(template.tags),
+        tags = engine.shallowCopySet(template.tags),
         health = health,
         maxHealth = health,
         zone = template.zone,
@@ -158,7 +169,7 @@ local function instantiatePart(templateId)
     }
 end
 
-local function newTorso()
+function engine.newTorso()
     return {
         template = "torso",
         tags = { MORTAL = true },
@@ -193,26 +204,26 @@ end
 
 -- Attaches a whole new part into one of a parent part's sub-slots (a hand into
 -- an arm, a leg into the torso, ...). Fails if the slot is tag-locked.
-local function attachPart(parent, slotName, templateId, globalTags)
+function engine.attachPart(parent, slotName, templateId, globalTags)
     local slotDef = parent.subSlotDefs[slotName] or error("No such slot: " .. slotName, 2)
-    local localTags = getPartLocalTags(parent)
-    if not tagsSatisfied(slotDef.requires, localTags, globalTags) then
+    local localTags = engine.getPartLocalTags(parent)
+    if not engine.tagsSatisfied(slotDef.requires, localTags, globalTags) then
         return false, "slot locked"
     end
-    local child = instantiatePart(templateId)
+    local child = engine.instantiatePart(templateId)
     child.parent = parent
     parent.subSlots[slotName] = child
     return true
 end
 
 -- Swaps the organ filling one of a part's hardcoded category slots.
-local function installCategoryOrgan(part, category, organId, globalTags)
+function engine.installCategoryOrgan(part, category, organId, globalTags)
     local organDef = organEntries[organId] or error("Unknown organ: " .. tostring(organId), 2)
-    local localTags = getPartLocalTags(part)
-    if not tagsSatisfied(organDef.requires, localTags, globalTags) then
+    local localTags = engine.getPartLocalTags(part)
+    if not engine.tagsSatisfied(organDef.requires, localTags, globalTags) then
         return false, "missing required tag"
     end
-    if not tagsAbsent(organDef.conflicts, localTags, globalTags) then
+    if not engine.tagsAbsent(organDef.conflicts, localTags, globalTags) then
         return false, "conflicting tag present"
     end
     part.organs[category] = organId
@@ -220,13 +231,13 @@ local function installCategoryOrgan(part, category, organId, globalTags)
 end
 
 -- Installs an organ into the next free generic (cybernetic) slot.
-local function installGenericOrgan(part, organId, globalTags)
+function engine.installGenericOrgan(part, organId, globalTags)
     local organDef = organEntries[organId] or error("Unknown organ: " .. tostring(organId), 2)
-    local localTags = getPartLocalTags(part)
-    if not tagsSatisfied(organDef.requires, localTags, globalTags) then
+    local localTags = engine.getPartLocalTags(part)
+    if not engine.tagsSatisfied(organDef.requires, localTags, globalTags) then
         return false, "missing required tag"
     end
-    if not tagsAbsent(organDef.conflicts, localTags, globalTags) then
+    if not engine.tagsAbsent(organDef.conflicts, localTags, globalTags) then
         return false, "conflicting tag present"
     end
     table.insert(part.genericOrgans, organId)
@@ -237,9 +248,9 @@ end
 -- plus its shape (template id, subSlots), recursively - for save games.
 -- Deliberately drops `parent` (a back-reference, which would make this a
 -- cycle) and `subSlotDefs`/`tags`/`zone` (all three come straight back off
--- the template on reload, via instantiatePart/newTorso, so saving them too
+-- the template on reload, via engine.instantiatePart/engine.newTorso, so saving them too
 -- would just be redundant and risks going stale if templates ever change).
-local function serializeBodyPart(part)
+function engine.serializeBodyPart(part)
     local organs = {}
     for category, organId in pairs(part.organs) do
         organs[category] = organId
@@ -254,14 +265,14 @@ local function serializeBodyPart(part)
     end
     local subSlots = {}
     for slotName, sub in pairs(part.subSlots) do
-        subSlots[slotName] = serializeBodyPart(sub)
+        subSlots[slotName] = engine.serializeBodyPart(sub)
     end
     return {
         template = part.template,
         health = part.health,
         maxHealth = part.maxHealth,
         rootLabel = part.rootLabel, -- only ever set on the root; nil elsewhere
-        endurance = part.endurance, -- a species trait, not template-derived (see newInsectoidBody) - nil for anyone without one
+        endurance = part.endurance, -- a species trait, not template-derived (see engine.newInsectoidBody) - nil for anyone without one
         organs = organs,
         genericOrgans = genericOrgans,
         statuses = statuses,
@@ -270,13 +281,13 @@ local function serializeBodyPart(part)
 end
 
 -- Rebuilds a body part (and everything attached below it) from
--- serializeBodyPart's output. The root is always a fresh torso; every other
+-- engine.serializeBodyPart's output. The root is always a fresh torso; every other
 -- part is re-instantiated from its own template rather than trusting saved
 -- shape data directly, so a loaded body can't desync from what a freshly
--- created one would look like. Bypasses attachPart's slot-lock checks on
+-- created one would look like. Bypasses engine.attachPart's slot-lock checks on
 -- purpose - the save already proves this exact tree once existed.
-local function deserializeBodyPart(data, isRoot)
-    local part = isRoot and newTorso() or instantiatePart(data.template)
+function engine.deserializeBodyPart(data, isRoot)
+    local part = isRoot and engine.newTorso() or engine.instantiatePart(data.template)
     part.health = data.health
     part.maxHealth = data.maxHealth
     part.rootLabel = data.rootLabel
@@ -295,7 +306,7 @@ local function deserializeBodyPart(data, isRoot)
     end
     part.subSlots = {}
     for slotName, childData in pairs(data.subSlots) do
-        local child = deserializeBodyPart(childData, false)
+        local child = engine.deserializeBodyPart(childData, false)
         child.parent = part
         part.subSlots[slotName] = child
     end
@@ -305,7 +316,7 @@ end
 -- Combines a fresh application with whatever's already active: -1
 -- (permanent) always wins outright; otherwise a stacking status adds the
 -- two together, while a true-duration status just takes the higher one.
-local function combineDuration(existing, incoming, stacks)
+function engine.combineDuration(existing, incoming, stacks)
     if existing == nil then
         return incoming
     end
@@ -324,14 +335,14 @@ end
 -- default duration/dose (e.g. the chain sword applying 2 stacks of bleed
 -- instead of bleed's baseline 1), and combines with any existing instance
 -- per that status's own stacking rule.
-local function applyPartStatus(part, statusId, amount)
+function engine.applyPartStatus(part, statusId, amount)
     local def = statusEntries[statusId]
-    part.statuses[statusId] = combineDuration(part.statuses[statusId], amount or def.duration, def.stacks)
+    part.statuses[statusId] = engine.combineDuration(part.statuses[statusId], amount or def.duration, def.stacks)
 end
 
-local function applyCharacterStatus(combatant, statusId, amount)
+function engine.applyCharacterStatus(combatant, statusId, amount)
     local def = statusEntries[statusId]
-    combatant.statuses[statusId] = combineDuration(combatant.statuses[statusId], amount or def.duration, def.stacks)
+    combatant.statuses[statusId] = engine.combineDuration(combatant.statuses[statusId], amount or def.duration, def.stacks)
 end
 
 -- Ticks every active status on a combatant (itself and every part of its
@@ -339,7 +350,7 @@ end
 -- statuses are left untouched. Called once a full round has actually
 -- elapsed - an instant ability doesn't trigger this, since the turn hasn't
 -- ended yet.
-local function decrementStatuses(combatant)
+function engine.decrementStatuses(combatant)
     local function tick(statuses)
         for statusId, duration in pairs(statuses) do
             if duration > 0 then
@@ -352,14 +363,14 @@ local function decrementStatuses(combatant)
         end
     end
     tick(combatant.statuses)
-    walkBody(combatant.body, function(part)
+    engine.walkBody(combatant.body, function(part)
         tick(part.statuses)
     end)
 end
 
--- Same idea as decrementStatuses, but for ability cooldowns - those are
+-- Same idea as engine.decrementStatuses, but for ability cooldowns - those are
 -- character-wide only, never part-scoped.
-local function decrementCooldowns(combatant)
+function engine.decrementCooldowns(combatant)
     for abilityId, remaining in pairs(combatant.cooldowns) do
         if remaining <= 1 then
             combatant.cooldowns[abilityId] = nil
@@ -372,7 +383,7 @@ end
 -- Unlike tags, numeric modifiers (like STRENGTH) flow up through a part's
 -- ancestors - a reinforced upper arm makes the hand attached to it hit
 -- harder, not just the arm itself.
-local function getOwnModifier(part, key)
+function engine.getOwnModifier(part, key)
     local mult = 1
     for _, organId in pairs(part.organs) do
         local m = organEntries[organId].modifiers
@@ -391,11 +402,11 @@ local function getOwnModifier(part, key)
     return mult
 end
 
-local function getAncestorMultiplier(part, key)
+function engine.getAncestorMultiplier(part, key)
     local mult = 1
     local current = part
     while current do
-        mult = mult * getOwnModifier(current, key)
+        mult = mult * engine.getOwnModifier(current, key)
         current = current.parent
     end
     return mult
@@ -406,7 +417,7 @@ end
 -- stinger) never sets one at all, so this walks up to the nearest ancestor
 -- that does - a horn on the head is protected exactly as well as the head
 -- itself, never independently covered.
-local function getPartZone(part)
+function engine.getPartZone(part)
     local current = part
     while current do
         if current.zone then
@@ -420,7 +431,7 @@ end
 -- True if the combatant has any active character-scoped status that flags
 -- condition as ignored (adrenaline: full strength regardless of injury,
 -- until a part is destroyed outright).
-local function hasIgnoreCondition(combatant)
+function engine.hasIgnoreCondition(combatant)
     for statusId in pairs(combatant.statuses) do
         local status = statusEntries[statusId]
         if status.scope == "character" and status.ignoresCondition then
@@ -433,37 +444,37 @@ end
 -- 1 for full health, 0.5 for half health, etc - unless the combatant is
 -- running on adrenaline, in which case it's pinned at 1 until the part is
 -- actually destroyed (0 health), at which point even adrenaline can't help.
-local function getConditionMultiplier(combatant, part)
+function engine.getConditionMultiplier(combatant, part)
     if part.health <= 0 then
         return 0
     end
-    if hasIgnoreCondition(combatant) then
+    if engine.hasIgnoreCondition(combatant) then
         return 1
     end
     return part.health / part.maxHealth
 end
 
 -- A limb's effective strength: walk the same ancestor chain as
--- getAncestorMultiplier, but fold in each ancestor's own condition right
+-- engine.getAncestorMultiplier, but fold in each ancestor's own condition right
 -- alongside its own organ/status modifier - a damaged (or fractured) upper
 -- arm should weaken a punch the same way either way, not just via organs.
 -- This is what actually feeds the STRENGTH and REFLEX stats now, rather
 -- than raw condition or raw organ bonus alone.
-local function getLimbStrength(combatant, part)
+function engine.getLimbStrength(combatant, part)
     local strength = 1
     local current = part
     while current do
-        strength = strength * getOwnModifier(current, "strength") * getConditionMultiplier(combatant, current)
+        strength = strength * engine.getOwnModifier(current, "strength") * engine.getConditionMultiplier(combatant, current)
         current = current.parent
     end
     return strength
 end
 
 -- True once any MORTAL-tagged part (torso, head, ...) has hit 0 health.
-local function isDead(torso)
+function engine.isDead(torso)
     local dead = false
-    walkBody(torso, function(part)
-        if getPartLocalTags(part).MORTAL and part.health <= 0 then
+    engine.walkBody(torso, function(part)
+        if engine.getPartLocalTags(part).MORTAL and part.health <= 0 then
             dead = true
         end
     end)
@@ -472,9 +483,9 @@ end
 
 -- A destroyed limb takes everything attached to it down with it - a
 -- destroyed arm can't attack, and neither can a perfectly healthy hand
--- still hanging off the end of it. Checked by both pickAttack (unarmed or
+-- still hanging off the end of it. Checked by both engine.pickAttack (unarmed or
 -- otherwise) and weapon-granted abilities.
-local function isLimbFunctional(part)
+function engine.isLimbFunctional(part)
     local current = part
     while current do
         if current.health <= 0 then
@@ -488,7 +499,7 @@ end
 -- Gives a child slot a side-qualified label when its parent has one, so e.g.
 -- the "hand" slot under "left_arm" is reported as "left_hand" rather than two
 -- indistinguishable "hand" entries.
-local function partLabel(parentLabel, slotName)
+function engine.partLabel(parentLabel, slotName)
     local side = parentLabel:match("^(left)_") or parentLabel:match("^(right)_")
     if side and not slotName:match("^left_") and not slotName:match("^right_") then
         return side .. "_" .. slotName
@@ -506,13 +517,13 @@ end
 -- than "torso" without changing anything about how it actually works
 -- structurally - unused today (a torso is what every creature has, so no
 -- species relabels its own), but left in for whatever eventually wants it.
-local function collectLabeledParts(torso)
+function engine.collectLabeledParts(torso)
     local parts = {}
     local function walk(part, label, depth)
         table.insert(parts, { label = label, part = part, depth = depth })
         for slotName, sub in pairs(part.subSlots) do
             if sub then
-                walk(sub, partLabel(label, slotName), depth + 1)
+                walk(sub, engine.partLabel(label, slotName), depth + 1)
             end
         end
     end
@@ -523,22 +534,22 @@ end
 -- Carrying capacity: 10x average limb strength across the whole body, plus
 -- whatever flat bonus equipment grants (backpacks etc - none exist yet, but
 -- bulkBonus is where they'd add in).
-local function getAverageLimbStrength(combatant)
-    local parts = collectLabeledParts(combatant.body)
+function engine.getAverageLimbStrength(combatant)
+    local parts = engine.collectLabeledParts(combatant.body)
     local total = 0
     for _, entry in ipairs(parts) do
-        total = total + getLimbStrength(combatant, entry.part)
+        total = total + engine.getLimbStrength(combatant, entry.part)
     end
     return total / #parts
 end
 
-local function getBulkCapacity(combatant)
-    return 10 * getAverageLimbStrength(combatant) + combatant.bulkBonus
+function engine.getBulkCapacity(combatant)
+    return 10 * engine.getAverageLimbStrength(combatant) + combatant.bulkBonus
 end
 
 -- "Light" bulk (0.1) displays as L rather than a fraction; anything else is
 -- just the plain number.
-local function formatBulk(bulk)
+function engine.formatBulk(bulk)
     if bulk == 0.1 then
         return "L"
     end
@@ -548,7 +559,7 @@ end
 -- Total bulk currently carried, belt and main inventory both counting
 -- toward the same cap - the belt doesn't grant extra capacity, just a
 -- combat-usable place to keep a few things.
-local function getTotalBulk(combatant)
+function engine.getTotalBulk(combatant)
     local total = 0
     for _, itemId in ipairs(combatant.inventory) do
         total = total + itemEntries[itemId].bulk
@@ -563,7 +574,7 @@ local function getTotalBulk(combatant)
 end
 
 -- How many of a given item id are carried (inventory + belt).
-local function countCarriedItem(combatant, itemId)
+function engine.countCarriedItem(combatant, itemId)
     local count = 0
     for _, id in ipairs(combatant.inventory) do
         if id == itemId then count = count + 1 end
@@ -578,14 +589,14 @@ end
 -- they just each raise how many charges you're allowed to be carrying.
 -- Nothing enforces this yet since there's no way to acquire loose ammo
 -- besides the initial loadout, but it's here for whenever that exists.
-local function getMaxEnergyCharges(combatant)
-    return countCarriedItem(combatant, "battery") * itemEntries.battery.chargeCapacity
+function engine.getMaxEnergyCharges(combatant)
+    return engine.countCarriedItem(combatant, "battery") * itemEntries.battery.chargeCapacity
 end
 
 -- Removes up to `amount` of a given item id from a combatant's inventory
 -- (never the belt - ammo isn't something you'd keep there). Returns how
 -- many were actually removed.
-local function removeInventoryItems(combatant, itemId, amount)
+function engine.removeInventoryItems(combatant, itemId, amount)
     local removed = 0
     for i = #combatant.inventory, 1, -1 do
         if removed >= amount then break end
@@ -598,7 +609,7 @@ local function removeInventoryItems(combatant, itemId, amount)
 end
 
 -- Which item id a weapon's ammo class actually consumes on a reload.
-local function getAmmoItemId(weapon)
+function engine.getAmmoItemId(weapon)
     if weapon.ammoClass == "kinetic" then
         return "bullet"
     elseif weapon.ammoClass == "energy" then
@@ -612,10 +623,10 @@ end
 -- regained - bullets and energy_charges both work exactly the same way
 -- here, that's the whole point of fudging energy ammo into discrete units.
 -- Returns how many shots were actually loaded.
-local function reloadWeapon(combatant, slot)
+function engine.reloadWeapon(combatant, slot)
     local weapon = weaponEntries[combatant.equipped[slot]]
     local missing = weapon.ammoCapacity - (combatant.ammo[slot] or 0)
-    local loaded = removeInventoryItems(combatant, getAmmoItemId(weapon), missing)
+    local loaded = engine.removeInventoryItems(combatant, engine.getAmmoItemId(weapon), missing)
     combatant.ammo[slot] = (combatant.ammo[slot] or 0) + loaded
     return loaded
 end
@@ -627,12 +638,12 @@ end
 -- the inventory screen). So rather than pretend otherwise, `amount` units
 -- of a weapon's ammo just convert into loose ammo items in the inventory.
 -- A no-op if the weapon doesn't use ammo at all (or there's no weapon).
-local function depositAmmo(combatant, weaponId, amount)
+function engine.depositAmmo(combatant, weaponId, amount)
     local weapon = weaponEntries[weaponId]
     if not weapon or not weapon.ammoCapacity or not amount or amount <= 0 then
         return
     end
-    local ammoItemId = getAmmoItemId(weapon)
+    local ammoItemId = engine.getAmmoItemId(weapon)
     for _ = 1, amount do
         table.insert(combatant.inventory, ammoItemId)
     end
@@ -640,11 +651,11 @@ end
 
 -- Unequipping a weapon (for any reason - swapping it out, a destroyed
 -- hand, eventually looting an enemy's gun) spills whatever it had loaded
--- back into the inventory (see depositAmmo) and clears the slot's count -
+-- back into the inventory (see engine.depositAmmo) and clears the slot's count -
 -- whatever ends up there next reloads from scratch, same as picking up a
 -- stranger's weapon in real life would need to.
-local function returnAmmoToInventory(combatant, weaponId, ammoKey)
-    depositAmmo(combatant, weaponId, combatant.ammo[ammoKey])
+function engine.returnAmmoToInventory(combatant, weaponId, ammoKey)
+    engine.depositAmmo(combatant, weaponId, combatant.ammo[ammoKey])
     combatant.ammo[ammoKey] = nil
 end
 
@@ -652,7 +663,7 @@ end
 -- overlapping any area with, something already worn - clothing can't
 -- overlap. Not wired into any live "wear it" action yet (nothing offers one
 -- this turn), but it's the rule anything that does add one should call.
-local function canWearItem(combatant, itemId)
+function engine.canWearItem(combatant, itemId)
     local item = itemEntries[itemId]
     for _, wornId in ipairs(combatant.worn) do
         local worn = itemEntries[wornId]
@@ -672,7 +683,7 @@ end
 -- Total coverage protecting one specific area, for one damage type: every
 -- worn item that covers this exact area contributes its coverage (inner and
 -- outer both - protection from both layers stacks).
-local function getAreaCoverage(combatant, area, damageType)
+function engine.getAreaCoverage(combatant, area, damageType)
     local total = 0
     for _, itemId in ipairs(combatant.worn) do
         local item = itemEntries[itemId]
@@ -693,15 +704,15 @@ end
 -- pelvis/lower body dragging it back down. "belt" is excluded from the
 -- torso average - that area is reserved for expanding combat belt slots,
 -- not body armor.
-local function getCoverage(combatant, part, damageType)
-    local zone = getPartZone(part)
+function engine.getCoverage(combatant, part, damageType)
+    local zone = engine.getPartZone(part)
     if not zone then
         return 0
     end
     local total, count = 0, 0
     for _, area in ipairs(COVERAGE_AREAS[zone]) do
         if area ~= "belt" then
-            total = total + getAreaCoverage(combatant, area, damageType)
+            total = total + engine.getAreaCoverage(combatant, area, damageType)
             count = count + 1
         end
     end
@@ -721,41 +732,41 @@ end
 -- applied, post-everything, so callers can report it honestly. Otherwise
 -- doesn't do anything beyond tracking health yet - stat penalties for
 -- damaged/destroyed limbs are a later concern. Only a MORTAL part reaching
--- 0 has any effect right now (see isDead).
-local function damagePart(owner, part, amount, damageType)
+-- 0 has any effect right now (see engine.isDead).
+function engine.damagePart(owner, part, amount, damageType)
     local resistance = 1
     if damageType ~= "untyped" then
         resistance = (part.resistances and part.resistances[damageType]) or 1
     end
     local endurance = part.endurance or 0
-    local coverage = getCoverage(owner, part, damageType)
+    local coverage = engine.getCoverage(owner, part, damageType)
     local applied = math.max(0, math.floor(amount * resistance * (1 - endurance) - coverage + 0.5))
     part.health = math.max(0, part.health - applied)
     return applied
 end
 
--- The healing counterpart to damagePart: never overheals past maxHealth,
+-- The healing counterpart to engine.damagePart: never overheals past maxHealth,
 -- returns the actual amount restored.
-local function healPart(part, amount)
+function engine.healPart(part, amount)
     local healed = math.min(amount, part.maxHealth - part.health)
     part.health = part.health + healed
     return healed
 end
 
--- Runs once a round, before decrementStatuses: any part-scoped status with
+-- Runs once a round, before engine.decrementStatuses: any part-scoped status with
 -- damagePerStack (bleed, poison) deals damage equal to its *current* stack
 -- count to its own part, using that status's own damage type. Returns a
 -- list of {label, dealt, statusId} for whatever ticked, so the caller can
 -- report it (statusId picks the right verb - see DOT_VERBS) - the actual
--- stack removal is decrementStatuses' ordinary decrement, run right after
+-- stack removal is engine.decrementStatuses' ordinary decrement, run right after
 -- this.
-local function applyDamageOverTime(combatant)
+function engine.applyDamageOverTime(combatant)
     local ticks = {}
-    for _, entry in ipairs(collectLabeledParts(combatant.body)) do
+    for _, entry in ipairs(engine.collectLabeledParts(combatant.body)) do
         for statusId, duration in pairs(entry.part.statuses) do
             local def = statusEntries[statusId]
             if def.damagePerStack and duration > 0 then
-                local dealt = damagePart(combatant, entry.part, duration, def.damagePerStack)
+                local dealt = engine.damagePart(combatant, entry.part, duration, def.damagePerStack)
                 table.insert(ticks, { label = entry.label, dealt = dealt, statusId = statusId })
             end
         end
@@ -766,18 +777,18 @@ end
 -- Standard human body: torso plus the four default limbs, each with the
 -- baseline human organ set already filling their hardcoded slots. Shared by
 -- the player and any humanoid NPC.
-local function newHumanBody(globalTags)
+function engine.newHumanBody(globalTags)
     globalTags = globalTags or {}
-    local body = newTorso()
-    attachPart(body, "head", "human_head", globalTags)
-    attachPart(body, "left_arm", "human_arm", globalTags)
-    attachPart(body, "right_arm", "human_arm", globalTags)
-    attachPart(body, "left_leg", "human_leg", globalTags)
-    attachPart(body, "right_leg", "human_leg", globalTags)
-    attachPart(body.subSlots.left_arm, "hand", "human_hand", globalTags)
-    attachPart(body.subSlots.right_arm, "hand", "human_hand", globalTags)
-    attachPart(body.subSlots.left_leg, "foot", "human_foot", globalTags)
-    attachPart(body.subSlots.right_leg, "foot", "human_foot", globalTags)
+    local body = engine.newTorso()
+    engine.attachPart(body, "head", "human_head", globalTags)
+    engine.attachPart(body, "left_arm", "human_arm", globalTags)
+    engine.attachPart(body, "right_arm", "human_arm", globalTags)
+    engine.attachPart(body, "left_leg", "human_leg", globalTags)
+    engine.attachPart(body, "right_leg", "human_leg", globalTags)
+    engine.attachPart(body.subSlots.left_arm, "hand", "human_hand", globalTags)
+    engine.attachPart(body.subSlots.right_arm, "hand", "human_hand", globalTags)
+    engine.attachPart(body.subSlots.left_leg, "foot", "human_foot", globalTags)
+    engine.attachPart(body.subSlots.right_leg, "foot", "human_foot", globalTags)
     return body
 end
 
@@ -793,41 +804,41 @@ end
 -- head with its own antennae slot and an inherent UNSIGHTLY global tag.
 -- Arms/legs/hands/feet are unchanged from the human plan - nothing about
 -- this species is different there.
-local function newInsectoidBody(globalTags)
+function engine.newInsectoidBody(globalTags)
     globalTags = globalTags or {}
-    local body = newTorso()
-    installCategoryOrgan(body, "skin", "chitin_skin", globalTags)
-    installCategoryOrgan(body, "bone", "chitin_bone", globalTags)
+    local body = engine.newTorso()
+    engine.installCategoryOrgan(body, "skin", "chitin_skin", globalTags)
+    engine.installCategoryOrgan(body, "bone", "chitin_bone", globalTags)
 
     -- chitin_bone's global grants (TAILED, WINGED) need to be knowable
     -- right now to unlock the tail slot below, rather than waiting on the
-    -- caller's own post-construction recalcGlobalTags pass.
-    local unlockedTags = recalcGlobalTags(body)
+    -- caller's own post-construction engine.recalcGlobalTags pass.
+    local unlockedTags = engine.recalcGlobalTags(body)
     for tag in pairs(globalTags) do
         unlockedTags[tag] = true
     end
 
-    attachPart(body, "head", "insectoid_head", unlockedTags)
-    attachPart(body, "left_arm", "human_arm", unlockedTags)
-    attachPart(body, "right_arm", "human_arm", unlockedTags)
-    attachPart(body, "left_leg", "human_leg", unlockedTags)
-    attachPart(body, "right_leg", "human_leg", unlockedTags)
-    attachPart(body.subSlots.left_arm, "hand", "human_hand", unlockedTags)
-    attachPart(body.subSlots.right_arm, "hand", "human_hand", unlockedTags)
-    attachPart(body.subSlots.left_leg, "foot", "human_foot", unlockedTags)
-    attachPart(body.subSlots.right_leg, "foot", "human_foot", unlockedTags)
-    attachPart(body, "tail", "abdomen", unlockedTags)
-    attachPart(body.subSlots.tail, "stinger", "stinger", unlockedTags)
-    attachPart(body.subSlots.head, "antennae", "antenna", unlockedTags)
-    installGenericOrgan(body.subSlots.head, "insectoid_features", unlockedTags)
+    engine.attachPart(body, "head", "insectoid_head", unlockedTags)
+    engine.attachPart(body, "left_arm", "human_arm", unlockedTags)
+    engine.attachPart(body, "right_arm", "human_arm", unlockedTags)
+    engine.attachPart(body, "left_leg", "human_leg", unlockedTags)
+    engine.attachPart(body, "right_leg", "human_leg", unlockedTags)
+    engine.attachPart(body.subSlots.left_arm, "hand", "human_hand", unlockedTags)
+    engine.attachPart(body.subSlots.right_arm, "hand", "human_hand", unlockedTags)
+    engine.attachPart(body.subSlots.left_leg, "foot", "human_foot", unlockedTags)
+    engine.attachPart(body.subSlots.right_leg, "foot", "human_foot", unlockedTags)
+    engine.attachPart(body, "tail", "abdomen", unlockedTags)
+    engine.attachPart(body.subSlots.tail, "stinger", "stinger", unlockedTags)
+    engine.attachPart(body.subSlots.head, "antennae", "antenna", unlockedTags)
+    engine.installGenericOrgan(body.subSlots.head, "insectoid_features", unlockedTags)
 
     -- The endurance side of chitin skin's tradeoff: not extra health, a
-    -- flat 10% damage reduction on every hit (see damagePart) - applied to
+    -- flat 10% damage reduction on every hit (see engine.damagePart) - applied to
     -- every part uniformly rather than baked into any one template, since
     -- most of these parts (arms/legs/hands/feet) are shared with the human
     -- body plan and shouldn't get it there. The reflex penalty side is
     -- applied separately, to the character stat itself - see speciesEntries.
-    walkBody(body, function(part)
+    engine.walkBody(body, function(part)
         part.endurance = 0.1
     end)
 
@@ -915,24 +926,24 @@ player.gridX = 1 -- Position within the current location's grid.
 player.gridY = 1
 player.steps = 0 -- Increments on every successful step, in or out of combat.
 
--- Overwritten by character creation (see runCharacterCreation, run once at
+-- Overwritten by character creation (see engine.runCharacterCreation, run once at
 -- startup) - defaulted here so nothing reads a nil name/pronoun if that
 -- somehow doesn't happen first.
 player.name = "Adventurer"
 player.pronouns = { subject = "they", object = "them" }
 
 -- Per-quest progress ("active", "done" - not-yet-taken is just absent), and
--- a running tally of kills by typeId (see showVictoryScreen) - quest
+-- a running tally of kills by typeId (see engine.showVictoryScreen) - quest
 -- completion conditions read these instead of a bespoke flag per encounter.
 player.quests = {}
 player.killLog = {}
 
 -- Body/globalTags are built once species is actually chosen (see
--- runCharacterCreation, run once at startup, right before the first
--- render) - defaulted here only so nothing reads a nil body if that
+-- engine.runCharacterCreation, run once at startup, right before the first
+-- engine.render) - defaulted here only so nothing reads a nil body if that
 -- somehow doesn't happen first.
 player.globalTags = {}
-player.body = newHumanBody(player.globalTags)
+player.body = engine.newHumanBody(player.globalTags)
 
 -- Starting loadout: a chain sword in the left hand, a laser pistol in the
 -- right, starting fully loaded (reloading isn't built yet).
@@ -970,20 +981,20 @@ end
 
 
 -- Environment interactions: * is an item, auto-collected (and logged, see
--- logActivity) the moment the player steps onto it - no blurb needed
+-- engine.logActivity) the moment the player steps onto it - no blurb needed
 -- anymore; # is a solid wall (just a rectangle); !/?/0 are people (quest
 -- not yet taken / quest active / nothing more to say); -/| are doors
 -- (horizontal/vertical), opened or closed with no prompt either (see
--- tryMove/tryInteract) and shown as `.` while open; $ is a save point -
+-- engine.tryMove/engine.tryInteract) and shown as `.` while open; $ is a save point -
 -- `saveId` is how a save file remembers which one made it, so loading
--- knows where to put the player back (see findSavePointById).
+-- knows where to put the player back (see engine.findSavePointById).
 
 --[[
     Screen is split into four corners:
     top-left     - compact numeric stats
     top-right    - sprite/portrait (placeholder for now)
     bottom-left  - map/text/table area, currently the walkable grid
-    bottom-right - activity log (see logActivity)
+    bottom-right - activity log (see engine.logActivity)
 --]]
 
 math.randomseed(os.time())
@@ -999,15 +1010,15 @@ local mainWin = window.create(term.current(), 1, topHeight + 1, leftWidth, scree
 -- Where anything that happens outside of combat gets reported - simple
 -- interactions (picking something up, opening/closing a door) don't
 -- interrupt movement with a prompt anymore, so this is where their
--- feedback goes instead. See logActivity.
+-- feedback goes instead. See engine.logActivity.
 local logWin = window.create(term.current(), leftWidth + 1, topHeight + 1, screenW - leftWidth, screenH - topHeight)
 
 -- Combat's "idle" state (waiting on the player's next action) gets the same
 -- four-corner treatment as the overworld, rather than a single full-screen
 -- window - map top-left, the action menu bottom-left, a scrolling combat
--- log top-right (see logCombat - routine events report here instead of
+-- log top-right (see engine.logCombat - routine events report here instead of
 -- interrupting with a prompt), and the enemies in the scene bottom-right
--- (Tab cycles which one's selected - see drawEnemyList/promptAction).
+-- (Tab cycles which one's selected - see engine.drawEnemyList/engine.promptAction).
 local combatMapWin = window.create(term.current(), 1, 1, leftWidth, topHeight)
 local combatLogWin = window.create(term.current(), leftWidth + 1, 1, screenW - leftWidth, topHeight)
 local combatActionWin = window.create(term.current(), 1, topHeight + 1, leftWidth, screenH - topHeight)
@@ -1015,7 +1026,7 @@ local combatEnemyWin = window.create(term.current(), leftWidth + 1, topHeight + 
 
 -- A full-screen takeover, shared by combat's own sub-pickers (choosing an
 -- attack, a limb, an ability, a reload/belt target), victory/death,
--- dialogue (showInteraction), and character creation - anything that needs
+-- engine.dialogue (engine.showInteraction), and character creation - anything that needs
 -- the player's full attention for a moment rather than coexisting with the
 -- four-corner layout above.
 local combatWin = window.create(term.current(), 1, 1, screenW, screenH)
@@ -1029,10 +1040,10 @@ local message = ""
 
 -- Breaks `text` into however many lines are needed to fit `maxWidth`,
 -- breaking on word boundaries where possible - the pure logic behind both
--- writeWrapped (below) and the activity log, which needs the lines as data
+-- engine.writeWrapped (below) and the activity log, which needs the lines as data
 -- (to keep in its own scrolling buffer) rather than written straight to a
 -- window.
-local function wrapText(text, maxWidth)
+function engine.wrapText(text, maxWidth)
     local lines = {}
     while #text > maxWidth do
         local breakAt = maxWidth
@@ -1048,11 +1059,11 @@ local function wrapText(text, maxWidth)
 end
 
 -- Every wrapped line logged so far, oldest first - only the tail end that
--- actually fits gets drawn (see drawLog), so this can just grow forever
+-- actually fits gets drawn (see engine.drawLog), so this can just grow forever
 -- without needing to cap or scroll it manually.
 local activityLog = {}
 
-local function drawLog()
+function engine.drawLog()
     logWin.setVisible(false)
     logWin.clear()
     local width, height = logWin.getSize()
@@ -1066,34 +1077,34 @@ end
 
 -- Reports something that happened outside of combat - wrapped to the log
 -- pane's width and appended to the scrolling buffer. Combat has its own
--- full-screen messaging (showCombatMessage) and doesn't need this; this is
+-- full-screen messaging (engine.showCombatMessage) and doesn't need this; this is
 -- specifically for everything that used to need a "press any key" prompt
 -- but really didn't (picking something up, a door opening) or is otherwise
 -- worth a record of (using an item outside a fight).
-local function logActivity(message)
+function engine.logActivity(message)
     local width = logWin.getSize()
-    for _, line in ipairs(wrapText(message, width)) do
+    for _, line in ipairs(engine.wrapText(message, width)) do
         table.insert(activityLog, line)
     end
-    drawLog()
+    engine.drawLog()
 end
 
--- {{token}} -> a bit of the given character's identity, for writing dialogue
+-- {{token}} -> a bit of the given character's identity, for writing engine.dialogue
 -- without hardcoding whichever name/pronouns the player picked at character
 -- creation. {{name}}, {{subject}}, and {{object}} are the real fields;
 -- {{he}}/{{she}} and {{him}}/{{her}} are just aliases for subject/object, so
 -- a line can be written with an imagined character in mind (he, she,
 -- whichever reads naturally) and still come out in whoever's actually
 -- playing. Unrecognized tokens are left alone rather than blanked out.
--- Moved up here (from beside showInteraction, which also uses it) so
--- logActivity's own callers - some of them well before that point in the
+-- Moved up here (from beside engine.showInteraction, which also uses it) so
+-- engine.logActivity's own callers - some of them well before that point in the
 -- file - can use it too.
 local DIALOGUE_ALIASES = {
     subject = "subject", he = "subject", she = "subject",
     object = "object", him = "object", her = "object",
 }
 
-local function dialogue(str, who)
+function engine.dialogue(str, who)
     return (str:gsub("{{(%a+)}}", function(token)
         if token == "name" then
             return who.name
@@ -1106,7 +1117,7 @@ local function dialogue(str, who)
     end))
 end
 
-local function drawStats()
+function engine.drawStats()
     statsWin.setVisible(false)
     statsWin.clear()
     statsWin.setCursorPos(1, 1)
@@ -1120,7 +1131,7 @@ local function drawStats()
     statsWin.setVisible(true)
 end
 
-local function drawSprite()
+function engine.drawSprite()
     spriteWin.setVisible(false)
     spriteWin.clear()
     spriteWin.setCursorPos(1, 1)
@@ -1132,7 +1143,7 @@ end
 -- containment rather than an exact match, everything else by exact
 -- position. Shared by rendering and movement collision so they can never
 -- disagree about what's actually there.
-local function findObjectAt(loc, x, y)
+function engine.findObjectAt(loc, x, y)
     for _, obj in ipairs(loc.objects or {}) do
         if obj.kind == "wall" then
             if x >= obj.x1 and x <= obj.x2 and y >= obj.y1 and y <= obj.y2 then
@@ -1148,7 +1159,7 @@ end
 -- What a location object currently looks like on the map. Doors and people
 -- change glyph over time (open vs closed, quest state); everything else is
 -- fixed for its whole lifetime.
-local function getObjectGlyph(obj)
+function engine.getObjectGlyph(obj)
     if obj.kind == "wall" then
         return "#"
     elseif obj.kind == "item" then
@@ -1175,7 +1186,7 @@ local function getObjectGlyph(obj)
     return "?"
 end
 
-local function drawMain()
+function engine.drawMain()
     local loc = world[player.location]
 
     mainWin.setVisible(false)
@@ -1189,8 +1200,8 @@ local function drawMain()
             if x == player.gridX and y == player.gridY then
                 row[x] = "@"
             else
-                local obj = findObjectAt(loc, x, y)
-                row[x] = obj and getObjectGlyph(obj) or "."
+                local obj = engine.findObjectAt(loc, x, y)
+                row[x] = obj and engine.getObjectGlyph(obj) or "."
             end
         end
         mainWin.setCursorPos(1, y + 1)
@@ -1205,15 +1216,15 @@ local function drawMain()
     mainWin.setVisible(true)
 end
 
-local function render()
-    drawStats()
-    drawSprite()
-    drawMain()
+function engine.render()
+    engine.drawStats()
+    engine.drawSprite()
+    engine.drawMain()
     -- Re-draws the log's corner from its own retained buffer - a full-
     -- screen modal (combat, the inventory) draws right over it, and
     -- toggling setVisible(true) alone is a no-op if it's already true, so
     -- this can't just reassert visibility; it has to actually redraw.
-    drawLog()
+    engine.drawLog()
 end
 
 -- A slim overlay strip - just the top two rows - for jumping straight to a
@@ -1226,7 +1237,7 @@ local pageBarWin = window.create(term.current(), 1, 1, screenW, 2)
 local TOP_BAR_PAGES = { "Inventory" }
 local topBarPage = 1
 
-local function drawTopBar()
+function engine.drawTopBar()
     pageBarWin.setVisible(false)
     pageBarWin.clear()
     local tabs = {}
@@ -1244,9 +1255,9 @@ end
 -- it's a one-line change if enter turns out to be the wrong call.
 local ACTIVATE_KEY = keys.enter
 
--- Moved up from beside pickAttack (which also uses it) so the inventory
+-- Moved up from beside engine.pickAttack (which also uses it) so the inventory
 -- screen's equip-slot detail panel can use it too.
-local function formatDamageRange(range)
+function engine.formatDamageRange(range)
     if range.min == range.max then
         return tostring(range.min)
     end
@@ -1254,14 +1265,14 @@ local function formatDamageRange(range)
 end
 
 -- Every MANIPULATE-tagged limb on a body, in the same stable depth-first
--- order collectLabeledParts already produces - the set of slots a weapon
+-- order engine.collectLabeledParts already produces - the set of slots a weapon
 -- can actually be equipped into (see the inventory's "equip" rows), rather
 -- than a hardcoded pair of hands that wouldn't generalize to some future
 -- multi-limbed species.
-local function getManipulateLimbs(combatant)
+function engine.getManipulateLimbs(combatant)
     local limbs = {}
-    for _, entry in ipairs(collectLabeledParts(combatant.body)) do
-        if getPartLocalTags(entry.part).MANIPULATE then
+    for _, entry in ipairs(engine.collectLabeledParts(combatant.body)) do
+        if engine.getPartLocalTags(entry.part).MANIPULATE then
             table.insert(limbs, entry)
         end
     end
@@ -1271,7 +1282,7 @@ end
 -- Every MANIPULATE hand currently wielding the same weapon as the one in
 -- `label` - just that hand alone for an ordinary one-handed weapon (or an
 -- empty one), every hand sharing a two-handed one otherwise, always in
--- stable body-tree order (see collectLabeledParts). The first entry is
+-- stable body-tree order (see engine.collectLabeledParts). The first entry is
 -- always the "canonical" hand for the group: where its one shared ammo
 -- pool actually lives (character.ammo is still keyed per equip slot, so a
 -- two-handed weapon just doesn't use the second one), and what represents
@@ -1282,12 +1293,12 @@ end
 -- (see changeGrip, or drawing one from the belt/ground mid-fight) is
 -- still "held", just not enough to actually use - every usability check
 -- needs both this AND a hand count, not just this alone.
-local function getWieldingHands(combatant, label)
+function engine.getWieldingHands(combatant, label)
     local weaponId = combatant.equipped[label]
     local weapon = weaponId and weaponEntries[weaponId]
     local hands = {}
-    for _, entry in ipairs(collectLabeledParts(combatant.body)) do
-        if getPartLocalTags(entry.part).MANIPULATE then
+    for _, entry in ipairs(engine.collectLabeledParts(combatant.body)) do
+        if engine.getPartLocalTags(entry.part).MANIPULATE then
             if entry.label == label
                 or (weapon and weapon.handedness == "two-handed" and combatant.equipped[entry.label] == weaponId) then
                 table.insert(hands, entry)
@@ -1298,19 +1309,19 @@ local function getWieldingHands(combatant, label)
 end
 
 -- A melee weapon's effective strength multiplier: a single hand's own
--- getLimbStrength normally, or the average across every hand holding a
+-- engine.getLimbStrength normally, or the average across every hand holding a
 -- two-handed one - a reinforced arm on one side of the grip still pulls
 -- its own weight, but a fracture on the other side drags the whole swing
 -- down too, not just its own half. Ranged weapons never call this at all
 -- (strength doesn't scale them regardless of hand count).
-local function getWeaponStrength(combatant, entry, weapon)
+function engine.getWeaponStrength(combatant, entry, weapon)
     if weapon.handedness ~= "two-handed" then
-        return getLimbStrength(combatant, entry.part)
+        return engine.getLimbStrength(combatant, entry.part)
     end
-    local hands = getWieldingHands(combatant, entry.label)
+    local hands = engine.getWieldingHands(combatant, entry.label)
     local total = 0
     for _, hand in ipairs(hands) do
-        total = total + getLimbStrength(combatant, hand.part)
+        total = total + engine.getLimbStrength(combatant, hand.part)
     end
     return total / #hands
 end
@@ -1322,15 +1333,15 @@ end
 -- read/written lives in one place instead of two.
 
 -- Every hand and belt slot, hands first, in the same stable order
--- getManipulateLimbs/1..beltSize already give - except a two-handed
--- weapon's secondary hand (see getWieldingHands), which is left out
+-- engine.getManipulateLimbs/1..beltSize already give - except a two-handed
+-- weapon's secondary hand (see engine.getWieldingHands), which is left out
 -- entirely rather than listed as its own slot: it isn't one to swap into
 -- or out of independently, only alongside its canonical hand.
-local function getAllSlots(combatant)
+function engine.getAllSlots(combatant)
     local slots = {}
-    for _, limb in ipairs(getManipulateLimbs(combatant)) do
+    for _, limb in ipairs(engine.getManipulateLimbs(combatant)) do
         local weaponId = combatant.equipped[limb.label]
-        local isSecondaryHand = weaponId and getWieldingHands(combatant, limb.label)[1].label ~= limb.label
+        local isSecondaryHand = weaponId and engine.getWieldingHands(combatant, limb.label)[1].label ~= limb.label
         if not isSecondaryHand then
             table.insert(slots, { kind = "equip", slot = limb.label })
         end
@@ -1341,7 +1352,7 @@ local function getAllSlots(combatant)
     return slots
 end
 
-local function slotsEqual(a, b)
+function engine.slotsEqual(a, b)
     return a.kind == b.kind and a.slot == b.slot and a.index == b.index
 end
 
@@ -1352,7 +1363,7 @@ end
 -- same thing, a weapon's own item form); a belt slot always holds an
 -- itemId, which might itself represent a holstered weapon (`weaponId` on
 -- the item entry) or a plain item.
-local function getSlotContents(combatant, slotDescriptor)
+function engine.getSlotContents(combatant, slotDescriptor)
     if slotDescriptor.kind == "equip" then
         local occupant = combatant.equipped[slotDescriptor.slot]
         if occupant == "none" or not occupant then
@@ -1374,7 +1385,7 @@ end
 
 -- The character.ammo key a slot's own weapon (if it has one) is tracked
 -- under - a hand's own label, or a belt slot's synthetic "beltN".
-local function getSlotAmmoKey(slotDescriptor)
+function engine.getSlotAmmoKey(slotDescriptor)
     if slotDescriptor.kind == "equip" then
         return slotDescriptor.slot
     end
@@ -1383,13 +1394,13 @@ end
 
 -- Empties a slot and hands back whatever was in it (weaponId, itemId,
 -- ammo) so the caller can decide where it goes - this never sends
--- anything to the inventory itself, see returnAmmoToInventory/
--- depositAmmo for that.
-local function clearSlot(combatant, slotDescriptor)
-    local weaponId, itemId = getSlotContents(combatant, slotDescriptor)
-    local ammo = weaponId and combatant.ammo[getSlotAmmoKey(slotDescriptor)] or nil
+-- anything to the inventory itself, see engine.returnAmmoToInventory/
+-- engine.depositAmmo for that.
+function engine.clearSlot(combatant, slotDescriptor)
+    local weaponId, itemId = engine.getSlotContents(combatant, slotDescriptor)
+    local ammo = weaponId and combatant.ammo[engine.getSlotAmmoKey(slotDescriptor)] or nil
     if weaponId then
-        combatant.ammo[getSlotAmmoKey(slotDescriptor)] = nil
+        combatant.ammo[engine.getSlotAmmoKey(slotDescriptor)] = nil
     end
     if slotDescriptor.kind == "equip" then
         combatant.equipped[slotDescriptor.slot] = "none"
@@ -1401,8 +1412,8 @@ end
 
 -- Fills an already-empty slot with a weapon (weaponId + ammo) or a plain
 -- item (itemId) - exactly one of the two should be given. Doesn't displace
--- anything itself; clear the slot first (see clearSlot) if it might not be.
-local function fillSlot(combatant, slotDescriptor, weaponId, itemId, ammo)
+-- anything itself; clear the slot first (see engine.clearSlot) if it might not be.
+function engine.fillSlot(combatant, slotDescriptor, weaponId, itemId, ammo)
     if slotDescriptor.kind == "equip" then
         combatant.equipped[slotDescriptor.slot] = weaponId or itemId
         if weaponId then
@@ -1420,18 +1431,18 @@ end
 -- a weapon - a true swap if both had something, just a move if one was
 -- empty. Used for a deliberate reassignment (the Equipment action) as
 -- well as filling an empty slot from another one.
-local function swapSlots(combatant, a, b)
-    local aWeapon, aItem, aAmmo = clearSlot(combatant, a)
-    local bWeapon, bItem, bAmmo = clearSlot(combatant, b)
-    fillSlot(combatant, a, bWeapon, bItem, bAmmo)
-    fillSlot(combatant, b, aWeapon, aItem, aAmmo)
+function engine.swapSlots(combatant, a, b)
+    local aWeapon, aItem, aAmmo = engine.clearSlot(combatant, a)
+    local bWeapon, bItem, bAmmo = engine.clearSlot(combatant, b)
+    engine.fillSlot(combatant, a, bWeapon, bItem, bAmmo)
+    engine.fillSlot(combatant, b, aWeapon, aItem, aAmmo)
 end
 
 -- Whether any currently-equipped weapon (either hand) actually uses ammo -
 -- the action menu only shows Reload at all when this is true.
-local function hasAmmoWeapon(combatant)
-    for _, limb in ipairs(getManipulateLimbs(combatant)) do
-        local weaponId = getSlotContents(combatant, { kind = "equip", slot = limb.label })
+function engine.hasAmmoWeapon(combatant)
+    for _, limb in ipairs(engine.getManipulateLimbs(combatant)) do
+        local weaponId = engine.getSlotContents(combatant, { kind = "equip", slot = limb.label })
         if weaponId and weaponEntries[weaponId].ammoCapacity then
             return true
         end
@@ -1444,9 +1455,9 @@ end
 -- Strike if nothing is), that limb's ammo (only shown if what's equipped
 -- there actually uses ammo), then main inventory items grouped by id with a
 -- count - stackable stuff like energy charges would otherwise need one row
--- each. Each row carries enough to both render its own list line and build
+-- each. Each row carries enough to both engine.render its own list line and build
 -- a detail panel for it.
-local function getInventoryRows(combatant)
+function engine.getInventoryRows(combatant)
     local rows = {}
 
     for i = 1, combatant.beltSize do
@@ -1464,7 +1475,7 @@ local function getInventoryRows(combatant)
             table.insert(rows, {
                 kind = "belt", index = i, itemId = itemId, weaponId = item.weaponId,
                 name = "Belt: " .. item.name,
-                countText = countText, bulkText = formatBulk(item.bulk),
+                countText = countText, bulkText = engine.formatBulk(item.bulk),
             })
         else
             table.insert(rows, {
@@ -1474,14 +1485,14 @@ local function getInventoryRows(combatant)
         end
     end
 
-    for _, limb in ipairs(getManipulateLimbs(combatant)) do
-        local weaponId, itemId = getSlotContents(combatant, { kind = "equip", slot = limb.label })
+    for _, limb in ipairs(engine.getManipulateLimbs(combatant)) do
+        local weaponId, itemId = engine.getSlotContents(combatant, { kind = "equip", slot = limb.label })
         -- A two-handed weapon occupies more than one of these limbs at
-        -- once (see getWieldingHands) - only its canonical (first) hand
+        -- once (see engine.getWieldingHands) - only its canonical (first) hand
         -- gets a row at all, combining every hand's label into one, so it
         -- reads as one held weapon rather than two identical-looking rows
         -- fighting over which one's "real."
-        local hands = weaponId and getWieldingHands(combatant, limb.label) or nil
+        local hands = weaponId and engine.getWieldingHands(combatant, limb.label) or nil
         local isSecondaryHand = hands and #hands > 1 and hands[1].label ~= limb.label
         if not isSecondaryHand then
             local label = limb.label
@@ -1497,7 +1508,7 @@ local function getInventoryRows(combatant)
                 table.insert(rows, {
                     kind = "equip", slot = limb.label, itemId = itemId,
                     name = label .. ": " .. item.name,
-                    countText = "", bulkText = formatBulk(item.bulk),
+                    countText = "", bulkText = engine.formatBulk(item.bulk),
                 })
             else
                 local weapon = weaponId and weaponEntries[weaponId] or weaponEntries.strike
@@ -1532,7 +1543,7 @@ local function getInventoryRows(combatant)
         if not group then
             group = {
                 kind = "inventory", itemId = itemId, count = 0,
-                name = itemEntries[itemId].name, bulkText = formatBulk(itemEntries[itemId].bulk),
+                name = itemEntries[itemId].name, bulkText = engine.formatBulk(itemEntries[itemId].bulk),
             }
             groups[itemId] = group
             table.insert(rows, group)
@@ -1550,7 +1561,7 @@ end
 
 -- Keeps the selected row inside the visible window, scrolling the minimum
 -- amount needed rather than always re-centering.
-local function clampInventoryScroll(selection, scrollOffset, totalRows, visibleCount)
+function engine.clampInventoryScroll(selection, scrollOffset, totalRows, visibleCount)
     if selection < scrollOffset + 1 then
         scrollOffset = selection - 1
     elseif selection > scrollOffset + visibleCount then
@@ -1561,7 +1572,7 @@ end
 
 local INVENTORY_LIST_TOP = 4 -- row 1: title, row 2: page tabs, row 3: column headers
 
-local function formatInventoryRow(name, countText, bulkText)
+function engine.formatInventoryRow(name, countText, bulkText)
     return ("%-13s %-5s %-4s"):format(name:sub(1, 13), countText or "", bulkText or "")
 end
 
@@ -1569,7 +1580,7 @@ end
 -- detail on whatever's currently selected. Row 2 is the page-tab strip from
 -- Tab - a skeleton for now (just the one "Inventory" page), meant for
 -- whatever other pages come along later, exactly as originally pitched.
-local function drawInventoryScreen(rows, selection, scrollOffset, pageBarVisible, currentPage, pages, carrying)
+function engine.drawInventoryScreen(rows, selection, scrollOffset, pageBarVisible, currentPage, pages, carrying)
     inventoryWin.setVisible(false)
     inventoryWin.clear()
 
@@ -1579,7 +1590,7 @@ local function drawInventoryScreen(rows, selection, scrollOffset, pageBarVisible
     inventoryWin.setCursorPos(1, 1)
     inventoryWin.write(carrying and ("Carrying: " .. carrying.name) or "Inventory")
     inventoryWin.setCursorPos(rightX, 1)
-    inventoryWin.write(("Bulk %s/%s"):format(formatBulk(getTotalBulk(player)), formatBulk(getBulkCapacity(player))))
+    inventoryWin.write(("Bulk %s/%s"):format(engine.formatBulk(engine.getTotalBulk(player)), engine.formatBulk(engine.getBulkCapacity(player))))
 
     if pageBarVisible then
         local tabs = {}
@@ -1591,7 +1602,7 @@ local function drawInventoryScreen(rows, selection, scrollOffset, pageBarVisible
     end
 
     inventoryWin.setCursorPos(1, 3)
-    inventoryWin.write(formatInventoryRow("Name", "Count", "Bulk"))
+    inventoryWin.write(engine.formatInventoryRow("Name", "Count", "Bulk"))
 
     local visibleCount = screenH - 1 - INVENTORY_LIST_TOP + 1
     for i = 1, visibleCount do
@@ -1599,7 +1610,7 @@ local function drawInventoryScreen(rows, selection, scrollOffset, pageBarVisible
         if row then
             local marker = (scrollOffset + i == selection) and ">" or " "
             inventoryWin.setCursorPos(1, INVENTORY_LIST_TOP + i - 1)
-            inventoryWin.write(marker .. formatInventoryRow(row.name, row.countText, row.bulkText))
+            inventoryWin.write(marker .. engine.formatInventoryRow(row.name, row.countText, row.bulkText))
         end
     end
 
@@ -1612,7 +1623,7 @@ local function drawInventoryScreen(rows, selection, scrollOffset, pageBarVisible
         if selected.kind == "belt" then
             if selected.weaponId then
                 local weapon = weaponEntries[selected.weaponId]
-                table.insert(detail, "Damage: " .. formatDamageRange(weapon.damage) .. " " .. weapon.damageType)
+                table.insert(detail, "Damage: " .. engine.formatDamageRange(weapon.damage) .. " " .. weapon.damageType)
                 table.insert(detail, "Range: " .. weapon.range)
                 if weapon.ammoCapacity then
                     table.insert(detail, "Loaded: " .. selected.countText)
@@ -1623,7 +1634,7 @@ local function drawInventoryScreen(rows, selection, scrollOffset, pageBarVisible
                 table.insert(detail, "")
                 table.insert(detail, "[Swap] to draw in combat")
             elseif selected.itemId then
-                table.insert(detail, "Bulk: " .. formatBulk(itemEntries[selected.itemId].bulk))
+                table.insert(detail, "Bulk: " .. engine.formatBulk(itemEntries[selected.itemId].bulk))
                 for _, abilityId in ipairs(itemEntries[selected.itemId].abilities or {}) do
                     table.insert(detail, "Grants: " .. abilityEntries[abilityId].name)
                 end
@@ -1635,7 +1646,7 @@ local function drawInventoryScreen(rows, selection, scrollOffset, pageBarVisible
             table.insert(detail, "Loaded: " .. selected.countText)
         elseif selected.kind == "equip" then
             if selected.itemId then
-                table.insert(detail, "Bulk: " .. formatBulk(itemEntries[selected.itemId].bulk))
+                table.insert(detail, "Bulk: " .. engine.formatBulk(itemEntries[selected.itemId].bulk))
                 for _, abilityId in ipairs(itemEntries[selected.itemId].abilities or {}) do
                     table.insert(detail, "Grants: " .. abilityEntries[abilityId].name)
                 end
@@ -1643,7 +1654,7 @@ local function drawInventoryScreen(rows, selection, scrollOffset, pageBarVisible
                 table.insert(detail, "[Move] to unequip")
             else
                 local weapon = selected.weaponId and weaponEntries[selected.weaponId] or weaponEntries.strike
-                table.insert(detail, "Damage: " .. formatDamageRange(weapon.damage) .. " " .. weapon.damageType)
+                table.insert(detail, "Damage: " .. engine.formatDamageRange(weapon.damage) .. " " .. weapon.damageType)
                 table.insert(detail, "Range: " .. weapon.range)
                 for _, abilityId in ipairs(weapon.abilities or {}) do
                     table.insert(detail, "Grants: " .. abilityEntries[abilityId].name)
@@ -1681,7 +1692,7 @@ local MOVE_KEY = keys.m
 
 -- Blocks until the player closes the inventory (I again) - fully modal, like
 -- combat, rather than coexisting with the live game world.
-local function runInventoryScreen()
+function engine.runInventoryScreen()
     local selection = 1
     local scrollOffset = 0
     local pageBarVisible = false
@@ -1698,10 +1709,10 @@ local function runInventoryScreen()
 
     local rows
     local function redraw()
-        rows = getInventoryRows(player)
+        rows = engine.getInventoryRows(player)
         selection = math.min(selection, math.max(1, #rows))
-        scrollOffset = clampInventoryScroll(selection, scrollOffset, #rows, visibleCount)
-        drawInventoryScreen(rows, selection, scrollOffset, pageBarVisible, currentPage, pages, carrying)
+        scrollOffset = engine.clampInventoryScroll(selection, scrollOffset, #rows, visibleCount)
+        engine.drawInventoryScreen(rows, selection, scrollOffset, pageBarVisible, currentPage, pages, carrying)
     end
 
     -- Undoes a pickup exactly, used both for "drop somewhere invalid" and
@@ -1742,16 +1753,16 @@ local function runInventoryScreen()
     -- independently (green once selected, back to white if toggled off
     -- again), capped at `handsNeeded`. Confirm needs at least one hand
     -- picked, but doesn't require all of them - equipping it "improperly"
-    -- (see getWieldingHands/changeGrip) is allowed, just gated behind a
+    -- (see engine.getWieldingHands/changeGrip) is allowed, just gated behind a
     -- warning once fewer than `handsNeeded` are selected, since it won't
     -- actually be usable that way. Returns the chosen hand labels in
     -- stable body-tree order (so whichever's first is always the same
-    -- one - see getWieldingHands), or nil if the player backs out via
+    -- one - see engine.getWieldingHands), or nil if the player backs out via
     -- Cancel (or declines the warning) instead. Nested here (rather than
     -- a top-level local) since only Move's own drop-handling below ever
     -- calls it - see "A note on locals" in the design doc.
     local function pickWieldingHands(handsNeeded, weaponName)
-        local limbs = getManipulateLimbs(player)
+        local limbs = engine.getManipulateLimbs(player)
         local selected = {}
         local selectedCount = 0
         local cursor = 1
@@ -1894,7 +1905,7 @@ local function runInventoryScreen()
                 if entry then
                     if entry.kind == "inventory" then
                         local item = itemEntries[entry.itemId]
-                        removeInventoryItems(player, entry.itemId, 1)
+                        engine.removeInventoryItems(player, entry.itemId, 1)
                         carrying = {
                             weaponId = item.weaponId, itemId = entry.itemId,
                             name = item.name, from = { kind = "inventory" },
@@ -1913,10 +1924,10 @@ local function runInventoryScreen()
                         }
                     elseif entry.kind == "equip" and entry.weaponId then
                         -- entry.slot is already the canonical hand for a
-                        -- two-handed weapon (see getInventoryRows - only
+                        -- two-handed weapon (see engine.getInventoryRows - only
                         -- its row exists at all), so this lifts every
                         -- hand it occupies together, ammo included.
-                        local hands = getWieldingHands(player, entry.slot)
+                        local hands = engine.getWieldingHands(player, entry.slot)
                         local ammo = player.ammo[hands[1].label]
                         local slots = {}
                         for _, hand in ipairs(hands) do
@@ -1962,9 +1973,9 @@ local function runInventoryScreen()
                     local hands = pickWieldingHands(2, weaponEntries[carrying.weaponId].name)
                     if hands then
                         for _, slot in ipairs(hands) do
-                            local oldWeaponId, oldItemId = getSlotContents(player, { kind = "equip", slot = slot })
+                            local oldWeaponId, oldItemId = engine.getSlotContents(player, { kind = "equip", slot = slot })
                             if oldWeaponId then
-                                returnAmmoToInventory(player, oldWeaponId, slot)
+                                engine.returnAmmoToInventory(player, oldWeaponId, slot)
                                 local oldItemForm = weaponEntries[oldWeaponId].itemId
                                 if oldItemForm then
                                     table.insert(player.inventory, oldItemForm)
@@ -1981,7 +1992,7 @@ local function runInventoryScreen()
                     end
                 elseif carrying.weaponId and entry and entry.kind == "equip" then
                     if entry.weaponId then
-                        returnAmmoToInventory(player, entry.weaponId, entry.slot)
+                        engine.returnAmmoToInventory(player, entry.weaponId, entry.slot)
                         local oldItemId = weaponEntries[entry.weaponId].itemId
                         if oldItemId then
                             table.insert(player.inventory, oldItemId)
@@ -1994,7 +2005,7 @@ local function runInventoryScreen()
                     carrying = nil
                 elseif carrying.itemId and not carrying.weaponId and entry and entry.kind == "equip" then
                     if entry.weaponId then
-                        returnAmmoToInventory(player, entry.weaponId, entry.slot)
+                        engine.returnAmmoToInventory(player, entry.weaponId, entry.slot)
                         local oldItemId = weaponEntries[entry.weaponId].itemId
                         if oldItemId then
                             table.insert(player.inventory, oldItemId)
@@ -2011,7 +2022,7 @@ local function runInventoryScreen()
                     and not (carrying.weaponId and weaponEntries[carrying.weaponId].handedness == "two-handed") then
                     if entry.itemId then
                         if entry.weaponId then
-                            returnAmmoToInventory(player, entry.weaponId, "belt" .. entry.index)
+                            engine.returnAmmoToInventory(player, entry.weaponId, "belt" .. entry.index)
                         end
                         table.insert(player.inventory, entry.itemId)
                     end
@@ -2025,7 +2036,7 @@ local function runInventoryScreen()
                         table.insert(player.inventory, carrying.itemId)
                     end
                     if carrying.weaponId then
-                        depositAmmo(player, carrying.weaponId, carrying.ammo)
+                        engine.depositAmmo(player, carrying.weaponId, carrying.ammo)
                     end
                     carrying = nil
                 end
@@ -2041,7 +2052,7 @@ local function runInventoryScreen()
             local entry = rows[selection]
             if entry then
                 if entry.kind == "ammo" then
-                    reloadWeapon(player, entry.slot)
+                    engine.reloadWeapon(player, entry.slot)
                 elseif entry.itemId then
                     local abilityId = itemEntries[entry.itemId].abilities and itemEntries[entry.itemId].abilities[1]
                     local ability = abilityId and abilityEntries[abilityId]
@@ -2053,7 +2064,7 @@ local function runInventoryScreen()
                             elseif entry.kind == "equip" then
                                 player.equipped[entry.slot] = "none"
                             else
-                                removeInventoryItems(player, entry.itemId, 1)
+                                engine.removeInventoryItems(player, entry.itemId, 1)
                             end
                         end
                     end
@@ -2081,7 +2092,7 @@ local keyToDir = {
 
 -- Simple square range check (Chebyshev distance) rather than a circle -
 -- cheap, and intuitive enough for a text grid.
-local function gridDistance(ax, ay, bx, by)
+function engine.gridDistance(ax, ay, bx, by)
     return math.max(math.abs(ax - bx), math.abs(ay - by))
 end
 
@@ -2112,9 +2123,9 @@ function testDummyType:decide(state)
     end
 end
 
-local function spawnTestDummy()
+function engine.spawnTestDummy()
     local enemy = testDummyType:new()
-    enemy.body = newHumanBody()
+    enemy.body = engine.newHumanBody()
     enemy.typeId = "test_dummy"
 
     -- Test case for damage types: a thick skull shrugs off blunt hits but is
@@ -2124,7 +2135,7 @@ local function spawnTestDummy()
     -- Test case for coverage inheritance: no species actually has horns yet,
     -- but attaching one anyway proves it protects exactly as well as the
     -- head it's stuck to, despite having no coverage zone of its own.
-    attachPart(enemy.body.subSlots.head, "horns", "horn", {})
+    engine.attachPart(enemy.body.subSlots.head, "horns", "horn", {})
 
     -- Test case for apparel: two layers on the torso (should stack) plus a
     -- helmet on the head (which the horn above should inherit).
@@ -2138,7 +2149,7 @@ end
 -- To-hit math works off any {stats, body} pair, so it's the same function
 -- for the player and any hard-coded enemy. Injuries feed straight back in:
 -- a busted head throws off your aim, worn-down legs make you slow to dodge.
-local function getEffectiveAim(combatant)
+function engine.getEffectiveAim(combatant)
     local head = combatant.body.subSlots.head
     local condition = (head and head.maxHealth > 0) and (head.health / head.maxHealth) or 1
     return combatant.stats.aim * condition
@@ -2152,12 +2163,12 @@ local REFLEX_QUICK_THRESHOLD = 1.25
 -- Unlike aim, reflex reads each leg's full limb strength (organ/status
 -- multiplier and condition together), not just raw health - a leg-strength
 -- bonus or a fracture matters here exactly as it would for a punch.
-local function getEffectiveReflex(combatant)
+function engine.getEffectiveReflex(combatant)
     local legs = { combatant.body.subSlots.left_leg, combatant.body.subSlots.right_leg }
     local total, count = 0, 0
     for _, leg in ipairs(legs) do
         if leg then
-            total = total + getLimbStrength(combatant, leg)
+            total = total + engine.getLimbStrength(combatant, leg)
             count = count + 1
         end
     end
@@ -2165,20 +2176,20 @@ local function getEffectiveReflex(combatant)
     return combatant.stats.reflex * condition
 end
 
-local function getHitChance(attacker, defender)
-    return getEffectiveAim(attacker) * (1 - getEffectiveReflex(defender) / 2)
+function engine.getHitChance(attacker, defender)
+    return engine.getEffectiveAim(attacker) * (1 - engine.getEffectiveReflex(defender) / 2)
 end
 
 -- Spread only bites once there's actual empty space between attacker and
 -- target - point blank (distance 1) is zero tiles walked, so it's a no-op
 -- for anything with range 1, which is why ordinary melee never feels it.
 -- `targetPart` is optional (callers that haven't picked one yet, like
--- pickAttack's own weapon-choice preview, just skip this step) - when
--- given, its `aimDifficulty` (see instantiatePart) divides the chance down
+-- engine.pickAttack's own weapon-choice preview, just skip this step) - when
+-- given, its `aimDifficulty` (see engine.instantiatePart) divides the chance down
 -- further, on top of spread: a small or fast-moving part is harder to land
 -- a hit on than aiming dead center.
-local function getFinalHitChance(attacker, defender, weapon, distance, targetPart)
-    local base = getHitChance(attacker, defender)
+function engine.getFinalHitChance(attacker, defender, weapon, distance, targetPart)
+    local base = engine.getHitChance(attacker, defender)
     local spreadPenalty = (weapon.spread / 100) * (distance - 1)
     local chance = math.max(0, base - spreadPenalty)
     local aimDifficulty = (targetPart and targetPart.aimDifficulty) or 1
@@ -2201,7 +2212,7 @@ for i, k in ipairs(numberKeys) do
 end
 
 -- Matching label for a numberKeys index: 1-9, 0, then a-z.
-local function digitLabel(i)
+function engine.digitLabel(i)
     if i < 10 then
         return tostring(i)
     elseif i == 10 then
@@ -2212,13 +2223,13 @@ local function digitLabel(i)
 end
 
 -- Window writes don't wrap on their own - text just runs past the edge and
--- gets silently clipped. Writes `text` at (x, y) using wrapText, and
+-- gets silently clipped. Writes `text` at (x, y) using engine.wrapText, and
 -- returns how many rows it used so the caller can stack whatever comes
 -- next below it instead of assuming one line is always one row.
-local function writeWrapped(win, x, y, text)
+function engine.writeWrapped(win, x, y, text)
     local width = win.getSize()
     local maxWidth = math.max(1, width - x + 1)
-    local lines = wrapText(text, maxWidth)
+    local lines = engine.wrapText(text, maxWidth)
     for i, line in ipairs(lines) do
         win.setCursorPos(x, y + i - 1)
         win.write(line)
@@ -2228,13 +2239,13 @@ end
 
 -- Reserved for the moments that genuinely warrant taking over the whole
 -- screen and stopping the player in their tracks - victory, death - rather
--- than every routine swing and status tick (see logCombat below for those).
-local function showCombatMessage(lines, wait)
+-- than every routine swing and status tick (see engine.logCombat below for those).
+function engine.showCombatMessage(lines, wait)
     combatWin.setVisible(false)
     combatWin.clear()
     local row = 1
     for _, line in ipairs(lines) do
-        row = row + writeWrapped(combatWin, 1, row, line)
+        row = row + engine.writeWrapped(combatWin, 1, row, line)
     end
     combatWin.setVisible(true)
     if wait then
@@ -2255,12 +2266,12 @@ end
 local combatState = { logDelay = 0.5 }
 
 -- Every wrapped line logged so far this encounter, oldest first - mirrors
--- activityLog/drawLog/logActivity (see those), just scoped to a single
+-- activityLog/engine.drawLog/engine.logActivity (see those), just scoped to a single
 -- fight and drawn into combatLogWin instead. Reset per encounter (see
--- resetCombatLog) rather than left to grow across fights.
+-- engine.resetCombatLog) rather than left to grow across fights.
 local combatActivityLog = {}
 
-local function drawCombatLog()
+function engine.drawCombatLog()
     combatLogWin.setVisible(false)
     combatLogWin.clear()
     local width, height = combatLogWin.getSize()
@@ -2274,30 +2285,30 @@ end
 
 -- Reports something routine that happened this fight - a swing landing or
 -- missing, a status tick, an enemy closing in - without interrupting with
--- a "Press any key" prompt. showCombatMessage is still there for the small
+-- a "Press any key" prompt. engine.showCombatMessage is still there for the small
 -- handful of moments that actually deserve the player's full attention.
 -- Pauses for combatState.logDelay after drawing so each line has a moment
 -- to register before the next one appears - every call site gets this for
 -- free, rather than each one having to remember to pace itself.
-local function logCombat(message)
+function engine.logCombat(message)
     local width = combatLogWin.getSize()
-    for _, line in ipairs(wrapText(message, width)) do
+    for _, line in ipairs(engine.wrapText(message, width)) do
         table.insert(combatActivityLog, line)
     end
-    drawCombatLog()
+    engine.drawCombatLog()
     sleep(combatState.logDelay)
 end
 
-local function resetCombatLog()
+function engine.resetCombatLog()
     combatActivityLog = {}
-    drawCombatLog()
+    engine.drawCombatLog()
 end
 
 -- Shows the room grid with every combatant in the scene on it, so position
 -- (and thus range/spread) is something the player can actually see and
 -- plan around. Drawn into its own top-left pane rather than sharing a
 -- full-screen window with the action menu.
-local function drawCombatField(loc, scene)
+function engine.drawCombatField(loc, scene)
     combatMapWin.setVisible(false)
     combatMapWin.clear()
     combatMapWin.setCursorPos(1, 1)
@@ -2322,7 +2333,7 @@ local function drawCombatField(loc, scene)
 end
 
 -- Briefly flips a single map cell to red, for a hit landing - the map's
--- already sitting there visible from the last drawCombatField, so this
+-- already sitting there visible from the last engine.drawCombatField, so this
 -- just paints straight over the one cell rather than redrawing the whole
 -- pane, then paints it back once combatState.logDelay has passed.
 function combatState.flash(x, y, symbol)
@@ -2336,17 +2347,17 @@ function combatState.flash(x, y, symbol)
 end
 
 -- The bottom-right pane: every foe still in the scene, health included, with
--- the currently-selected one marked - Tab cycles it (see promptAction).
+-- the currently-selected one marked - Tab cycles it (see engine.promptAction).
 -- Fight/Look/an ability's targeting all act on whichever's selected here.
-local function drawEnemyList(scene, selectedIndex)
+function engine.drawEnemyList(scene, selectedIndex)
     combatEnemyWin.setVisible(false)
     combatEnemyWin.clear()
     combatEnemyWin.setCursorPos(1, 1)
     combatEnemyWin.write("Enemies (Tab to cycle)")
     for i, foe in ipairs(scene) do
         local marker = (i == selectedIndex) and ">" or " "
-        local status = isDead(foe.body) and " (dead)" or ""
-        writeWrapped(combatEnemyWin, 1, i + 2, ("%s%s  %d/%d%s"):format(
+        local status = engine.isDead(foe.body) and " (dead)" or ""
+        engine.writeWrapped(combatEnemyWin, 1, i + 2, ("%s%s  %d/%d%s"):format(
             marker, foe.name, foe.body.health, foe.body.maxHealth, status
         ))
     end
@@ -2355,30 +2366,30 @@ end
 
 -- `combatState.loc`/`.scene` don't change for the life of an encounter, and
 -- neither does `.selectedIndex` except via Tab - tracked here so anything
--- mid-resolution (an ability effect, runEquipmentAction, a picker returning) can
+-- mid-resolution (an ability effect, engine.runEquipmentAction, a picker returning) can
 -- put the map/enemy panes back the way they should look without needing
 -- loc/scene threaded all the way through every call. Set once near the top
--- of runEncounter and whenever the selection changes.
+-- of engine.runEncounter and whenever the selection changes.
 
 -- A fullscreen sub-picker (choosing an attack, a limb, an ability, a
 -- reload/belt target) draws right over the map/enemy panes the same way
--- showCombatMessage does - unlike showCombatMessage's old blocking
+-- engine.showCombatMessage does - unlike engine.showCombatMessage's old blocking
 -- "Press any key" though, resolution now continues straight into a paced
--- sequence of logCombat/combatState.flash calls, so whatever picker was
+-- sequence of engine.logCombat/combatState.flash calls, so whatever picker was
 -- showing needs putting right first, or those would be flashing over stale
 -- picker text instead of the actual map. Call this right after any such
 -- picker returns, before resolution logging begins.
 function combatState.redrawPanes()
     if combatState.loc then
-        drawCombatField(combatState.loc, combatState.scene)
-        drawEnemyList(combatState.scene, combatState.selectedIndex)
-        drawCombatLog()
+        engine.drawCombatField(combatState.loc, combatState.scene)
+        engine.drawEnemyList(combatState.scene, combatState.selectedIndex)
+        engine.drawCombatLog()
 
         -- The action menu itself isn't rebuilt here - reconstructing it
         -- needs `restricted`, which isn't in scope from every call site
-        -- (an ability effect, runEquipmentAction) - but its pane still needs
+        -- (an ability effect, engine.runEquipmentAction) - but its pane still needs
         -- clearing, or whatever a sub-picker just drew stays sitting there
-        -- until the next real promptAction call. Blank is a perfectly
+        -- until the next real engine.promptAction call. Blank is a perfectly
         -- valid resting state since nothing reads a selection out of it
         -- mid-resolution anyway.
         combatActionWin.setVisible(false)
@@ -2398,22 +2409,22 @@ local ACTION_LABELS = {
 
 -- The main in-combat menu: Fight/Look/[Reload]/Ability/Belt/Idle/Flee,
 -- numbered dynamically since Reload only appears when an equipped weapon
--- actually uses ammo (see hasAmmoWeapon). Movement isn't a menu entry at
+-- actually uses ammo (see engine.hasAmmoWeapon). Movement isn't a menu entry at
 -- all - arrow keys reposition immediately, without a separate confirmation
 -- step, so the player never has to open a sub-prompt just to take a step.
--- Tab cycles which enemy in the scene is selected (see drawEnemyList) right
+-- Tab cycles which enemy in the scene is selected (see engine.drawEnemyList) right
 -- here in the same loop, without counting as a turn or an action of its
 -- own. Returns (action, moveDir, selectedIndex); moveDir is only
 -- meaningful when action == "move".
-local function promptAction(loc, scene, selectedIndex, restricted)
-    drawCombatField(loc, scene)
-    drawEnemyList(scene, selectedIndex)
-    drawCombatLog()
+function engine.promptAction(loc, scene, selectedIndex, restricted)
+    engine.drawCombatField(loc, scene)
+    engine.drawEnemyList(scene, selectedIndex)
+    engine.drawCombatLog()
 
-    local moveTag = getEffectiveReflex(player) >= REFLEX_QUICK_THRESHOLD and "quick" or "full"
+    local moveTag = engine.getEffectiveReflex(player) >= REFLEX_QUICK_THRESHOLD and "quick" or "full"
 
     local options = { "fight", "look" }
-    if hasAmmoWeapon(player) then
+    if engine.hasAmmoWeapon(player) then
         table.insert(options, "reload")
     end
     table.insert(options, "ability")
@@ -2435,7 +2446,7 @@ local function promptAction(loc, scene, selectedIndex, restricted)
     end
     for i, action in ipairs(options) do
         combatActionWin.setCursorPos(1, row)
-        combatActionWin.write("[" .. digitLabel(i) .. "] " .. ACTION_LABELS[action])
+        combatActionWin.write("[" .. engine.digitLabel(i) .. "] " .. ACTION_LABELS[action])
         row = row + 1
     end
     combatActionWin.setCursorPos(1, row)
@@ -2446,7 +2457,7 @@ local function promptAction(loc, scene, selectedIndex, restricted)
         local _, key = os.pullEvent("key")
         if key == keys.tab then
             selectedIndex = selectedIndex % #scene + 1
-            drawEnemyList(scene, selectedIndex)
+            engine.drawEnemyList(scene, selectedIndex)
         elseif debugConsole.enabled and debugConsole.openKeys[key] then
             debugConsole.run()
             combatState.redrawPanes()
@@ -2463,7 +2474,7 @@ local function promptAction(loc, scene, selectedIndex, restricted)
     end
 end
 
-local function scaleDamageRange(range, mult)
+function engine.scaleDamageRange(range, mult)
     return {
         min = math.floor(range.min * mult + 0.5),
         max = math.floor(range.max * mult + 0.5),
@@ -2473,7 +2484,7 @@ end
 -- Whatever's equipped in a limb's matching equip slot, or a bare Strike if
 -- there's nothing there (or nothing anymore - see the inventory's equip
 -- slots).
-local function getWieldedWeapon(equipped, label)
+function engine.getWieldedWeapon(equipped, label)
     local weaponId = equipped and equipped[label]
     -- A hand can also hold a plain consumable (see "Inventory & equipment")
     -- rather than a weapon - weaponEntries won't recognize its id, so it
@@ -2490,9 +2501,9 @@ end
 -- aren't equipment - never read from `equipped`, so they can't be swapped,
 -- dropped, or disarmed the way a held weapon can. Returns nil if this part
 -- has no way to attack at all.
-local function getAttackWeapon(entry, equipped)
-    if getPartLocalTags(entry.part).MANIPULATE then
-        return getWieldedWeapon(equipped, entry.label)
+function engine.getAttackWeapon(entry, equipped)
+    if engine.getPartLocalTags(entry.part).MANIPULATE then
+        return engine.getWieldedWeapon(equipped, entry.label)
     end
     local template = partEntries[entry.part.template]
     return template and template.naturalWeapon and weaponEntries[template.naturalWeapon] or nil
@@ -2501,38 +2512,38 @@ end
 -- Lists every limb the attacker can actually fight with as a weapon choice
 -- - MANIPULATE limbs (hands, by default) plus anything with a natural
 -- weapon of its own (a stinger) - but only the ones currently in range and
--- still functional (see isLimbFunctional: a destroyed arm takes its hand
+-- still functional (see engine.isLimbFunctional: a destroyed arm takes its hand
 -- down with it, a destroyed stinger just takes itself). A two-handed
 -- weapon only ever shows up once, off its canonical hand (see
--- getWieldingHands), and needs every hand holding it functional, not just
+-- engine.getWieldingHands), and needs every hand holding it functional, not just
 -- the one this loop happens to be looking at. Range is a hard cap, not a
 -- penalty. STRENGTH only scales melee weapons (averaged across every hand
--- for a two-handed one - see getWeaponStrength); spread is folded into the
+-- for a two-handed one - see engine.getWeaponStrength); spread is folded into the
 -- shown hit chance for every weapon, melee included, since it's driven by
 -- actual distance rather than weapon type. When restricted (mid a quick
 -- action's bonus turn), two-handed weapons are left out entirely, same as
 -- an out-of-range one - an out-of-ammo weapon is left out the same way.
 -- Returns nil if nothing qualifies at all, or "back" (as the first value)
 -- if the player explicitly backed out instead of picking one.
-local function pickAttack(equipped, enemy, distance, restricted)
-    local limbs = collectLabeledParts(player.body)
+function engine.pickAttack(equipped, enemy, distance, restricted)
+    local limbs = engine.collectLabeledParts(player.body)
     local options = {}
     for _, entry in ipairs(limbs) do
-        local weapon = getAttackWeapon(entry, equipped)
+        local weapon = engine.getAttackWeapon(entry, equipped)
         if weapon then
             -- A two-handed weapon only ever surfaces once, from its
-            -- canonical hand (see getWieldingHands), needs every hand
-            -- holding it functional (same idea as isLimbFunctional's own
+            -- canonical hand (see engine.getWieldingHands), needs every hand
+            -- holding it functional (same idea as engine.isLimbFunctional's own
             -- ancestor walk, one level removed), and needs enough of them
             -- in the first place - gripped in just one hand (see
             -- changeGrip) is held, not usable.
             local isTwoHanded = weapon.handedness == "two-handed"
-            local hands = isTwoHanded and getWieldingHands(player, entry.label) or { entry }
+            local hands = isTwoHanded and engine.getWieldingHands(player, entry.label) or { entry }
             local isCanonical = hands[1].label == entry.label
             local enoughHands = #hands >= (isTwoHanded and 2 or 1)
             local allFunctional = true
             for _, hand in ipairs(hands) do
-                if not isLimbFunctional(hand.part) then
+                if not engine.isLimbFunctional(hand.part) then
                     allFunctional = false
                     break
                 end
@@ -2558,35 +2569,35 @@ local function pickAttack(equipped, enemy, distance, restricted)
     combatWin.write("Choose your attack: (distance " .. distance .. ")")
     local row = 3
     for i, entry in ipairs(options) do
-        local weapon = getAttackWeapon(entry, equipped)
-        local hitPercent = math.floor(getFinalHitChance(player, enemy, weapon, distance) * 100 + 0.5)
+        local weapon = engine.getAttackWeapon(entry, equipped)
+        local hitPercent = math.floor(engine.getFinalHitChance(player, enemy, weapon, distance) * 100 + 0.5)
         local speedTag = weapon.handedness == "two-handed" and " (full)" or " (quick)"
         local ammoTag = weapon.ammoCapacity and (" [%d/%d ammo]"):format(player.ammo[entry.label] or 0, weapon.ammoCapacity) or ""
         local label = entry.label
         if weapon.handedness == "two-handed" then
             local labels = {}
-            for _, hand in ipairs(getWieldingHands(player, entry.label)) do
+            for _, hand in ipairs(engine.getWieldingHands(player, entry.label)) do
                 table.insert(labels, hand.label)
             end
             label = table.concat(labels, "+")
         end
         local line
         if weapon.type == "melee" then
-            local strength = player.stats.strength * getWeaponStrength(player, entry, weapon)
-            local scaled = scaleDamageRange(weapon.damage, strength)
+            local strength = player.stats.strength * engine.getWeaponStrength(player, entry, weapon)
+            local scaled = engine.scaleDamageRange(weapon.damage, strength)
             line = ("[%s] %s - %s %s dmg x %d%% STR = %s dmg (%d%% to hit)%s%s"):format(
-                digitLabel(i), label, weapon.name, formatDamageRange(weapon.damage),
-                math.floor(strength * 100 + 0.5), formatDamageRange(scaled), hitPercent, speedTag, ammoTag
+                engine.digitLabel(i), label, weapon.name, engine.formatDamageRange(weapon.damage),
+                math.floor(strength * 100 + 0.5), engine.formatDamageRange(scaled), hitPercent, speedTag, ammoTag
             )
         else
             line = ("[%s] %s - %s %s dmg (ranged, %d%% to hit)%s%s"):format(
-                digitLabel(i), label, weapon.name, formatDamageRange(weapon.damage), hitPercent, speedTag, ammoTag
+                engine.digitLabel(i), label, weapon.name, engine.formatDamageRange(weapon.damage), hitPercent, speedTag, ammoTag
             )
         end
-        row = row + writeWrapped(combatWin, 1, row, line)
+        row = row + engine.writeWrapped(combatWin, 1, row, line)
     end
     local backIndex = #options + 1
-    writeWrapped(combatWin, 1, row, "[" .. digitLabel(backIndex) .. "] Back")
+    engine.writeWrapped(combatWin, 1, row, "[" .. engine.digitLabel(backIndex) .. "] Back")
     combatWin.setVisible(true)
 
     while true do
@@ -2595,7 +2606,7 @@ local function pickAttack(equipped, enemy, distance, restricted)
         if index == backIndex then
             return "back", nil
         elseif index and options[index] then
-            return options[index], getAttackWeapon(options[index], equipped)
+            return options[index], engine.getAttackWeapon(options[index], equipped)
         end
     end
 end
@@ -2609,8 +2620,8 @@ end
 -- cheap way to let the eye parse the list structurally instead of as a
 -- flat wall of names.
 -- Returns nil, nil if the player backs out instead of picking a limb.
-local function pickLimb(prompt, torso)
-    local parts = collectLabeledParts(torso)
+function engine.pickLimb(prompt, torso)
+    local parts = engine.collectLabeledParts(torso)
 
     combatWin.setVisible(false)
     combatWin.clear()
@@ -2618,12 +2629,12 @@ local function pickLimb(prompt, torso)
     combatWin.write(prompt)
     local row = 3
     for i, entry in ipairs(parts) do
-        row = row + writeWrapped(combatWin, 1, row, ("[%s] %s%s  %d/%d"):format(
-            digitLabel(i), string.rep("  ", entry.depth), entry.label, entry.part.health, entry.part.maxHealth
+        row = row + engine.writeWrapped(combatWin, 1, row, ("[%s] %s%s  %d/%d"):format(
+            engine.digitLabel(i), string.rep("  ", entry.depth), entry.label, entry.part.health, entry.part.maxHealth
         ))
     end
     local backIndex = #parts + 1
-    writeWrapped(combatWin, 1, row, "[" .. digitLabel(backIndex) .. "] Back")
+    engine.writeWrapped(combatWin, 1, row, "[" .. engine.digitLabel(backIndex) .. "] Back")
     combatWin.setVisible(true)
 
     while true do
@@ -2640,43 +2651,43 @@ end
 -- Populates the bridge table gamedata.lua's content reaches back into the
 -- engine through - see its own header comment for the full list with
 -- signatures. Done here, in one block, once everything on that list
--- actually exists as a local (pickLimb, just above, is the last one) -
+-- actually exists as a local (engine.pickLimb, just above, is the last one) -
 -- gamedata.lua's own top-level code (building its tables, defining ability
 -- effects/species builds/quest checks/greetings as functions) already ran
 -- when it was required, further up, but nothing in it actually calls
 -- Luadventure.anything eagerly - every reference sits inside a function
 -- body that doesn't run until real gameplay, well after this point.
 Luadventure.player = player
-Luadventure.logActivity = logActivity
-Luadventure.logCombat = logCombat
-Luadventure.dialogue = dialogue
-Luadventure.pickLimb = pickLimb
-Luadventure.damagePart = damagePart
-Luadventure.healPart = healPart
-Luadventure.applyPartStatus = applyPartStatus
-Luadventure.applyCharacterStatus = applyCharacterStatus
-Luadventure.isDead = isDead
-Luadventure.isLimbFunctional = isLimbFunctional
-Luadventure.getLimbStrength = getLimbStrength
-Luadventure.getFinalHitChance = getFinalHitChance
-Luadventure.gridDistance = gridDistance
-Luadventure.collectLabeledParts = collectLabeledParts
-Luadventure.getPartLocalTags = getPartLocalTags
-Luadventure.walkBody = walkBody
+Luadventure.logActivity = engine.logActivity
+Luadventure.logCombat = engine.logCombat
+Luadventure.dialogue = engine.dialogue
+Luadventure.pickLimb = engine.pickLimb
+Luadventure.damagePart = engine.damagePart
+Luadventure.healPart = engine.healPart
+Luadventure.applyPartStatus = engine.applyPartStatus
+Luadventure.applyCharacterStatus = engine.applyCharacterStatus
+Luadventure.isDead = engine.isDead
+Luadventure.isLimbFunctional = engine.isLimbFunctional
+Luadventure.getLimbStrength = engine.getLimbStrength
+Luadventure.getFinalHitChance = engine.getFinalHitChance
+Luadventure.gridDistance = engine.gridDistance
+Luadventure.collectLabeledParts = engine.collectLabeledParts
+Luadventure.getPartLocalTags = engine.getPartLocalTags
+Luadventure.walkBody = engine.walkBody
 Luadventure.combatState = combatState
-Luadventure.newTorso = newTorso
-Luadventure.attachPart = attachPart
-Luadventure.installCategoryOrgan = installCategoryOrgan
-Luadventure.installGenericOrgan = installGenericOrgan
-Luadventure.recalcGlobalTags = recalcGlobalTags
-Luadventure.newHumanBody = newHumanBody
-Luadventure.newInsectoidBody = newInsectoidBody
+Luadventure.newTorso = engine.newTorso
+Luadventure.attachPart = engine.attachPart
+Luadventure.installCategoryOrgan = engine.installCategoryOrgan
+Luadventure.installGenericOrgan = engine.installGenericOrgan
+Luadventure.recalcGlobalTags = engine.recalcGlobalTags
+Luadventure.newHumanBody = engine.newHumanBody
+Luadventure.newInsectoidBody = engine.newInsectoidBody
 
--- A read-only version of pickLimb's list, for the Look action - a size-up,
+-- A read-only version of engine.pickLimb's list, for the Look action - a size-up,
 -- not a targeting prompt, so it never asks the player to choose one, just
 -- waits for any key to close.
-local function viewLimbs(prompt, torso)
-    local parts = collectLabeledParts(torso)
+function engine.viewLimbs(prompt, torso)
+    local parts = engine.collectLabeledParts(torso)
 
     combatWin.setVisible(false)
     combatWin.clear()
@@ -2684,11 +2695,11 @@ local function viewLimbs(prompt, torso)
     combatWin.write(prompt)
     local row = 3
     for _, entry in ipairs(parts) do
-        row = row + writeWrapped(combatWin, 1, row, ("%s%s  %d/%d"):format(
+        row = row + engine.writeWrapped(combatWin, 1, row, ("%s%s  %d/%d"):format(
             string.rep("  ", entry.depth), entry.label, entry.part.health, entry.part.maxHealth
         ))
     end
-    writeWrapped(combatWin, 1, row + 1, "Press any key.")
+    engine.writeWrapped(combatWin, 1, row + 1, "Press any key.")
     combatWin.setVisible(true)
 
     os.pullEvent("key")
@@ -2698,14 +2709,14 @@ end
 -- anything currently equipped (a weapon's own abilities, like the chain
 -- sword's Rev it up! or the laser pistol's Charge Shot), or by anything in
 -- the belt (a consumable's own use-ability). Entries on cooldown are left
--- out entirely, same as pickAttack simply not listing an out-of-range
+-- out entirely, same as engine.pickAttack simply not listing an out-of-range
 -- weapon. Each entry carries the specific part that granted it (the
 -- wielding hand, for a weapon ability), since an effect like Rev it up!
 -- needs to know whose strength to use; a weapon ability also carries the
 -- equip slot itself, since an ammo-based one (Charge Shot) needs to know
 -- which ammo pool to draw from. itemId is set when it came from the belt,
 -- so using it can consume it.
-local function collectAbilities(combatant)
+function engine.collectAbilities(combatant)
     local abilities = {}
     local function tryAdd(source, part, itemId, slot)
         for _, abilityId in ipairs(source.abilities or {}) do
@@ -2715,7 +2726,7 @@ local function collectAbilities(combatant)
         end
     end
 
-    walkBody(combatant.body, function(part)
+    engine.walkBody(combatant.body, function(part)
         for _, organId in pairs(part.organs) do
             tryAdd(organEntries[organId], part)
         end
@@ -2727,12 +2738,12 @@ local function collectAbilities(combatant)
     for slot, occupant in pairs(combatant.equipped) do
         local weapon = weaponEntries[occupant]
         if weapon then
-            local hands = getWieldingHands(combatant, slot)
+            local hands = engine.getWieldingHands(combatant, slot)
             -- Only the canonical hand adds the weapon's abilities - same
             -- weapon, same ability, whichever hand(s) hold it (see
-            -- getWieldingHands); every hand sharing a two-handed one needs
+            -- engine.getWieldingHands); every hand sharing a two-handed one needs
             -- to still be working, same as an ordinary attack does (see
-            -- pickAttack) - Rev it up! shouldn't be usable with one side
+            -- engine.pickAttack) - Rev it up! shouldn't be usable with one side
             -- of a two-handed grip destroyed any more than a one-handed
             -- weapon is with its own hand gone - and it needs enough hands
             -- in the first place, gripped in just one (see changeGrip)
@@ -2740,7 +2751,7 @@ local function collectAbilities(combatant)
             if hands[1].label == slot and #hands >= (weapon.handedness == "two-handed" and 2 or 1) then
                 local allFunctional = true
                 for _, hand in ipairs(hands) do
-                    if not isLimbFunctional(hand.part) then
+                    if not engine.isLimbFunctional(hand.part) then
                         allFunctional = false
                         break
                     end
@@ -2768,10 +2779,10 @@ local function collectAbilities(combatant)
 end
 
 -- Returns nil if the combatant has nothing usable, same convention as
--- pickAttack coming up empty when nothing's in range. When restricted (mid
+-- engine.pickAttack coming up empty when nothing's in range. When restricted (mid
 -- a quick action's bonus turn), full-speed abilities are left out entirely.
-local function pickAbility(combatant, restricted)
-    local abilities = collectAbilities(combatant)
+function engine.pickAbility(combatant, restricted)
+    local abilities = engine.collectAbilities(combatant)
     if restricted then
         local allowed = {}
         for _, entry in ipairs(abilities) do
@@ -2792,10 +2803,10 @@ local function pickAbility(combatant, restricted)
     local row = 3
     for i, entry in ipairs(abilities) do
         local tag = entry.ability.speed ~= "full" and (" (" .. entry.ability.speed .. ")") or ""
-        row = row + writeWrapped(combatWin, 1, row, "[" .. digitLabel(i) .. "] " .. entry.ability.name .. tag)
+        row = row + engine.writeWrapped(combatWin, 1, row, "[" .. engine.digitLabel(i) .. "] " .. entry.ability.name .. tag)
     end
     local backIndex = #abilities + 1
-    writeWrapped(combatWin, 1, row, "[" .. digitLabel(backIndex) .. "] Back")
+    engine.writeWrapped(combatWin, 1, row, "[" .. engine.digitLabel(backIndex) .. "] Back")
     combatWin.setVisible(true)
 
     while true do
@@ -2813,16 +2824,16 @@ end
 -- and (c) has at least one matching ammo item to pull from - same "just
 -- don't list it" convention as everything else. Returns nil if nothing
 -- qualifies.
-local function pickReloadTarget(combatant)
+function engine.pickReloadTarget(combatant)
     local options = {}
     for slot, weaponId in pairs(combatant.equipped) do
         local weapon = weaponEntries[weaponId]
         -- A two-handed weapon's ammo only ever lives on its canonical hand
-        -- (see getWieldingHands) - skip a secondary hand entirely rather
+        -- (see engine.getWieldingHands) - skip a secondary hand entirely rather
         -- than offering to "reload" a pool that isn't actually there.
-        local isSecondaryHand = weapon and getWieldingHands(combatant, slot)[1].label ~= slot
+        local isSecondaryHand = weapon and engine.getWieldingHands(combatant, slot)[1].label ~= slot
         if weapon and not isSecondaryHand and weapon.ammoCapacity and (combatant.ammo[slot] or 0) < weapon.ammoCapacity then
-            if countCarriedItem(combatant, getAmmoItemId(weapon)) > 0 then
+            if engine.countCarriedItem(combatant, engine.getAmmoItemId(weapon)) > 0 then
                 table.insert(options, { slot = slot, weapon = weapon })
             end
         end
@@ -2838,12 +2849,12 @@ local function pickReloadTarget(combatant)
     combatWin.write("Reload which weapon?")
     local row = 3
     for i, opt in ipairs(options) do
-        row = row + writeWrapped(combatWin, 1, row, ("[%s] %s (%s) - %d/%d ammo"):format(
-            digitLabel(i), opt.weapon.name, opt.slot, combatant.ammo[opt.slot] or 0, opt.weapon.ammoCapacity
+        row = row + engine.writeWrapped(combatWin, 1, row, ("[%s] %s (%s) - %d/%d ammo"):format(
+            engine.digitLabel(i), opt.weapon.name, opt.slot, combatant.ammo[opt.slot] or 0, opt.weapon.ammoCapacity
         ))
     end
     local backIndex = #options + 1
-    writeWrapped(combatWin, 1, row, "[" .. digitLabel(backIndex) .. "] Back")
+    engine.writeWrapped(combatWin, 1, row, "[" .. engine.digitLabel(backIndex) .. "] Back")
     combatWin.setVisible(true)
 
     while true do
@@ -2858,17 +2869,17 @@ local function pickReloadTarget(combatant)
 end
 
 -- Display helpers shared by the Equipment action's pickers - "which slot"
--- and "what's in it", read off getSlotContents rather than duplicating
+-- and "what's in it", read off engine.getSlotContents rather than duplicating
 -- the weapon-vs-item-vs-empty branching at every call site.
-local function slotDisplayName(slotDescriptor)
+function engine.slotDisplayName(slotDescriptor)
     if slotDescriptor.kind == "equip" then
         return slotDescriptor.slot
     end
     return "Belt " .. slotDescriptor.index
 end
 
-local function slotOccupantName(combatant, slotDescriptor)
-    local weaponId, itemId = getSlotContents(combatant, slotDescriptor)
+function engine.slotOccupantName(combatant, slotDescriptor)
+    local weaponId, itemId = engine.getSlotContents(combatant, slotDescriptor)
     if weaponId then
         return weaponEntries[weaponId].name
     elseif itemId then
@@ -2893,16 +2904,16 @@ end
 -- quickened; changing grip is quick either way, so it's never gated on
 -- `restricted` at all. Returns the resolved speed, or nil if nothing
 -- happened.
-local function runEquipmentAction(combatant, droppedItems, enemy, restricted)
+function engine.runEquipmentAction(combatant, droppedItems, enemy, restricted)
     -- Toggles a two-handed weapon between properly gripped (every hand it
     -- needs) and a single-hand "improper" carry it's still held by, just
-    -- not usable with (see getWieldingHands/pickAttack) - quick either
+    -- not usable with (see engine.getWieldingHands/engine.pickAttack) - quick either
     -- way, unlike actually drawing a fresh one from the belt or the
     -- ground below. Reducing asks which hand to keep if there's a real
     -- choice; increasing just claims however many empty hands it still
     -- needs, refusing if there aren't enough free, and migrates the
     -- shared ammo pool to whichever hand ends up canonical if that's not
-    -- the one it was already on (see getWieldingHands - canonical is
+    -- the one it was already on (see engine.getWieldingHands - canonical is
     -- whichever hand comes first in body-tree order, which adding a hand
     -- can change). Returns "quick" on success, nil (with its own message)
     -- otherwise. Only ever called for a two-handed weapon - see below.
@@ -2910,7 +2921,7 @@ local function runEquipmentAction(combatant, droppedItems, enemy, restricted)
         local weaponId = combatant.equipped[slot]
         local weapon = weaponEntries[weaponId]
         local needed = 2
-        local hands = getWieldingHands(combatant, slot)
+        local hands = engine.getWieldingHands(combatant, slot)
 
         if #hands >= needed then
             combatWin.setVisible(false)
@@ -2919,10 +2930,10 @@ local function runEquipmentAction(combatant, droppedItems, enemy, restricted)
             combatWin.write("Keep the " .. weapon.name .. " in which hand?")
             local grow = 3
             for i, hand in ipairs(hands) do
-                grow = grow + writeWrapped(combatWin, 1, grow, "[" .. digitLabel(i) .. "] " .. hand.label)
+                grow = grow + engine.writeWrapped(combatWin, 1, grow, "[" .. engine.digitLabel(i) .. "] " .. hand.label)
             end
             local gBackIndex = #hands + 1
-            writeWrapped(combatWin, 1, grow, "[" .. digitLabel(gBackIndex) .. "] Back")
+            engine.writeWrapped(combatWin, 1, grow, "[" .. engine.digitLabel(gBackIndex) .. "] Back")
             combatWin.setVisible(true)
 
             local kept
@@ -2947,19 +2958,19 @@ local function runEquipmentAction(combatant, droppedItems, enemy, restricted)
             combatant.equipped[kept.label] = weaponId
             combatant.ammo[kept.label] = ammo
             combatState.redrawPanes()
-            logCombat("You shift the " .. weapon.name .. " to a one-handed grip.")
+            engine.logCombat("You shift the " .. weapon.name .. " to a one-handed grip.")
             return "quick"
         end
 
         local freeHands = {}
-        for _, limb in ipairs(getManipulateLimbs(combatant)) do
-            local slotWeaponId, slotItemId = getSlotContents(combatant, { kind = "equip", slot = limb.label })
+        for _, limb in ipairs(engine.getManipulateLimbs(combatant)) do
+            local slotWeaponId, slotItemId = engine.getSlotContents(combatant, { kind = "equip", slot = limb.label })
             if not slotWeaponId and not slotItemId and #freeHands < needed - #hands then
                 table.insert(freeHands, limb)
             end
         end
         if #freeHands < needed - #hands then
-            logCombat("Not enough free hands to grip it properly.")
+            engine.logCombat("Not enough free hands to grip it properly.")
             return nil
         end
 
@@ -2967,17 +2978,17 @@ local function runEquipmentAction(combatant, droppedItems, enemy, restricted)
         for _, limb in ipairs(freeHands) do
             combatant.equipped[limb.label] = weaponId
         end
-        local newCanonical = getWieldingHands(combatant, slot)[1].label
+        local newCanonical = engine.getWieldingHands(combatant, slot)[1].label
         if newCanonical ~= oldCanonical then
             combatant.ammo[newCanonical] = combatant.ammo[oldCanonical]
             combatant.ammo[oldCanonical] = nil
         end
         combatState.redrawPanes()
-        logCombat("You grip the " .. weapon.name .. " properly.")
+        engine.logCombat("You grip the " .. weapon.name .. " properly.")
         return "quick"
     end
 
-    local slots = getAllSlots(combatant)
+    local slots = engine.getAllSlots(combatant)
 
     combatWin.setVisible(false)
     combatWin.clear()
@@ -2985,12 +2996,12 @@ local function runEquipmentAction(combatant, droppedItems, enemy, restricted)
     combatWin.write("Equipment - which slot?")
     local row = 3
     for i, slotDescriptor in ipairs(slots) do
-        row = row + writeWrapped(combatWin, 1, row, ("[%s] %s: %s"):format(
-            digitLabel(i), slotDisplayName(slotDescriptor), slotOccupantName(combatant, slotDescriptor)
+        row = row + engine.writeWrapped(combatWin, 1, row, ("[%s] %s: %s"):format(
+            engine.digitLabel(i), engine.slotDisplayName(slotDescriptor), engine.slotOccupantName(combatant, slotDescriptor)
         ))
     end
     local backIndex = #slots + 1
-    writeWrapped(combatWin, 1, row, "[" .. digitLabel(backIndex) .. "] Back")
+    engine.writeWrapped(combatWin, 1, row, "[" .. engine.digitLabel(backIndex) .. "] Back")
     combatWin.setVisible(true)
 
     local chosen
@@ -3006,7 +3017,7 @@ local function runEquipmentAction(combatant, droppedItems, enemy, restricted)
     end
     combatState.redrawPanes()
 
-    local weaponId, itemId = getSlotContents(combatant, chosen)
+    local weaponId, itemId = engine.getSlotContents(combatant, chosen)
 
     if weaponId then
         -- A two-handed weapon only ever gets "change grip" here - a full
@@ -3020,8 +3031,8 @@ local function runEquipmentAction(combatant, droppedItems, enemy, restricted)
             combatWin.clear()
             combatWin.setCursorPos(1, 1)
             combatWin.write(weaponEntries[weaponId].name .. " - what do you want to do?")
-            writeWrapped(combatWin, 1, 3, "[1] Change grip (quick)")
-            writeWrapped(combatWin, 1, 4, "[2] Back")
+            engine.writeWrapped(combatWin, 1, 3, "[1] Change grip (quick)")
+            engine.writeWrapped(combatWin, 1, 4, "[2] Back")
             combatWin.setVisible(true)
 
             while true do
@@ -3036,13 +3047,13 @@ local function runEquipmentAction(combatant, droppedItems, enemy, restricted)
         end
 
         if restricted then
-            logCombat("You don't have time to swap weapons.")
+            engine.logCombat("You don't have time to swap weapons.")
             return nil
         end
 
         local destinations = {}
         for _, slotDescriptor in ipairs(slots) do
-            if not slotsEqual(slotDescriptor, chosen) then
+            if not engine.slotsEqual(slotDescriptor, chosen) then
                 table.insert(destinations, slotDescriptor)
             end
         end
@@ -3053,12 +3064,12 @@ local function runEquipmentAction(combatant, droppedItems, enemy, restricted)
         combatWin.write("Swap " .. weaponEntries[weaponId].name .. " to where?")
         local drow = 3
         for i, slotDescriptor in ipairs(destinations) do
-            drow = drow + writeWrapped(combatWin, 1, drow, ("[%s] %s: %s"):format(
-                digitLabel(i), slotDisplayName(slotDescriptor), slotOccupantName(combatant, slotDescriptor)
+            drow = drow + engine.writeWrapped(combatWin, 1, drow, ("[%s] %s: %s"):format(
+                engine.digitLabel(i), engine.slotDisplayName(slotDescriptor), engine.slotOccupantName(combatant, slotDescriptor)
             ))
         end
         local dBackIndex = #destinations + 1
-        writeWrapped(combatWin, 1, drow, "[" .. digitLabel(dBackIndex) .. "] Back")
+        engine.writeWrapped(combatWin, 1, drow, "[" .. engine.digitLabel(dBackIndex) .. "] Back")
         combatWin.setVisible(true)
 
         while true do
@@ -3068,15 +3079,15 @@ local function runEquipmentAction(combatant, droppedItems, enemy, restricted)
                 return nil
             elseif index and destinations[index] then
                 local destination = destinations[index]
-                local destWeaponId, destItemId = getSlotContents(combatant, destination)
-                swapSlots(combatant, chosen, destination)
+                local destWeaponId, destItemId = engine.getSlotContents(combatant, destination)
+                engine.swapSlots(combatant, chosen, destination)
                 combatState.redrawPanes()
                 if destWeaponId then
-                    logCombat("You swap your " .. weaponEntries[weaponId].name .. " for the " .. weaponEntries[destWeaponId].name .. "!")
+                    engine.logCombat("You swap your " .. weaponEntries[weaponId].name .. " for the " .. weaponEntries[destWeaponId].name .. "!")
                 elseif destItemId then
-                    logCombat("You stow your " .. weaponEntries[weaponId].name .. " and take the " .. itemEntries[destItemId].name .. " in hand.")
+                    engine.logCombat("You stow your " .. weaponEntries[weaponId].name .. " and take the " .. itemEntries[destItemId].name .. " in hand.")
                 else
-                    logCombat("You holster your " .. weaponEntries[weaponId].name .. ".")
+                    engine.logCombat("You holster your " .. weaponEntries[weaponId].name .. ".")
                 end
                 return "full"
             end
@@ -3092,11 +3103,11 @@ local function runEquipmentAction(combatant, droppedItems, enemy, restricted)
         if result == "noop" then
             return nil
         end
-        clearSlot(combatant, chosen)
+        engine.clearSlot(combatant, chosen)
         return ability.speed
     else
         if restricted then
-            logCombat("You don't have time to holster a weapon.")
+            engine.logCombat("You don't have time to holster a weapon.")
             return nil
         end
 
@@ -3106,7 +3117,7 @@ local function runEquipmentAction(combatant, droppedItems, enemy, restricted)
         -- as everywhere else applied only to the belt side of things.
         local candidates = {}
         for _, slotDescriptor in ipairs(slots) do
-            local candidateWeaponId = getSlotContents(combatant, slotDescriptor)
+            local candidateWeaponId = engine.getSlotContents(combatant, slotDescriptor)
             if candidateWeaponId and not (chosen.kind == "belt" and weaponEntries[candidateWeaponId].handedness == "two-handed") then
                 table.insert(candidates, { kind = "slot", slotDescriptor = slotDescriptor, weaponId = candidateWeaponId })
             end
@@ -3118,7 +3129,7 @@ local function runEquipmentAction(combatant, droppedItems, enemy, restricted)
         end
 
         if #candidates == 0 then
-            logCombat("Nothing to holster.")
+            engine.logCombat("Nothing to holster.")
             return nil
         end
 
@@ -3128,13 +3139,13 @@ local function runEquipmentAction(combatant, droppedItems, enemy, restricted)
         combatWin.write("Holster which weapon?")
         local crow = 3
         for i, candidate in ipairs(candidates) do
-            local source = candidate.kind == "slot" and slotDisplayName(candidate.slotDescriptor) or "ground"
-            crow = crow + writeWrapped(combatWin, 1, crow, ("[%s] %s (%s)"):format(
-                digitLabel(i), weaponEntries[candidate.weaponId].name, source
+            local source = candidate.kind == "slot" and engine.slotDisplayName(candidate.slotDescriptor) or "ground"
+            crow = crow + engine.writeWrapped(combatWin, 1, crow, ("[%s] %s (%s)"):format(
+                engine.digitLabel(i), weaponEntries[candidate.weaponId].name, source
             ))
         end
         local cBackIndex = #candidates + 1
-        writeWrapped(combatWin, 1, crow, "[" .. digitLabel(cBackIndex) .. "] Back")
+        engine.writeWrapped(combatWin, 1, crow, "[" .. engine.digitLabel(cBackIndex) .. "] Back")
         combatWin.setVisible(true)
 
         while true do
@@ -3152,7 +3163,7 @@ local function runEquipmentAction(combatant, droppedItems, enemy, restricted)
                 if weaponEntries[candidate.weaponId].handedness == "two-handed" then
                     local ammo = 0
                     if candidate.kind == "slot" then
-                        local hands = getWieldingHands(combatant, candidate.slotDescriptor.slot)
+                        local hands = engine.getWieldingHands(combatant, candidate.slotDescriptor.slot)
                         ammo = combatant.ammo[hands[1].label] or 0
                         for _, hand in ipairs(hands) do
                             combatant.equipped[hand.label] = "none"
@@ -3164,13 +3175,13 @@ local function runEquipmentAction(combatant, droppedItems, enemy, restricted)
                     combatant.equipped[chosen.slot] = candidate.weaponId
                     combatant.ammo[chosen.slot] = ammo
                 elseif candidate.kind == "slot" then
-                    swapSlots(combatant, chosen, candidate.slotDescriptor)
+                    engine.swapSlots(combatant, chosen, candidate.slotDescriptor)
                 else
                     table.remove(droppedItems, candidate.index)
-                    fillSlot(combatant, chosen, candidate.weaponId, nil, 0)
+                    engine.fillSlot(combatant, chosen, candidate.weaponId, nil, 0)
                 end
                 combatState.redrawPanes()
-                logCombat("You draw the " .. weaponEntries[candidate.weaponId].name .. "!")
+                engine.logCombat("You draw the " .. weaponEntries[candidate.weaponId].name .. "!")
                 return "full"
             end
         end
@@ -3178,22 +3189,22 @@ local function runEquipmentAction(combatant, droppedItems, enemy, restricted)
 end
 
 -- Knocks whatever's equipped in a slot right out of the player's hands -
--- a destroyed hand (see runEncounter's enemy-attack branch), or later, some
+-- a destroyed hand (see engine.runEncounter's enemy-attack branch), or later, some
 -- disarm effect. A two-handed weapon only actually falls once every hand
--- holding it is gone (see getWieldingHands) - called again later for the
+-- holding it is gone (see engine.getWieldingHands) - called again later for the
 -- last one, it clears every slot the group occupied together and returns
 -- its one shared ammo pool (tracked on whichever hand was canonical) to
 -- the bag exactly once, not per hand. A weapon is removed from `equipped`
 -- entirely and tracked in `droppedItems` until it's picked back up mid-
--- fight (see runEquipmentAction's empty-slot branch) or auto-returned to the
+-- fight (see engine.runEquipmentAction's empty-slot branch) or auto-returned to the
 -- inventory once the encounter ends; a plain consumable just falls
 -- straight back into the pack instead, since it was never "wielded" in
 -- the first place - there's nothing to clatter to the ground or reclaim.
 -- Returns the dropped weapon's id, or nil if that slot had nothing
 -- equipped, held a plain item instead of a weapon, or is still held by
 -- another functional hand.
-local function dropEquippedItem(droppedItems, slot)
-    local weaponId, itemId = getSlotContents(player, { kind = "equip", slot = slot })
+function engine.dropEquippedItem(droppedItems, slot)
+    local weaponId, itemId = engine.getSlotContents(player, { kind = "equip", slot = slot })
     if itemId then
         player.equipped[slot] = "none"
         table.insert(player.inventory, itemId)
@@ -3202,13 +3213,13 @@ local function dropEquippedItem(droppedItems, slot)
     if not weaponId then
         return nil
     end
-    local hands = getWieldingHands(player, slot)
+    local hands = engine.getWieldingHands(player, slot)
     for _, hand in ipairs(hands) do
-        if hand.label ~= slot and isLimbFunctional(hand.part) then
+        if hand.label ~= slot and engine.isLimbFunctional(hand.part) then
             return nil
         end
     end
-    returnAmmoToInventory(player, weaponId, hands[1].label)
+    engine.returnAmmoToInventory(player, weaponId, hands[1].label)
     for _, hand in ipairs(hands) do
         player.equipped[hand.label] = "none"
     end
@@ -3219,9 +3230,9 @@ end
 -- "The scene" is whoever's left to fight this encounter - just one enemy
 -- for now, but written as a list so a real search-and-destroy encounter
 -- (several foes at once) falls out for free later.
-local function sceneCleared(scene)
+function engine.sceneCleared(scene)
     for _, foe in ipairs(scene) do
-        if not isDead(foe.body) then
+        if not engine.isDead(foe.body) then
             return false
         end
     end
@@ -3234,7 +3245,7 @@ end
 -- log - so a quest can ask "have you killed a test_dummy?" (or later, "3
 -- bandits?") without a bespoke flag wired into every place damage happens -
 -- then shows a summary of what went down before handing control back.
-local function showVictoryScreen(scene)
+function engine.showVictoryScreen(scene)
     local lines = { "Victory!", "" }
     for _, foe in ipairs(scene) do
         player.killLog[foe.typeId] = (player.killLog[foe.typeId] or 0) + 1
@@ -3242,14 +3253,14 @@ local function showVictoryScreen(scene)
     end
     table.insert(lines, "")
     table.insert(lines, "Press any key.")
-    showCombatMessage(lines, true)
+    engine.showCombatMessage(lines, true)
 end
 
 -- "The test dummy" for one, "the test dummy and the goblin" for two, an
 -- Oxford-comma list for more - for the activity log's "fought" line, which
 -- otherwise reads oddly for a scene with more than one foe in it (nothing
 -- spawns more than one yet, but scene's already a list - see "Victory").
-local function joinEnemyNames(scene)
+function engine.joinEnemyNames(scene)
     local names = {}
     for _, foe in ipairs(scene) do
         table.insert(names, "the " .. foe.name)
@@ -3266,14 +3277,14 @@ end
 -- current location's objects) started this fight, if any - used purely so
 -- a win can remove it from the map afterward (see the victory branch
 -- below); nothing else about the encounter depends on it.
-local function runEncounter(triggeringObject)
+function engine.runEncounter(triggeringObject)
     local startX, startY = player.gridX, player.gridY
-    local enemy = spawnTestDummy()
+    local enemy = engine.spawnTestDummy()
     local scene = { enemy }
     local loc = world[player.location]
 
     -- Whichever entry in `scene` Fight/Look/an ability's targeting acts on
-    -- - Tab cycles this in promptAction. Only one foe exists yet, so this
+    -- - Tab cycles this in engine.promptAction. Only one foe exists yet, so this
     -- never actually moves, but the plumbing's in place for whenever a
     -- second one shows up.
     local selectedEnemyIndex = 1
@@ -3289,9 +3300,9 @@ local function runEncounter(triggeringObject)
         end
     end
 
-    resetCombatLog()
-    logActivity(dialogue("{{name}} fought " .. joinEnemyNames(scene) .. ".", player))
-    logCombat("A " .. enemy.name .. " attacks!")
+    engine.resetCombatLog()
+    engine.logActivity(engine.dialogue("{{name}} fought " .. engine.joinEnemyNames(scene) .. ".", player))
+    engine.logCombat("A " .. enemy.name .. " attacks!")
 
     -- Action economy: a full action always ends the round. Quick actions are
     -- half an action each - the first one taken this round flips
@@ -3309,7 +3320,7 @@ local function runEncounter(triggeringObject)
     -- same as unequipping it manually would; the player can re-equip it
     -- themselves once they're out of combat and it's actually useful again
     -- (a hand still at 0 health can't wield anything anyway - see
-    -- isLimbFunctional).
+    -- engine.isLimbFunctional).
     local droppedItems = {}
     local function returnUnclaimedDrops()
         for _, dropped in ipairs(droppedItems) do
@@ -3329,9 +3340,9 @@ local function runEncounter(triggeringObject)
         -- The start of the player's turn: check the scene before prompting
         -- for an action at all, rather than each attack path guessing
         -- whether its own hit was the one that won the fight.
-        if sceneCleared(scene) then
-            showVictoryScreen(scene)
-            logActivity(dialogue("{{name}} won the fight!", player))
+        if engine.sceneCleared(scene) then
+            engine.showVictoryScreen(scene)
+            engine.logActivity(engine.dialogue("{{name}} won the fight!", player))
 
             -- Winning shouldn't leave you wherever the fight happened to
             -- wander to - back to the tile you were standing on when it
@@ -3351,14 +3362,14 @@ local function runEncounter(triggeringObject)
             return false
         end
 
-        local action, moveDir, newSelectedIndex = promptAction(loc, scene, selectedEnemyIndex, quickened)
+        local action, moveDir, newSelectedIndex = engine.promptAction(loc, scene, selectedEnemyIndex, quickened)
         selectedEnemyIndex = newSelectedIndex
         combatState.selectedIndex = selectedEnemyIndex
         local foe = scene[selectedEnemyIndex]
 
         if action == "flee" then
-            logCombat("You break off and flee.")
-            logActivity(dialogue("{{name}} fled.", player))
+            engine.logCombat("You break off and flee.")
+            engine.logActivity(engine.dialogue("{{name}} fled.", player))
             returnUnclaimedDrops()
             return false
         end
@@ -3369,9 +3380,9 @@ local function runEncounter(triggeringObject)
         local speed = nil
 
         if action == "move" then
-            local moveIsQuick = getEffectiveReflex(player) >= REFLEX_QUICK_THRESHOLD
+            local moveIsQuick = engine.getEffectiveReflex(player) >= REFLEX_QUICK_THRESHOLD
             if quickened and not moveIsQuick then
-                logCombat("You don't have time to move.")
+                engine.logCombat("You don't have time to move.")
             else
                 local delta = dirDelta[moveDir]
                 local nx, ny = player.gridX + delta.dx, player.gridY + delta.dy
@@ -3383,7 +3394,7 @@ local function runEncounter(triggeringObject)
                     -- with the player already in the new spot right away,
                     -- rather than leaving it showing the old position for
                     -- as long as whatever comes next (the enemy's turn,
-                    -- with its own paced logCombat calls) takes to resolve.
+                    -- with its own paced engine.logCombat calls) takes to resolve.
                     combatState.redrawPanes()
                 end
                 -- Stepping into a wall silently does nothing - same as
@@ -3397,24 +3408,24 @@ local function runEncounter(triggeringObject)
         end
 
         if action == "look" then
-            viewLimbs("The " .. foe.name .. "'s condition:", foe.body)
+            engine.viewLimbs("The " .. foe.name .. "'s condition:", foe.body)
             speed = "instant"
         end
 
         if action == "ability" then
-            local entry = pickAbility(player, quickened)
+            local entry = engine.pickAbility(player, quickened)
             combatState.redrawPanes()
             if entry == "back" then
                 -- cancelled, nothing happened
             elseif not entry then
-                logCombat("You have nothing to use.")
+                engine.logCombat("You have nothing to use.")
             else
                 local result = entry.ability.effect(player, foe, entry.part, entry.slot)
 
                 if result ~= "noop" then
                     if entry.itemId and entry.slot then
                         -- A consumable held in a hand rather than the belt
-                        -- (see collectAbilities) - consumed by clearing
+                        -- (see engine.collectAbilities) - consumed by clearing
                         -- that hand, not searching the belt for it.
                         player.equipped[entry.slot] = "none"
                     elseif entry.itemId then
@@ -3438,20 +3449,20 @@ local function runEncounter(triggeringObject)
         end
 
         if action == "fight" then
-            local distance = gridDistance(player.gridX, player.gridY, foe.gridX, foe.gridY)
-            local attacker, weapon = pickAttack(player.equipped, foe, distance, quickened)
+            local distance = engine.gridDistance(player.gridX, player.gridY, foe.gridX, foe.gridY)
+            local attacker, weapon = engine.pickAttack(player.equipped, foe, distance, quickened)
             combatState.redrawPanes()
 
             if attacker == "back" then
                 -- cancelled, nothing happened
             elseif not attacker then
-                logCombat("Nothing is in range.")
+                engine.logCombat("Nothing is in range.")
             else
-                local target, label = pickLimb("Target the " .. foe.name .. "'s:", foe.body)
+                local target, label = engine.pickLimb("Target the " .. foe.name .. "'s:", foe.body)
                 combatState.redrawPanes()
 
                 if target then
-                    local hitChance = getFinalHitChance(player, foe, weapon, distance, target)
+                    local hitChance = engine.getFinalHitChance(player, foe, weapon, distance, target)
                     local hitPercent = math.floor(hitChance * 100 + 0.5)
                     speed = weapon.handedness == "two-handed" and "full" or "quick"
 
@@ -3463,29 +3474,29 @@ local function runEncounter(triggeringObject)
                     local attackerLabel = attacker.label
                     if weapon.handedness == "two-handed" then
                         local labels = {}
-                        for _, hand in ipairs(getWieldingHands(player, attacker.label)) do
+                        for _, hand in ipairs(engine.getWieldingHands(player, attacker.label)) do
                             table.insert(labels, hand.label)
                         end
                         attackerLabel = table.concat(labels, "+")
                     end
 
-                    logCombat("Your " .. attackerLabel .. " swings with " .. weapon.name .. " at the " .. foe.name .. "'s " .. label .. " (" .. hitPercent .. "% to hit)...")
+                    engine.logCombat("Your " .. attackerLabel .. " swings with " .. weapon.name .. " at the " .. foe.name .. "'s " .. label .. " (" .. hitPercent .. "% to hit)...")
 
                     if math.random() > hitChance then
-                        logCombat("You miss!")
+                        engine.logCombat("You miss!")
                     else
                         local strength = 1
                         if weapon.type == "melee" then
-                            strength = player.stats.strength * getWeaponStrength(player, attacker, weapon)
+                            strength = player.stats.strength * engine.getWeaponStrength(player, attacker, weapon)
                         end
                         local roll = math.random(weapon.damage.min, weapon.damage.max)
                         local raw = math.floor(roll * strength + 0.5)
-                        local dealt = damagePart(foe, target, raw, weapon.damageType)
+                        local dealt = engine.damagePart(foe, target, raw, weapon.damageType)
                         if weapon.onHit then
                             weapon.onHit(target)
                         end
 
-                        logCombat("Hits for " .. dealt .. "! (" .. target.health .. "/" .. target.maxHealth .. ")")
+                        engine.logCombat("Hits for " .. dealt .. "! (" .. target.health .. "/" .. target.maxHealth .. ")")
                         combatState.flash(foe.gridX, foe.gridY, "E")
                     end
                 end
@@ -3493,21 +3504,21 @@ local function runEncounter(triggeringObject)
         end
 
         if action == "reload" then
-            local target = pickReloadTarget(player)
+            local target = engine.pickReloadTarget(player)
             combatState.redrawPanes()
             if target == "back" then
                 -- cancelled, nothing happened
             elseif not target then
-                logCombat("Nothing to reload.")
+                engine.logCombat("Nothing to reload.")
             else
-                local loaded = reloadWeapon(player, target.slot)
-                logCombat("You reload the " .. target.weapon.name .. ". Loaded " .. loaded .. " (" .. player.ammo[target.slot] .. "/" .. target.weapon.ammoCapacity .. ")")
+                local loaded = engine.reloadWeapon(player, target.slot)
+                engine.logCombat("You reload the " .. target.weapon.name .. ". Loaded " .. loaded .. " (" .. player.ammo[target.slot] .. "/" .. target.weapon.ammoCapacity .. ")")
                 speed = "quick"
             end
         end
 
         if action == "belt" then
-            speed = runEquipmentAction(player, droppedItems, foe, quickened)
+            speed = engine.runEquipmentAction(player, droppedItems, foe, quickened)
         end
 
         -- nil: nothing happened, quickened untouched, prompt again.
@@ -3533,50 +3544,50 @@ local function runEncounter(triggeringObject)
             -- A foe already dead this round (e.g. the blow that just landed
             -- was the killing one) doesn't get to act - the scene check at
             -- the top of the loop will end the encounter next turn.
-            if not sceneCleared(scene) then
+            if not engine.sceneCleared(scene) then
                 local decision = enemy:decide({
                     self = enemy,
                     player = player,
-                    distance = gridDistance(player.gridX, player.gridY, enemy.gridX, enemy.gridY),
+                    distance = engine.gridDistance(player.gridX, player.gridY, enemy.gridX, enemy.gridY),
                 })
 
                 if decision.action == "move" then
                     enemy.gridX = math.max(1, math.min(loc.width, enemy.gridX + decision.dx))
                     enemy.gridY = math.max(1, math.min(loc.height, enemy.gridY + decision.dy))
-                    logCombat("The " .. enemy.name .. " closes in!")
+                    engine.logCombat("The " .. enemy.name .. " closes in!")
                 elseif decision.action == "attack" then
                     local weapon = weaponEntries.strike
-                    local distance = gridDistance(player.gridX, player.gridY, enemy.gridX, enemy.gridY)
+                    local distance = engine.gridDistance(player.gridX, player.gridY, enemy.gridX, enemy.gridY)
                     -- Picked before the roll (not after landing a hit) so
                     -- its aimDifficulty, if any, actually factors into the
                     -- chance - same order the player's own Fight action
-                    -- already uses (pickLimb, then getFinalHitChance).
-                    local parts = collectLabeledParts(player.body)
+                    -- already uses (engine.pickLimb, then engine.getFinalHitChance).
+                    local parts = engine.collectLabeledParts(player.body)
                     local pick = parts[math.random(#parts)]
-                    local enemyHitChance = getFinalHitChance(enemy, player, weapon, distance, pick.part)
+                    local enemyHitChance = engine.getFinalHitChance(enemy, player, weapon, distance, pick.part)
                     local enemyHitPercent = math.floor(enemyHitChance * 100 + 0.5)
 
-                    logCombat("The " .. enemy.name .. " attacks (" .. enemyHitPercent .. "% to hit)...")
+                    engine.logCombat("The " .. enemy.name .. " attacks (" .. enemyHitPercent .. "% to hit)...")
 
                     if math.random() > enemyHitChance then
-                        logCombat("It misses!")
+                        engine.logCombat("It misses!")
                     else
                         local roll = math.random(weapon.damage.min, weapon.damage.max)
                         local raw = math.floor(roll * enemy.stats.strength + 0.5)
-                        local dealt = damagePart(player, pick.part, raw, weapon.damageType)
+                        local dealt = engine.damagePart(player, pick.part, raw, weapon.damageType)
                         if weapon.onHit then
                             weapon.onHit(pick.part)
                         end
 
-                        logCombat("Hits your " .. pick.label .. " for " .. dealt .. "! (" .. pick.part.health .. "/" .. pick.part.maxHealth .. ")")
+                        engine.logCombat("Hits your " .. pick.label .. " for " .. dealt .. "! (" .. pick.part.health .. "/" .. pick.part.maxHealth .. ")")
                         combatState.flash(player.gridX, player.gridY, "@")
 
                         -- Death is the one AI-turn outcome that still stops
                         -- the player in their tracks with a full screen,
                         -- same as victory - everything else here is routine
                         -- enough for the log.
-                        if isDead(player.body) then
-                            showCombatMessage({ "You died.", "", "Press any key." }, true)
+                        if engine.isDead(player.body) then
+                            engine.showCombatMessage({ "You died.", "", "Press any key." }, true)
                             returnUnclaimedDrops()
                             return true
                         end
@@ -3585,12 +3596,12 @@ local function runEncounter(triggeringObject)
                         -- weapon actually falls, rather than just sitting
                         -- unusable in a slot attached to a ruined hand (an
                         -- arm being destroyed instead just disables
-                        -- attacking - see isLimbFunctional/pickAttack -
+                        -- attacking - see engine.isLimbFunctional/engine.pickAttack -
                         -- nothing gets dropped for that).
                         if pick.part.health <= 0 then
-                            local droppedWeaponId = dropEquippedItem(droppedItems, pick.label)
+                            local droppedWeaponId = engine.dropEquippedItem(droppedItems, pick.label)
                             if droppedWeaponId then
-                                logCombat("Your " .. pick.label .. " goes limp - the " .. weaponEntries[droppedWeaponId].name .. " clatters to the ground!")
+                                engine.logCombat("Your " .. pick.label .. " goes limp - the " .. weaponEntries[droppedWeaponId].name .. " clatters to the ground!")
                             end
                         end
                     end
@@ -3601,46 +3612,46 @@ local function runEncounter(triggeringObject)
             -- A full round has now actually elapsed - this is "the start of
             -- your next turn" as far as status durations (and anything that
             -- ticks damage before decrementing, like bleed) are concerned.
-            for _, tick in ipairs(applyDamageOverTime(player)) do
+            for _, tick in ipairs(engine.applyDamageOverTime(player)) do
                 local verb = DOT_VERBS[tick.statusId] or "takes damage"
-                logCombat("Your " .. tick.label .. " " .. verb .. " for " .. tick.dealt .. "!")
+                engine.logCombat("Your " .. tick.label .. " " .. verb .. " for " .. tick.dealt .. "!")
                 combatState.flash(player.gridX, player.gridY, "@")
             end
-            for _, tick in ipairs(applyDamageOverTime(enemy)) do
+            for _, tick in ipairs(engine.applyDamageOverTime(enemy)) do
                 local verb = DOT_VERBS[tick.statusId] or "takes damage"
-                logCombat("The " .. enemy.name .. "'s " .. tick.label .. " " .. verb .. " for " .. tick.dealt .. "!")
+                engine.logCombat("The " .. enemy.name .. "'s " .. tick.label .. " " .. verb .. " for " .. tick.dealt .. "!")
                 combatState.flash(enemy.gridX, enemy.gridY, "E")
             end
 
-            if isDead(player.body) then
-                showCombatMessage({ "You died.", "", "Press any key." }, true)
+            if engine.isDead(player.body) then
+                engine.showCombatMessage({ "You died.", "", "Press any key." }, true)
                 returnUnclaimedDrops()
                 return true
             end
 
-            decrementStatuses(player)
-            decrementStatuses(enemy)
-            decrementCooldowns(player)
-            decrementCooldowns(enemy)
+            engine.decrementStatuses(player)
+            engine.decrementStatuses(enemy)
+            engine.decrementCooldowns(player)
+            engine.decrementCooldowns(enemy)
         end
     end
 end
 
 -- A blurb followed by a numbered menu of choices, for exploration-time
 -- interactions - same digit/letter scheme as everywhere else, just outside
--- combat. Lines are run through dialogue() first, so any blurb/greeting/
+-- combat. Lines are run through engine.dialogue() first, so any blurb/greeting/
 -- quest line in the game can freely use {{name}}/{{subject}}/{{object}}
 -- without every call site needing to remember to do it itself.
-local function showInteraction(lines, options)
+function engine.showInteraction(lines, options)
     combatWin.setVisible(false)
     combatWin.clear()
     local row = 1
     for _, line in ipairs(lines) do
-        row = row + writeWrapped(combatWin, 1, row, dialogue(line, player))
+        row = row + engine.writeWrapped(combatWin, 1, row, engine.dialogue(line, player))
     end
     row = row + 1 -- blank line before the option list
     for i, option in ipairs(options) do
-        row = row + writeWrapped(combatWin, 1, row, "[" .. digitLabel(i) .. "] " .. option)
+        row = row + engine.writeWrapped(combatWin, 1, row, "[" .. engine.digitLabel(i) .. "] " .. option)
     end
     combatWin.setVisible(true)
 
@@ -3658,10 +3669,10 @@ end
 -- ready), or turns it in (active and ready) - turning in hands over the
 -- reward and moves the giver on to nextQuestId, same "! -> ? -> ! -> 0 (or
 -- !)" cycle every time.
-local function interactWithPerson(obj)
+function engine.interactWithPerson(obj)
     if not obj.questId then
         local greeting = obj.greetingId and dynamicGreetings[obj.greetingId]() or obj.greeting
-        showInteraction(greeting or { "\"...\"" }, { "Leave" })
+        engine.showInteraction(greeting or { "\"...\"" }, { "Leave" })
         return
     end
 
@@ -3669,16 +3680,16 @@ local function interactWithPerson(obj)
     local state = player.quests[obj.questId]
 
     if state == "active" and quest.isReady() then
-        showInteraction(quest.turnInLines, { "Continue" })
+        engine.showInteraction(quest.turnInLines, { "Continue" })
         if quest.rewardItemId then
             table.insert(player.inventory, quest.rewardItemId)
         end
         player.quests[obj.questId] = "done"
         obj.questId = quest.nextQuestId
     elseif state == "active" then
-        showInteraction(quest.activeLines, { "Leave" })
+        engine.showInteraction(quest.activeLines, { "Leave" })
     else
-        local choice = showInteraction(quest.offerLines, { "Accept", "Not now" })
+        local choice = engine.showInteraction(quest.offerLines, { "Accept", "Not now" })
         if choice == 1 then
             player.quests[obj.questId] = "active"
         end
@@ -3687,12 +3698,12 @@ end
 
 local SAVE = { dir = "saves", slotCount = 5 }
 
-local function getSaveSlotPath(slot)
+function engine.getSaveSlotPath(slot)
     return fs.combine(SAVE.dir, "slot" .. slot .. ".sav")
 end
 
-local function readSaveSlot(slot)
-    local path = getSaveSlotPath(slot)
+function engine.readSaveSlot(slot)
+    local path = engine.getSaveSlotPath(slot)
     if not fs.exists(path) then
         return nil
     end
@@ -3702,13 +3713,13 @@ local function readSaveSlot(slot)
     return textutils.unserialize(content)
 end
 
-local function writeSaveSlot(slot, data)
+function engine.writeSaveSlot(slot, data)
     if not fs.exists(SAVE.dir) then
         fs.makeDir(SAVE.dir)
     end
-    local h = fs.open(getSaveSlotPath(slot), "w")
+    local h = fs.open(engine.getSaveSlotPath(slot), "w")
     -- allow_repetitions: nothing in save data should genuinely be a shared
-    -- table (see dynamicGreetings for how conditional dialogue avoids this
+    -- table (see dynamicGreetings for how conditional engine.dialogue avoids this
     -- exact problem), but this is cheap insurance against a future
     -- accidental one triggering the same "cannot serialize table with
     -- repeated entries" error again instead of just duplicating the data.
@@ -3718,9 +3729,9 @@ end
 
 -- Scans every location for the save_point object a given save was made at -
 -- that's the only thing about "where" a save actually remembers (see
--- buildSaveData); a save from a terminal that's since been removed just
+-- engine.buildSaveData); a save from a terminal that's since been removed just
 -- can't be repositioned and falls back to wherever the player already is.
-local function findSavePointById(saveId)
+function engine.findSavePointById(saveId)
     for locName, loc in pairs(world) do
         for _, obj in ipairs(loc.objects or {}) do
             if obj.kind == "save_point" and obj.saveId == saveId then
@@ -3735,10 +3746,10 @@ end
 -- it, so it doesn't immediately re-trigger the save/load prompt. Falls back
 -- to the terminal's own tile if every neighbor is somehow blocked.
 local SPAWN_OFFSETS = { { 0, 1 }, { 0, -1 }, { 1, 0 }, { -1, 0 } }
-local function findSpawnSpotNear(loc, obj)
+function engine.findSpawnSpotNear(loc, obj)
     for _, delta in ipairs(SPAWN_OFFSETS) do
         local nx, ny = obj.x + delta[1], obj.y + delta[2]
-        if nx >= 1 and nx <= loc.width and ny >= 1 and ny <= loc.height and not findObjectAt(loc, nx, ny) then
+        if nx >= 1 and nx <= loc.width and ny >= 1 and ny <= loc.height and not engine.findObjectAt(loc, nx, ny) then
             return nx, ny
         end
     end
@@ -3750,7 +3761,7 @@ end
 -- left open, a quest giver mid-cycle. Objects are plain data (no functions,
 -- no back-references), so unlike the body there's nothing to rebuild - the
 -- whole array round-trips through textutils.serialize as-is.
-local function buildWorldSnapshot()
+function engine.buildWorldSnapshot()
     local snapshot = {}
     for locName, loc in pairs(world) do
         snapshot[locName] = loc.objects
@@ -3762,7 +3773,7 @@ end
 -- whatever the save remembered, rather than trying to reconcile individual
 -- entries - simpler, and correct as long as locations themselves (as
 -- opposed to what's in them) don't get added or removed at runtime.
-local function applyWorldSnapshot(snapshot)
+function engine.applyWorldSnapshot(snapshot)
     for locName, objects in pairs(snapshot) do
         if world[locName] then
             world[locName].objects = objects
@@ -3772,11 +3783,11 @@ end
 
 -- Everything about the player worth remembering across a save: full body
 -- (health/organs/statuses), gear, and progress - position isn't part of it,
--- just which save point made the save (see findSavePointById/applySaveData).
+-- just which save point made the save (see engine.findSavePointById/engine.applySaveData).
 -- Also captures the whole world's current object state (see
--- buildWorldSnapshot) - a save should remember what's changed out there,
+-- engine.buildWorldSnapshot) - a save should remember what's changed out there,
 -- not just the player's own stats.
-local function buildSaveData(saveId)
+function engine.buildSaveData(saveId)
     local stats = {}
     for k, v in pairs(player.stats) do stats[k] = v end
 
@@ -3826,15 +3837,15 @@ local function buildSaveData(saveId)
         worn = worn,
         quests = quests,
         killLog = killLog,
-        body = serializeBodyPart(player.body),
-        world = buildWorldSnapshot(),
+        body = engine.serializeBodyPart(player.body),
+        world = engine.buildWorldSnapshot(),
     }
 end
 
--- The reverse of buildSaveData - overwrites the live player in place with
+-- The reverse of engine.buildSaveData - overwrites the live player in place with
 -- everything a save remembers, then repositions to whichever save point
 -- made it.
-local function applySaveData(data)
+function engine.applySaveData(data)
     player.steps = data.steps
     player.name = data.name
     player.pronouns = { subject = data.pronouns.subject, object = data.pronouns.object }
@@ -3876,89 +3887,89 @@ local function applySaveData(data)
     player.killLog = {}
     for id, count in pairs(data.killLog) do player.killLog[id] = count end
 
-    player.body = deserializeBodyPart(data.body, true)
-    player.globalTags = recalcGlobalTags(player.body)
+    player.body = engine.deserializeBodyPart(data.body, true)
+    player.globalTags = engine.recalcGlobalTags(player.body)
 
-    applyWorldSnapshot(data.world)
+    engine.applyWorldSnapshot(data.world)
 
-    local locName, obj = findSavePointById(data.saveId)
+    local locName, obj = engine.findSavePointById(data.saveId)
     if locName and obj then
         player.location = locName
-        player.gridX, player.gridY = findSpawnSpotNear(world[locName], obj)
+        player.gridX, player.gridY = engine.findSpawnSpotNear(world[locName], obj)
     end
 end
 
 -- A slot's menu label: what's actually in it, so save/load can show a
 -- summary instead of just a bare number.
-local function formatSaveSlotLabel(slot)
-    local data = readSaveSlot(slot)
+function engine.formatSaveSlotLabel(slot)
+    local data = engine.readSaveSlot(slot)
     if not data then
         return "Slot " .. slot .. ": Empty"
     end
-    local locName = findSavePointById(data.saveId)
+    local locName = engine.findSavePointById(data.saveId)
     local place = (locName and world[locName].name) or "Unknown"
     return "Slot " .. slot .. ": Lv" .. data.stats.level .. " - " .. data.steps .. " steps - " .. place
 end
 
 -- Same digit/letter-menu convention as everywhere else, plus a trailing
 -- "Back" option to cancel out without picking a slot.
-local function pickSaveSlot(title)
+function engine.pickSaveSlot(title)
     local options = {}
     for slot = 1, SAVE.slotCount do
-        options[slot] = formatSaveSlotLabel(slot)
+        options[slot] = engine.formatSaveSlotLabel(slot)
     end
     options[SAVE.slotCount + 1] = "Back"
 
-    local choice = showInteraction({ title }, options)
+    local choice = engine.showInteraction({ title }, options)
     if choice == SAVE.slotCount + 1 then
         return nil
     end
     return choice
 end
 
-local function doSave(saveId)
-    local slot = pickSaveSlot("Save to which slot?")
+function engine.doSave(saveId)
+    local slot = engine.pickSaveSlot("Save to which slot?")
     if not slot then
         return
     end
-    if readSaveSlot(slot) then
-        local choice = showInteraction({ "Overwrite this slot?" }, { "Yes", "No" })
+    if engine.readSaveSlot(slot) then
+        local choice = engine.showInteraction({ "Overwrite this slot?" }, { "Yes", "No" })
         if choice ~= 1 then
             return
         end
     end
-    writeSaveSlot(slot, buildSaveData(saveId))
-    showInteraction({ "Saved." }, { "Continue" })
+    engine.writeSaveSlot(slot, engine.buildSaveData(saveId))
+    engine.showInteraction({ "Saved." }, { "Continue" })
 end
 
-local function doLoad()
-    local slot = pickSaveSlot("Load which slot?")
+function engine.doLoad()
+    local slot = engine.pickSaveSlot("Load which slot?")
     if not slot then
         return
     end
-    local data = readSaveSlot(slot)
+    local data = engine.readSaveSlot(slot)
     if not data then
-        showInteraction({ "That slot is empty." }, { "Continue" })
+        engine.showInteraction({ "That slot is empty." }, { "Continue" })
         return
     end
-    applySaveData(data)
-    showInteraction({ "Loaded." }, { "Continue" })
+    engine.applySaveData(data)
+    engine.showInteraction({ "Loaded." }, { "Continue" })
 end
 
 -- The save point itself: an ID-card terminal offering save/load/quit,
 -- looping back to its own menu after save or load so one visit can do
 -- several things. Returns (playerDied, quitRequested) - the second is new,
 -- since this is the one interaction that can end the program outright.
-local function interactWithSavePoint(obj)
+function engine.interactWithSavePoint(obj)
     while true do
-        local choice = showInteraction(
+        local choice = engine.showInteraction(
             { "You insert your ID into the terminal.", "It hums to life." },
             { "Save", "Load", "Quit Game", "Leave" }
         )
         if choice == 1 then
-            doSave(obj.saveId)
+            engine.doSave(obj.saveId)
         elseif choice == 2 then
-            doLoad()
+            engine.doLoad()
         elseif choice == 3 then
             return false, true
         else
@@ -3969,10 +3980,10 @@ end
 
 -- Picking something off the ground has no downside, so it just happens the
 -- moment the player reaches it - no prompt, just a couple of log lines
--- (see logActivity) instead of the old blurb-and-choice. Shared by tryMove
--- (stepping onto it) and tryInteract (reaching for one still adjacent
+-- (see engine.logActivity) instead of the old blurb-and-choice. Shared by engine.tryMove
+-- (stepping onto it) and engine.tryInteract (reaching for one still adjacent
 -- without stepping onto it).
-local function collectItem(loc, obj)
+function engine.collectItem(loc, obj)
     table.insert(player.inventory, obj.itemId)
     for i, o in ipairs(loc.objects) do
         if o == obj then
@@ -3980,16 +3991,16 @@ local function collectItem(loc, obj)
             break
         end
     end
-    logActivity(dialogue("{{name}} picked up " .. itemEntries[obj.itemId].name .. ".", player))
+    engine.logActivity(engine.dialogue("{{name}} picked up " .. itemEntries[obj.itemId].name .. ".", player))
 end
 
 -- Same idea for a door: opening (or closing) one is harmless enough not to
--- need a prompt either - see tryMove (bumping a closed one opens it) and
--- tryInteract (the only way to close one again). `open` names which state
+-- need a prompt either - see engine.tryMove (bumping a closed one opens it) and
+-- engine.tryInteract (the only way to close one again). `open` names which state
 -- it's ending up in, purely for the log line.
-local function toggleDoor(obj, open)
+function engine.toggleDoor(obj, open)
     obj.open = open
-    logActivity(dialogue("{{name}} " .. (open and "opened" or "closed") .. " the door.", player))
+    engine.logActivity(engine.dialogue("{{name}} " .. (open and "opened" or "closed") .. " the door.", player))
 end
 
 -- Resolves walking into whatever's occupying the destination cell -
@@ -3998,14 +4009,14 @@ end
 -- true playerDied if the player died fighting an enemy object, true
 -- quitRequested if they chose to quit at a save point; both bubble all the
 -- way back up to the main loop. Items and (closed) doors never reach this -
--- both callers (tryMove, tryInteract) handle those themselves.
-local function interactWithObject(loc, obj)
+-- both callers (engine.tryMove, engine.tryInteract) handle those themselves.
+function engine.interactWithObject(loc, obj)
     if obj.kind == "person" then
-        interactWithPerson(obj)
+        engine.interactWithPerson(obj)
     elseif obj.kind == "save_point" then
-        return interactWithSavePoint(obj)
+        return engine.interactWithSavePoint(obj)
     elseif obj.kind == "enemy" then
-        local playerDied = runEncounter(obj)
+        local playerDied = engine.runEncounter(obj)
         return playerDied, false
     end
     return false, false
@@ -4016,19 +4027,19 @@ end
 -- edge. Returns (moved, playerDied, quitRequested) - walking into an object
 -- never counts as moving, but might still end the game (a fight lost, or a
 -- save point's "Quit Game").
-local function tryMove(dir)
+function engine.tryMove(dir)
     local loc = world[player.location]
     local delta = dirDelta[dir]
     local nx, ny = player.gridX + delta.dx, player.gridY + delta.dy
 
     if nx >= 1 and nx <= loc.width and ny >= 1 and ny <= loc.height then
-        local obj = findObjectAt(loc, nx, ny)
+        local obj = engine.findObjectAt(loc, nx, ny)
 
         if obj and obj.kind == "item" then
-            -- Walking onto it is the whole interaction - see collectItem.
+            -- Walking onto it is the whole interaction - see engine.collectItem.
             player.gridX, player.gridY = nx, ny
             player.steps = player.steps + 1
-            collectItem(loc, obj)
+            engine.collectItem(loc, obj)
             message = ""
             return true, false, false
         end
@@ -4038,14 +4049,14 @@ local function tryMove(dir)
             -- the whole action for this turn, same as bumping into
             -- anything else that was blocking the way; stepping through
             -- happens on the *next* move, once it's actually open.
-            toggleDoor(obj, true)
+            engine.toggleDoor(obj, true)
             message = ""
             return false, false, false
         end
 
         local blocked = obj and not (obj.kind == "door" and obj.open)
         if blocked then
-            local playerDied, quitRequested = interactWithObject(loc, obj)
+            local playerDied, quitRequested = engine.interactWithObject(loc, obj)
             return false, playerDied, quitRequested
         end
 
@@ -4074,7 +4085,7 @@ local function tryMove(dir)
     end
     player.steps = player.steps + 1
     message = ""
-    logActivity(dialogue("{{name}} went to " .. nextLoc.name .. ".", player))
+    engine.logActivity(engine.dialogue("{{name}} went to " .. nextLoc.name .. ".", player))
     return true, false, false
 end
 
@@ -4083,24 +4094,24 @@ end
 -- end up right next to each other) for something to interact with, and
 -- acts on the first one found (up, then down, left, right). Doors are the
 -- main reason this exists at all - opening one is automatic on a bump (see
--- tryMove), but there's no other way to *close* one again. Returns
--- (playerDied, quitRequested), same convention as tryMove/
--- interactWithObject, since anything reachable this way could end the game
+-- engine.tryMove), but there's no other way to *close* one again. Returns
+-- (playerDied, quitRequested), same convention as engine.tryMove/
+-- engine.interactWithObject, since anything reachable this way could end the game
 -- the same way bumping into it would.
-local function tryInteract()
+function engine.tryInteract()
     local loc = world[player.location]
     for _, dir in ipairs({ "up", "down", "left", "right" }) do
         local delta = dirDelta[dir]
-        local obj = findObjectAt(loc, player.gridX + delta.dx, player.gridY + delta.dy)
+        local obj = engine.findObjectAt(loc, player.gridX + delta.dx, player.gridY + delta.dy)
         if obj then
             if obj.kind == "item" then
-                collectItem(loc, obj)
+                engine.collectItem(loc, obj)
                 return false, false
             elseif obj.kind == "door" then
-                toggleDoor(obj, not obj.open)
+                engine.toggleDoor(obj, not obj.open)
                 return false, false
             else
-                return interactWithObject(loc, obj)
+                return engine.interactWithObject(loc, obj)
             end
         end
     end
@@ -4111,7 +4122,7 @@ end
 -- events give the actual typed character (already shift/caps-aware), "key"
 -- only matters here for backspace/enter. Used for character creation's name
 -- and custom-pronoun fields, where a numbered menu doesn't fit.
-local function promptText(win, x, y, maxLen)
+function engine.promptText(win, x, y, maxLen)
     local buffer = ""
     win.setCursorBlink(true)
 
@@ -4152,7 +4163,7 @@ debugConsole.openKeys = { [keys.grave] = true, [96] = true, [126] = true }
 -- command below targets the player only (no enemy-targeting syntax yet;
 -- nothing needs it while there's only one enemy type to test against).
 function debugConsole.findPart(label)
-    for _, entry in ipairs(collectLabeledParts(player.body)) do
+    for _, entry in ipairs(engine.collectLabeledParts(player.body)) do
         if entry.label == label then
             return entry.part
         end
@@ -4198,7 +4209,7 @@ debugConsole.commands = {
     -- (bleed, poison, fracture) - character-wide ones (adrenaline) aren't
     -- reachable this way, since every command here targets a limb.
     -- `amount` overrides the status's own default duration/stack count,
-    -- same as applyPartStatus always allowed.
+    -- same as engine.applyPartStatus always allowed.
     addStatus = function(args)
         if not args[1] or not args[2] then
             return "Usage: addStatus <limb> <status> [amount]"
@@ -4211,7 +4222,7 @@ debugConsole.commands = {
         if not def or def.scope ~= "part" then
             return "No such part status: " .. args[2]
         end
-        applyPartStatus(part, args[2], tonumber(args[3]))
+        engine.applyPartStatus(part, args[2], tonumber(args[3]))
         return "Applied " .. args[2] .. " to " .. args[1] .. " (" .. part.statuses[args[2]] .. ")"
     end,
 
@@ -4280,7 +4291,7 @@ end
 
 -- A slim scrollback + input line, fullscreen like every other one-off
 -- prompt (reuses combatWin) - gated behind DEBUG_MODE at both places this
--- can be opened from (the overworld's main loop, combat's promptAction),
+-- can be opened from (the overworld's main loop, combat's engine.promptAction),
 -- so there's no path to it at all unless --debug was passed at startup.
 -- Opening/closing it doesn't cost a turn or otherwise touch the action
 -- economy - closing (via 'exit'/'close') just hands control back to
@@ -4307,9 +4318,9 @@ function debugConsole.run()
 
     while true do
         local width, inputRow = redraw()
-        local line = promptText(combatWin, 3, inputRow, width - 3)
+        local line = engine.promptText(combatWin, 3, inputRow, width - 3)
 
-        for _, wrapped in ipairs(wrapText("> " .. line, width)) do
+        for _, wrapped in ipairs(engine.wrapText("> " .. line, width)) do
             table.insert(transcript, wrapped)
         end
 
@@ -4318,7 +4329,7 @@ function debugConsole.run()
             return
         end
         if result then
-            for _, wrapped in ipairs(wrapText(result, width)) do
+            for _, wrapped in ipairs(engine.wrapText(result, width)) do
                 table.insert(transcript, wrapped)
             end
         end
@@ -4335,14 +4346,14 @@ local PRONOUN_PRESETS = {
     { label = "Nonbinary (they/them)", subject = "they", object = "them" },
 }
 
-local function pickPronouns()
+function engine.pickPronouns()
     local options = {}
     for i, preset in ipairs(PRONOUN_PRESETS) do
         options[i] = preset.label
     end
     options[#PRONOUN_PRESETS + 1] = "Custom pronouns"
 
-    local choice = showInteraction({ "Choose your gender identity:" }, options)
+    local choice = engine.showInteraction({ "Choose your gender identity:" }, options)
     if choice <= #PRONOUN_PRESETS then
         local preset = PRONOUN_PRESETS[choice]
         return preset.subject, preset.object
@@ -4353,39 +4364,39 @@ local function pickPronouns()
     combatWin.setCursorPos(1, 1)
     combatWin.write("Subject pronoun (e.g. he/she/they):")
     combatWin.setVisible(true)
-    local subject = promptText(combatWin, 1, 2, 20)
+    local subject = engine.promptText(combatWin, 1, 2, 20)
 
     combatWin.setVisible(false)
     combatWin.clear()
     combatWin.setCursorPos(1, 1)
     combatWin.write("Object pronoun (e.g. him/her/them):")
     combatWin.setVisible(true)
-    local object = promptText(combatWin, 1, 2, 20)
+    local object = engine.promptText(combatWin, 1, 2, 20)
 
     return subject, object
 end
 
 -- Display order for the species menu - speciesEntries (defined alongside
--- newHumanBody/newInsectoidBody) has everything else about each one.
+-- engine.newHumanBody/engine.newInsectoidBody) has everything else about each one.
 local SPECIES_ORDER = { "human", "insectoid" }
 
-local function pickSpecies()
+function engine.pickSpecies()
     local options = {}
     for i, id in ipairs(SPECIES_ORDER) do
         options[i] = speciesEntries[id].name
     end
-    local choice = showInteraction({ "Choose your species:" }, options)
+    local choice = engine.showInteraction({ "Choose your species:" }, options)
     return SPECIES_ORDER[choice]
 end
 
 -- Five points, each worth a flat +5% to one of strength/reflex/aim (added
--- once, in runCharacterCreation - not compounding, so 3 points in strength
+-- once, in engine.runCharacterCreation - not compounding, so 3 points in strength
 -- is stats.strength = 1 + 3*0.05 = 1.15). "Reset" clears all of them back to
 -- 0 rather than supporting per-point undo, which is enough for a one-time
 -- five-point spend. Confirm is locked out until every point is spent.
 local STAT_ALLOCATION = { points = 5, step = 0.05 }
 
-local function runStatAllocation()
+function engine.runStatAllocation()
     local points = { strength = 0, reflex = 0, aim = 0 }
     local remaining = STAT_ALLOCATION.points
 
@@ -4430,57 +4441,57 @@ end
 -- the live player object. Species is built here (not in the early player
 -- setup above) since it needs the species menu, which needs combatWin,
 -- which doesn't exist until after that setup runs.
-local function runCharacterCreation()
+function engine.runCharacterCreation()
     combatWin.setVisible(false)
     combatWin.clear()
     combatWin.setCursorPos(1, 1)
     combatWin.write("What is your name?")
     combatWin.setVisible(true)
-    player.name = promptText(combatWin, 1, 2, 20)
+    player.name = engine.promptText(combatWin, 1, 2, 20)
 
-    player.pronouns.subject, player.pronouns.object = pickPronouns()
+    player.pronouns.subject, player.pronouns.object = engine.pickPronouns()
 
-    local species = speciesEntries[pickSpecies()]
+    local species = speciesEntries[engine.pickSpecies()]
     player.globalTags = {}
     player.body = species.build(player.globalTags)
 
     -- A chest implant lets the player pop adrenaline for a turn on demand
     -- via the Ability action, instead of it just being permanently on -
     -- every species starts with one, same as before species existed at all.
-    installGenericOrgan(player.body, "adrenal_auto_injector", player.globalTags)
-    player.globalTags = recalcGlobalTags(player.body)
+    engine.installGenericOrgan(player.body, "adrenal_auto_injector", player.globalTags)
+    player.globalTags = engine.recalcGlobalTags(player.body)
 
     for stat, delta in pairs(species.statAdjustments) do
         player.stats[stat] = player.stats[stat] + delta
     end
 
-    local points = runStatAllocation()
+    local points = engine.runStatAllocation()
     player.stats.strength = player.stats.strength + points.strength * STAT_ALLOCATION.step
     player.stats.reflex = player.stats.reflex + points.reflex * STAT_ALLOCATION.step
     player.stats.aim = player.stats.aim + points.aim * STAT_ALLOCATION.step
 end
 
 -- The title screen, shown once at startup before there's any character to
--- speak of yet - showInteraction's dialogue() templating is safe to call
+-- speak of yet - engine.showInteraction's engine.dialogue() templating is safe to call
 -- this early since none of these lines actually contain a {{...}} token
--- (dialogue only ever touches player.name/pronouns for a match it finds).
--- Load Save applies straight onto the live player object via applySaveData
+-- (engine.dialogue only ever touches player.name/pronouns for a match it finds).
+-- Load Save applies straight onto the live player object via engine.applySaveData
 -- - the same path the in-game save terminal's own Load uses - so loading
 -- doesn't need a throwaway character run through creation first. Returns
 -- "new", "load", or "quit".
-local function runMainMenu()
+function engine.runMainMenu()
     while true do
-        local choice = showInteraction({ "Luadventure", "" }, { "New Game", "Load Save", "Quit" })
+        local choice = engine.showInteraction({ "Luadventure", "" }, { "New Game", "Load Save", "Quit" })
         if choice == 1 then
             return "new"
         elseif choice == 2 then
-            local slot = pickSaveSlot("Load which slot?")
+            local slot = engine.pickSaveSlot("Load which slot?")
             if slot then
-                local data = readSaveSlot(slot)
+                local data = engine.readSaveSlot(slot)
                 if not data then
-                    showInteraction({ "That slot is empty." }, { "Continue" })
+                    engine.showInteraction({ "That slot is empty." }, { "Continue" })
                 else
-                    applySaveData(data)
+                    engine.applySaveData(data)
                     return "load"
                 end
             end
@@ -4491,14 +4502,14 @@ local function runMainMenu()
     end
 end
 
-local menuChoice = runMainMenu()
+local menuChoice = engine.runMainMenu()
 if menuChoice == "quit" then
     return
 end
 if menuChoice == "new" then
-    runCharacterCreation()
+    engine.runCharacterCreation()
 end
-render()
+engine.render()
 
 local topBarOpen = false
 
@@ -4510,45 +4521,45 @@ while true do
 
     if debugConsole.enabled and debugConsole.openKeys[key] then
         debugConsole.run()
-        render()
+        engine.render()
     elseif topBarOpen then
         if key == keys.tab then
             topBarOpen = false
             pageBarWin.setVisible(false)
-            render()
+            engine.render()
         elseif key == keys.left then
             topBarPage = (topBarPage - 2) % #TOP_BAR_PAGES + 1
-            drawTopBar()
+            engine.drawTopBar()
         elseif key == keys.right then
             topBarPage = topBarPage % #TOP_BAR_PAGES + 1
-            drawTopBar()
+            engine.drawTopBar()
         elseif key == ACTIVATE_KEY then
             topBarOpen = false
             pageBarWin.setVisible(false)
-            runInventoryScreen() -- the only page so far
-            render()
+            engine.runInventoryScreen() -- the only page so far
+            engine.render()
         end
     elseif key == keys.tab then
         topBarOpen = true
         topBarPage = 1
-        drawTopBar()
+        engine.drawTopBar()
     elseif key == keys.i then
-        runInventoryScreen()
-        render()
+        engine.runInventoryScreen()
+        engine.render()
     elseif key == keys.space then
-        local playerDied, quitRequested = tryInteract()
+        local playerDied, quitRequested = engine.tryInteract()
         if playerDied or quitRequested then
             break
         end
-        render()
+        engine.render()
     else
         local dir = keyToDir[key]
         if dir then
-            local moved, playerDied, quitRequested = tryMove(dir)
+            local moved, playerDied, quitRequested = engine.tryMove(dir)
             if playerDied or quitRequested then
                 break
             end
-            render()
+            engine.render()
         end
     end
 end
