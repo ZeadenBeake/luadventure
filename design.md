@@ -389,7 +389,10 @@ than one foe at once - nothing does yet.
 `promptAction` builds the action menu dynamically rather than drawing fixed
 numbered lines: **Fight**, **Look**, **Reload** (only shown at all when
 `hasAmmoWeapon` says an equipped weapon actually uses ammo), **Ability**,
-**Belt**, **Idle**, **Flee**, numbered in that order with whichever entries
+**Equipment** (see "Two-handed weapons" for what it's grown into beyond
+its original "Belt" name - the internal action id/`runEquipmentAction`
+function are unchanged, only the label shown to the player is), **Idle**,
+**Flee**, numbered in that order with whichever entries
 apply - drawn into its own bottom-left pane with no "What will you do?"
 header, since between the numbered options and the move hint that's already
 everything the pane has room for without needing to scroll. Movement isn't
@@ -438,13 +441,13 @@ for `"two-handed"`, quite a bit more besides.
 
 ### Two-handed weapons
 
-A `"two-handed"` weapon needs two of a wielder's MANIPULATE hands at once,
-not one - the rifle, so far. `getWieldingHands(combatant, label)` is the
-one place that knows which hands currently share a given weapon: every
-hand whose `equipped` slot names the same weapon id, in stable body-tree
-order (`collectLabeledParts`). Its first entry is always the **canonical**
-hand for the group - the only one that actually gets a row in the
-inventory screen, an option in `pickAttack`, or an entry from
+A `"two-handed"` weapon needs two of a wielder's MANIPULATE hands to
+actually fire, not one - the rifle, so far. `getWieldingHands(combatant,
+label)` is the one place that knows which hands currently share a given
+weapon: every hand whose `equipped` slot names the same weapon id, in
+stable body-tree order (`collectLabeledParts`). Its first entry is always
+the **canonical** hand for the group - the only one that actually gets a
+row in the inventory screen, an option in `pickAttack`, or an entry from
 `collectAbilities` (every other function that touches equipped weapons
 would otherwise list a two-handed one twice, once per hand) - and the only
 one `character.ammo` is ever keyed under for it, since ammo tracking is
@@ -455,29 +458,65 @@ so a fracture on either side of the grip drags the whole swing down, not
 only its own half; ranged weapons like the rifle don't scale with strength
 at all regardless of hand count, same as ever.
 
+**Improper grip**: `getWieldingHands` can come back with *fewer* hands
+than a weapon actually needs - held, but not usable. `pickAttack` and
+`collectAbilities` both gate on hand *count* now, not just whether every
+holding hand is functional (a properly-gripped weapon with a destroyed
+hand and an improperly-gripped one with two working hands fail the same
+usability check for different reasons). This is a real, reachable state
+rather than an edge case: the equipping picker (below) allows it directly,
+and it's what a two-handed weapon drawn mid-fight always lands in.
+
 **Equipping**: Move (see "Inventory & equipment") can express "this slot"
 but not "these two slots at once", so dropping a two-handed weapon onto
 *any* hand opens a dedicated picker (`pickWieldingHands`, nested inside
 `runInventoryScreen` itself) instead of equipping it outright - every
 MANIPULATE hand listed, toggled green/white with Enter, capped at two
-selected, with a Confirm option that only does anything once exactly two
-are picked (and a Cancel that backs out with the weapon still carried, to
-try again or Move it to the bag instead). Confirming displaces whatever
-was on both chosen hands back to the bag first, same as an ordinary
-one-handed equip does. This picker is inventory-screen-only - the
-in-combat Belt action refuses to swap or holster a two-handed weapon at
-all (`swapSlots`/`fillSlot` only ever touch the two slots they're given,
-which can't express a weapon spanning three), so re-equipping one that's
-been dropped or unequipped stays an overworld trip.
+selected (a Cancel option backs out with the weapon still carried, to try
+again or Move it to the bag instead). Confirm needs at least one hand
+picked, but not necessarily both: confirming with fewer than it needs
+first warns ("you won't be able to fire the Rifle with just one hand -
+equip anyway?") rather than silently locking Confirm until exactly two are
+picked, since an improper grip is a legitimate choice (freeing a hand for
+something else, say), just one worth flagging before it's made. Confirming
+either way displaces whatever was on every chosen hand back to the bag
+first, same as an ordinary one-handed equip does.
 
-**Destruction**: a two-handed weapon can't fire at all with even one of
-its hands destroyed (`pickAttack`/`collectAbilities` both check every
-wielding hand, not just one), but it doesn't actually clatter to the
-ground until *every* hand holding it is (`dropEquippedItem` - see "Limb
-destruction & disarming") - a fresh Dermoregenesis Salve on the first hand
-lost can still save it before the second one goes. Once it does drop, its
-one shared ammo pool returns to the bag exactly once, from whichever hand
-was canonical, and every slot it occupied clears together.
+**Change Grip**: the Equipment action (see "Inventory & equipment" - it
+outgrew the name "Belt") is where a two-handed weapon's grip changes
+mid-fight, quick either direction. Selecting a slot holding one offers
+*only* "Change grip" - not the ordinary swap-to-another-slot flow a
+one-handed weapon gets, since a two-handed weapon can't go on the belt at
+all (below) and relocating *which* hands hold it is exactly what grip-
+changing already covers. Reducing to one hand asks which of the current
+hands to keep if there's a real choice, freeing the other and moving the
+ammo pool along if the freed hand happened to be canonical; regripping
+properly claims however many free hands it's still missing, refusing if
+there aren't enough, and migrates the ammo pool too if adding a hand
+changes which one is canonical (canonical is always whichever hand comes
+first in body-tree order - added a hand ahead of it in that order, and it
+takes over).
+
+**Drawing**: Equipment's empty-slot flow (draw a weapon from another slot
+or `droppedItems` into an empty one) never produces a proper two-handed
+grip on its own - drawing one always lands in just the one hand chosen as
+the destination, clearing out wherever it came from (every hand it
+occupied, if it was already improperly gripped elsewhere) rather than
+trying to also claim a second hand nobody picked. Reaching a proper grip
+from there is a follow-up Change Grip, a separate (quick) action. A
+two-handed weapon can't be drawn into (or holstered onto) a **belt** slot
+at all - it doesn't fit - so it's filtered out of the candidate list
+whenever the chosen destination is a belt slot, same "just don't list it"
+convention as everywhere else.
+
+**Destruction**: a two-handed weapon can't fire at all without enough
+functional hands (not just "the ones holding it happen to be alive," per
+"Improper grip" above), but it doesn't actually clatter to the ground
+until *every* hand holding it is destroyed (`dropEquippedItem` - see
+"Limb destruction & disarming") - a fresh Dermoregenesis Salve on the
+first hand lost can still save it before the second one goes. Once it
+does drop, its one shared ammo pool returns to the bag exactly once, from
+whichever hand was canonical, and every slot it occupied clears together.
 
 ### Natural weapons
 
@@ -510,11 +549,12 @@ A destroyed **hand** specifically goes one step further: whatever it was
 holding is knocked loose (`dropEquippedItem`, called from the enemy-attack
 branch of `runEncounter` - not from an arm being destroyed, only a hand).
 A dropped weapon is tracked per-encounter in `droppedItems`, not
-`player.inventory` - the **Belt** action's empty-slot flow (see "Inventory
-& equipment") can holster one straight into another hand mid-fight, which
-is the only sensible option when there's no time to open the full
-inventory screen - still unusable, same as a bare-handed Strike from that
-hand would be, until the hand itself heals. Anything left unclaimed when
+`player.inventory` - the **Equipment** action's empty-slot flow (see
+"Inventory & equipment") can draw one straight into another hand
+mid-fight, which is the only sensible option when there's no time to open
+the full inventory screen - still unusable, same as a bare-handed Strike
+from that hand would be, until the hand itself heals. Anything left
+unclaimed when
 the encounter ends instead lands in the bag via its own `itemId` (see
 "Inventory & equipment" - weapons as items), letting the player re-equip it
 themselves once it's actually useful again. A plain consumable held in a
@@ -617,44 +657,55 @@ have - only what's actually sitting loose in the bag does.
 **Belt**: a fixed number of slots (`beltSize`, currently 1) for
 combat-usable items, separate from the main bag - and, like an equip slot,
 able to hold a loaded weapon (its ammo tracked under the synthetic
-`character.ammo` key `"belt" .. index`, see "Ammo"). A holstered weapon's
-row shows its loaded count in place of the usual flat "1". A plain
-consumable can also sit in a hand instead of the belt (an equip slot's
-`equipped[label]` holds either a weaponId or a plain itemId - whichever
-table recognizes it decides which it is; `getWieldedWeapon` naturally falls
-back to Strike for a hand holding a non-weapon, so attack resolution needs
-no special casing at all) - it acts exactly like a belt slot wherever that
-matters (`getSlotContents`/`getAllSlots`, shared by the inventory screen
-and the in-combat Belt action below).
+`character.ammo` key `"belt" .. index`, see "Ammo") - **except** a
+two-handed one, which physically doesn't fit in a belt slot at all (see
+"Two-handed weapons"); one-handed weapons like the chain sword or laser
+pistol are unaffected. A holstered weapon's row shows its loaded count in
+place of the usual flat "1". A plain consumable can also sit in a hand
+instead of the belt (an equip slot's `equipped[label]` holds either a
+weaponId or a plain itemId - whichever table recognizes it decides which
+it is; `getWieldedWeapon` naturally falls back to Strike for a hand
+holding a non-weapon, so attack resolution needs no special casing at
+all) - it acts exactly like a belt slot wherever that matters
+(`getSlotContents`/`getAllSlots`, shared by the inventory screen and the
+in-combat Equipment action below).
 
-The in-combat **Belt** action (`runBeltAction`) replaced the older
-dedicated Swap/Pick Up actions with one unified flow: it lists every hand
-and belt slot together, then does whatever the chosen one's contents
-imply. A **weapon** prompts a destination (any other slot, shown with
-what's currently there) and does a true two-way exchange
+The in-combat **Equipment** action (`runEquipmentAction`, renamed from
+"Belt" once it grew past just that - see "Two-handed weapons") replaced
+the older dedicated Swap/Pick Up actions with one unified flow: it lists
+every hand and belt slot together, then does whatever the chosen one's
+contents imply. A one-handed **weapon** prompts a destination (any other
+slot, shown with what's currently there) and does a true two-way exchange
 (`swapSlots`) - ammo travels with it, and whatever was at the destination
-comes back the other way, holstered rather than dropped. A **consumable**
-(hand or belt, no difference) is used on the spot - its ability's `effect`
-is called with the real `enemy`, so it shows its usual full-screen combat
-confirmation (see "Enter" above) rather than logging - and the slot is
-cleared on success. An **empty** slot instead offers to holster a weapon
-into it, sourced from any other slot currently holding one *or* anything
-sitting in `droppedItems` this fight (a hand destroyed mid-combat - see
-"Limb destruction & disarming"). Swapping and holstering are always full
-actions; using a consumable takes whatever speed its own ability declares
-(the salve is quick). Rather than filtering every slot up front by what
-sub-action it implies, a swap/holster attempted while quickened is simply
-rejected with a message and no turn spent, same pattern movement has
-always used for a full action mid a quick action's bonus turn - using a
-consumable isn't gated this way at all, since the one ability reachable
-through it (the salve) is quick regardless. With only one belt slot right
-now hand-to-hand is the common case, but every helper (`getAllSlots` and
-friends) is written generically, so a second belt slot falls out for free.
-`getAllSlots` itself leaves out a two-handed weapon's secondary hand
-entirely (its canonical hand's row already represents the whole thing),
-and both the swap and holster sub-actions refuse a two-handed weapon
-outright - see "Two-handed weapons" for why re-equipping one stays an
-overworld-only trip.
+comes back the other way, holstered rather than dropped. A **two-handed**
+weapon offers *only* "Change grip" here instead (see "Two-handed
+weapons") - no destination prompt, since it can't go on the belt and
+relocating which hands hold it is what grip-changing already covers. A
+**consumable** (hand or belt, no difference) is used on the spot - its
+ability's `effect` is called with the real `enemy`, so it shows its usual
+full-screen combat confirmation (see "Enter" above) rather than logging -
+and the slot is cleared on success. An **empty** slot instead offers to
+draw a weapon into it, sourced from any other slot currently holding one
+*or* anything sitting in `droppedItems` this fight (a hand destroyed
+mid-combat - see "Limb destruction & disarming") - a two-handed candidate
+is left off the list entirely if the empty slot is on the belt (nowhere
+for it to go), and always lands in just that one hand if it's a hand (see
+"Two-handed weapons" - proper two-handed grip is a separate Change Grip
+after). Swapping, changing grip, and drawing are otherwise full actions
+except changing grip itself, which is always quick regardless of
+direction; using a consumable takes whatever speed its own ability
+declares (the salve is quick). Rather than filtering every slot up front
+by what sub-action it implies, a swap/draw attempted while quickened is
+simply rejected with a message and no turn spent, same pattern movement
+has always used for a full action mid a quick action's bonus turn - using
+a consumable, or changing grip, isn't gated this way at all, since both
+are always quick. With only one belt slot right now hand-to-hand is the
+common case, but every helper (`getAllSlots` and friends) is written
+generically, so a second belt slot falls out for free. `getAllSlots`
+itself leaves out a two-handed weapon's secondary hand entirely when
+properly gripped (its canonical hand's row already represents the whole
+thing) - gripped improperly, in just the one hand, there's no secondary
+to leave out in the first place.
 
 ## Quests
 

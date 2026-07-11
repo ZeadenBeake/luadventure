@@ -1276,7 +1276,12 @@ end
 -- pool actually lives (character.ammo is still keyed per equip slot, so a
 -- two-handed weapon just doesn't use the second one), and what represents
 -- the whole thing in the inventory screen/attack list/ability list, so it
--- never gets listed or asked about twice over.
+-- never gets listed or asked about twice over. Can come back shorter than
+-- however many hands the weapon actually needs (`handedness == "two-
+-- handed"` means 2, everything else 1) - gripped in just one hand
+-- (see changeGrip, or drawing one from the belt/ground mid-fight) is
+-- still "held", just not enough to actually use - every usability check
+-- needs both this AND a hand count, not just this alone.
 local function getWieldingHands(combatant, label)
     local weaponId = combatant.equipped[label]
     local weapon = weaponId and weaponEntries[weaponId]
@@ -1313,8 +1318,8 @@ end
 -- A unified view of "a slot that can hold a weapon or a plain item" - a
 -- hand (`{kind="equip", slot=label}`) or a belt slot
 -- (`{kind="belt", index=N}`). Both the inventory screen and the in-combat
--- Belt action work with these, so what a slot holds and how it's read/
--- written lives in one place instead of two.
+-- Equipment action work with these, so what a slot holds and how it's
+-- read/written lives in one place instead of two.
 
 -- Every hand and belt slot, hands first, in the same stable order
 -- getManipulateLimbs/1..beltSize already give - except a two-handed
@@ -1413,8 +1418,8 @@ end
 
 -- Exchanges whatever's in two slots, ammo included for either side that's
 -- a weapon - a true swap if both had something, just a move if one was
--- empty. Used for a deliberate reassignment (the Belt action) as well as
--- filling an empty slot from another one.
+-- empty. Used for a deliberate reassignment (the Equipment action) as
+-- well as filling an empty slot from another one.
 local function swapSlots(combatant, a, b)
     local aWeapon, aItem, aAmmo = clearSlot(combatant, a)
     local bWeapon, bItem, bAmmo = clearSlot(combatant, b)
@@ -1496,9 +1501,17 @@ local function getInventoryRows(combatant)
                 })
             else
                 local weapon = weaponId and weaponEntries[weaponId] or weaponEntries.strike
+                -- A two-handed weapon gripped in fewer hands than it
+                -- needs (see pickWieldingHands/changeGrip) still shows
+                -- up here normally - this is the only hint on the row
+                -- itself that it won't actually fire like this.
+                local griptag = ""
+                if weaponId and weapon.handedness == "two-handed" and hands and #hands < 2 then
+                    griptag = " (can't fire - needs both hands)"
+                end
                 table.insert(rows, {
                     kind = "equip", slot = limb.label, weaponId = weaponId,
-                    name = label .. ": " .. weapon.name,
+                    name = label .. ": " .. weapon.name .. griptag,
                     countText = "", bulkText = "",
                 })
                 if weaponId and weapon.ammoCapacity then
@@ -1727,13 +1740,16 @@ local function runInventoryScreen()
     -- of the inventory screen (rather than the digit-select combat
     -- pickers use) since it's part of that same flow. Each hand toggles
     -- independently (green once selected, back to white if toggled off
-    -- again), capped at `handsNeeded` - Confirm only actually does
-    -- anything once exactly that many are picked. Returns the chosen hand
-    -- labels in stable body-tree order (so whichever's first is always
-    -- the same one - see getWieldingHands), or nil if the player backs
-    -- out via Cancel instead. Nested here (rather than a top-level local)
-    -- since only Move's own drop-handling below ever calls it - see "A
-    -- note on locals" in the design doc.
+    -- again), capped at `handsNeeded`. Confirm needs at least one hand
+    -- picked, but doesn't require all of them - equipping it "improperly"
+    -- (see getWieldingHands/changeGrip) is allowed, just gated behind a
+    -- warning once fewer than `handsNeeded` are selected, since it won't
+    -- actually be usable that way. Returns the chosen hand labels in
+    -- stable body-tree order (so whichever's first is always the same
+    -- one - see getWieldingHands), or nil if the player backs out via
+    -- Cancel (or declines the warning) instead. Nested here (rather than
+    -- a top-level local) since only Move's own drop-handling below ever
+    -- calls it - see "A note on locals" in the design doc.
     local function pickWieldingHands(handsNeeded, weaponName)
         local limbs = getManipulateLimbs(player)
         local selected = {}
@@ -1741,6 +1757,16 @@ local function runInventoryScreen()
         local cursor = 1
         local confirmRow = #limbs + 1
         local cancelRow = #limbs + 2
+
+        local function selectedHands()
+            local hands = {}
+            for _, limb in ipairs(limbs) do
+                if selected[limb.label] then
+                    table.insert(hands, limb.label)
+                end
+            end
+            return hands
+        end
 
         while true do
             inventoryWin.setVisible(false)
@@ -1763,9 +1789,15 @@ local function runInventoryScreen()
 
             local confirmMarker = (cursor == confirmRow) and ">" or " "
             inventoryWin.setCursorPos(1, 2 + #limbs + 1)
-            inventoryWin.write(confirmMarker .. (selectedCount == handsNeeded
-                and "Confirm"
-                or ("Confirm (pick " .. (handsNeeded - selectedCount) .. " more)")))
+            local confirmLabel
+            if selectedCount == 0 then
+                confirmLabel = "Confirm (pick a hand)"
+            elseif selectedCount < handsNeeded then
+                confirmLabel = ("Confirm (%d/%d hands - won't be able to fire)"):format(selectedCount, handsNeeded)
+            else
+                confirmLabel = "Confirm"
+            end
+            inventoryWin.write(confirmMarker .. confirmLabel)
 
             local cancelMarker = (cursor == cancelRow) and ">" or " "
             inventoryWin.setCursorPos(1, 2 + #limbs + 2)
@@ -1781,16 +1813,37 @@ local function runInventoryScreen()
             elseif key == ACTIVATE_KEY then
                 if cursor == cancelRow then
                     return nil
-                elseif cursor == confirmRow then
-                    if selectedCount == handsNeeded then
-                        local hands = {}
-                        for _, limb in ipairs(limbs) do
-                            if selected[limb.label] then
-                                table.insert(hands, limb.label)
-                            end
+                elseif cursor == confirmRow and selectedCount == handsNeeded then
+                    return selectedHands()
+                elseif cursor == confirmRow and selectedCount > 0 then
+                    -- Fewer hands than it needs - still allowed (see
+                    -- changeGrip, the in-combat equivalent), but worth
+                    -- warning about before committing to it, since
+                    -- there's no way to tell just from the row afterward
+                    -- that it's holding a paperweight.
+                    inventoryWin.setVisible(false)
+                    inventoryWin.clear()
+                    inventoryWin.setCursorPos(1, 1)
+                    inventoryWin.write(("With just %d hand%s, you won't be able to fire the %s."):format(
+                        selectedCount, selectedCount == 1 and "" or "s", weaponName
+                    ))
+                    inventoryWin.setCursorPos(1, 3)
+                    inventoryWin.write("[1] Equip anyway")
+                    inventoryWin.setCursorPos(1, 4)
+                    inventoryWin.write("[2] Back")
+                    inventoryWin.setVisible(true)
+
+                    while true do
+                        local _, warnKey = os.pullEvent("key")
+                        if warnKey == keys.one then
+                            return selectedHands()
+                        elseif warnKey == keys.two then
+                            break
                         end
-                        return hands
                     end
+                elseif cursor == confirmRow then
+                    -- Nothing picked yet - same "just don't respond"
+                    -- convention as everywhere else invalid.
                 else
                     local label = limbs[cursor].label
                     if selected[label] then
@@ -1951,7 +2004,11 @@ local function runInventoryScreen()
                     end
                     player.equipped[entry.slot] = carrying.itemId
                     carrying = nil
-                elseif entry and entry.kind == "belt" and (carrying.itemId or carrying.weaponId) then
+                elseif entry and entry.kind == "belt" and (carrying.itemId or carrying.weaponId)
+                    -- A two-handed weapon doesn't fit in a belt slot at
+                    -- all - falls through to the general-bag catch-all
+                    -- below instead, same as any other invalid drop.
+                    and not (carrying.weaponId and weaponEntries[carrying.weaponId].handedness == "two-handed") then
                     if entry.itemId then
                         if entry.weaponId then
                             returnAmmoToInventory(player, entry.weaponId, "belt" .. entry.index)
@@ -2298,7 +2355,7 @@ end
 
 -- `combatState.loc`/`.scene` don't change for the life of an encounter, and
 -- neither does `.selectedIndex` except via Tab - tracked here so anything
--- mid-resolution (an ability effect, runBeltAction, a picker returning) can
+-- mid-resolution (an ability effect, runEquipmentAction, a picker returning) can
 -- put the map/enemy panes back the way they should look without needing
 -- loc/scene threaded all the way through every call. Set once near the top
 -- of runEncounter and whenever the selection changes.
@@ -2319,7 +2376,7 @@ function combatState.redrawPanes()
 
         -- The action menu itself isn't rebuilt here - reconstructing it
         -- needs `restricted`, which isn't in scope from every call site
-        -- (an ability effect, runBeltAction) - but its pane still needs
+        -- (an ability effect, runEquipmentAction) - but its pane still needs
         -- clearing, or whatever a sub-picker just drew stays sitting there
         -- until the next real promptAction call. Blank is a perfectly
         -- valid resting state since nothing reads a selection out of it
@@ -2336,7 +2393,7 @@ end
 -- reflects whether it would actually be allowed right now.
 local ACTION_LABELS = {
     fight = "Fight", look = "Look (instant)", reload = "Reload (quick)",
-    ability = "Ability", belt = "Belt", idle = "Idle (quick)", flee = "Flee",
+    ability = "Ability", belt = "Equipment", idle = "Idle (quick)", flee = "Flee",
 }
 
 -- The main in-combat menu: Fight/Look/[Reload]/Ability/Belt/Idle/Flee,
@@ -2464,12 +2521,15 @@ local function pickAttack(equipped, enemy, distance, restricted)
         local weapon = getAttackWeapon(entry, equipped)
         if weapon then
             -- A two-handed weapon only ever surfaces once, from its
-            -- canonical hand (see getWieldingHands), and needs every hand
-            -- holding it functional, not just this one - same idea as
-            -- isLimbFunctional's own ancestor walk, one level removed.
+            -- canonical hand (see getWieldingHands), needs every hand
+            -- holding it functional (same idea as isLimbFunctional's own
+            -- ancestor walk, one level removed), and needs enough of them
+            -- in the first place - gripped in just one hand (see
+            -- changeGrip) is held, not usable.
             local isTwoHanded = weapon.handedness == "two-handed"
             local hands = isTwoHanded and getWieldingHands(player, entry.label) or { entry }
             local isCanonical = hands[1].label == entry.label
+            local enoughHands = #hands >= (isTwoHanded and 2 or 1)
             local allFunctional = true
             for _, hand in ipairs(hands) do
                 if not isLimbFunctional(hand.part) then
@@ -2477,7 +2537,7 @@ local function pickAttack(equipped, enemy, distance, restricted)
                     break
                 end
             end
-            if isCanonical and allFunctional then
+            if isCanonical and enoughHands and allFunctional then
                 local isQuick = not isTwoHanded
                 local hasAmmo = not weapon.ammoCapacity
                     or (player.ammo[entry.label] or 0) >= (weapon.ammoPerShot or 1)
@@ -2674,8 +2734,10 @@ local function collectAbilities(combatant)
             -- to still be working, same as an ordinary attack does (see
             -- pickAttack) - Rev it up! shouldn't be usable with one side
             -- of a two-handed grip destroyed any more than a one-handed
-            -- weapon is with its own hand gone.
-            if hands[1].label == slot then
+            -- weapon is with its own hand gone - and it needs enough hands
+            -- in the first place, gripped in just one (see changeGrip)
+            -- isn't enough to swing it at all, let alone use what it grants.
+            if hands[1].label == slot and #hands >= (weapon.handedness == "two-handed" and 2 or 1) then
                 local allFunctional = true
                 for _, hand in ipairs(hands) do
                     if not isLimbFunctional(hand.part) then
@@ -2795,9 +2857,9 @@ local function pickReloadTarget(combatant)
     end
 end
 
--- Display helpers shared by the Belt action's pickers - "which slot" and
--- "what's in it", read off getSlotContents rather than duplicating the
--- weapon-vs-item-vs-empty branching at every call site.
+-- Display helpers shared by the Equipment action's pickers - "which slot"
+-- and "what's in it", read off getSlotContents rather than duplicating
+-- the weapon-vs-item-vs-empty branching at every call site.
 local function slotDisplayName(slotDescriptor)
     if slotDescriptor.kind == "equip" then
         return slotDescriptor.slot
@@ -2815,23 +2877,112 @@ local function slotOccupantName(combatant, slotDescriptor)
     return "Empty"
 end
 
--- The Belt action: every hand and belt slot shown together (a consumable
--- held in a hand behaves exactly like one on the belt), doing whatever its
--- contents implies - swap a weapon to another slot, use up a consumable on
--- the spot, or holster a weapon from elsewhere (another slot, or one lying
--- on the ground this fight) into an empty one. When restricted (mid a
--- quick action's bonus turn), the swap/holster sub-actions are always full
--- - rather than filtering every slot up front by what sub-action it
--- implies, this follows the same "let them pick it, then reject it"
--- pattern Move has always used for a full action taken while quickened.
--- Returns the resolved speed, or nil if nothing happened.
-local function runBeltAction(combatant, droppedItems, enemy, restricted)
+-- The Equipment action (renamed from Belt - it's grown well past just
+-- that): every hand and belt slot shown together (a consumable held in a
+-- hand behaves exactly like one on the belt), doing whatever its contents
+-- imply - swap a weapon to another slot, use up a consumable on the spot,
+-- or holster/draw a weapon from elsewhere (another slot, or one lying on
+-- the ground this fight) into an empty one. A two-handed weapon is the
+-- exception throughout: it can't go on the belt at all, a slot holding
+-- one offers "change grip" instead of a swap, and drawing one always
+-- lands in just one hand (see changeGrip and the branches below). When
+-- restricted (mid a quick action's bonus turn), the swap/draw sub-actions
+-- are always full - rather than filtering every slot up front by what
+-- sub-action it implies, this follows the same "let them pick it, then
+-- reject it" pattern Move has always used for a full action taken while
+-- quickened; changing grip is quick either way, so it's never gated on
+-- `restricted` at all. Returns the resolved speed, or nil if nothing
+-- happened.
+local function runEquipmentAction(combatant, droppedItems, enemy, restricted)
+    -- Toggles a two-handed weapon between properly gripped (every hand it
+    -- needs) and a single-hand "improper" carry it's still held by, just
+    -- not usable with (see getWieldingHands/pickAttack) - quick either
+    -- way, unlike actually drawing a fresh one from the belt or the
+    -- ground below. Reducing asks which hand to keep if there's a real
+    -- choice; increasing just claims however many empty hands it still
+    -- needs, refusing if there aren't enough free, and migrates the
+    -- shared ammo pool to whichever hand ends up canonical if that's not
+    -- the one it was already on (see getWieldingHands - canonical is
+    -- whichever hand comes first in body-tree order, which adding a hand
+    -- can change). Returns "quick" on success, nil (with its own message)
+    -- otherwise. Only ever called for a two-handed weapon - see below.
+    local function changeGrip(slot)
+        local weaponId = combatant.equipped[slot]
+        local weapon = weaponEntries[weaponId]
+        local needed = 2
+        local hands = getWieldingHands(combatant, slot)
+
+        if #hands >= needed then
+            combatWin.setVisible(false)
+            combatWin.clear()
+            combatWin.setCursorPos(1, 1)
+            combatWin.write("Keep the " .. weapon.name .. " in which hand?")
+            local grow = 3
+            for i, hand in ipairs(hands) do
+                grow = grow + writeWrapped(combatWin, 1, grow, "[" .. digitLabel(i) .. "] " .. hand.label)
+            end
+            local gBackIndex = #hands + 1
+            writeWrapped(combatWin, 1, grow, "[" .. digitLabel(gBackIndex) .. "] Back")
+            combatWin.setVisible(true)
+
+            local kept
+            while true do
+                local _, key = os.pullEvent("key")
+                local index = keyToNumber[key]
+                if index == gBackIndex then
+                    return nil
+                elseif index and hands[index] then
+                    kept = hands[index]
+                    break
+                end
+            end
+
+            local ammo = combatant.ammo[hands[1].label]
+            for _, hand in ipairs(hands) do
+                if hand.label ~= kept.label then
+                    combatant.equipped[hand.label] = "none"
+                    combatant.ammo[hand.label] = nil
+                end
+            end
+            combatant.equipped[kept.label] = weaponId
+            combatant.ammo[kept.label] = ammo
+            combatState.redrawPanes()
+            logCombat("You shift the " .. weapon.name .. " to a one-handed grip.")
+            return "quick"
+        end
+
+        local freeHands = {}
+        for _, limb in ipairs(getManipulateLimbs(combatant)) do
+            local slotWeaponId, slotItemId = getSlotContents(combatant, { kind = "equip", slot = limb.label })
+            if not slotWeaponId and not slotItemId and #freeHands < needed - #hands then
+                table.insert(freeHands, limb)
+            end
+        end
+        if #freeHands < needed - #hands then
+            logCombat("Not enough free hands to grip it properly.")
+            return nil
+        end
+
+        local oldCanonical = hands[1].label
+        for _, limb in ipairs(freeHands) do
+            combatant.equipped[limb.label] = weaponId
+        end
+        local newCanonical = getWieldingHands(combatant, slot)[1].label
+        if newCanonical ~= oldCanonical then
+            combatant.ammo[newCanonical] = combatant.ammo[oldCanonical]
+            combatant.ammo[oldCanonical] = nil
+        end
+        combatState.redrawPanes()
+        logCombat("You grip the " .. weapon.name .. " properly.")
+        return "quick"
+    end
+
     local slots = getAllSlots(combatant)
 
     combatWin.setVisible(false)
     combatWin.clear()
     combatWin.setCursorPos(1, 1)
-    combatWin.write("Belt - which slot?")
+    combatWin.write("Equipment - which slot?")
     local row = 3
     for i, slotDescriptor in ipairs(slots) do
         row = row + writeWrapped(combatWin, 1, row, ("[%s] %s: %s"):format(
@@ -2858,20 +3009,34 @@ local function runBeltAction(combatant, droppedItems, enemy, restricted)
     local weaponId, itemId = getSlotContents(combatant, chosen)
 
     if weaponId then
-        if restricted then
-            logCombat("You don't have time to swap weapons.")
-            return nil
+        -- A two-handed weapon only ever gets "change grip" here - a full
+        -- re-equip (which two hands, from scratch) is the overworld
+        -- inventory screen's own picker, and it can't go on the belt at
+        -- all (see the empty-slot branch below), so there's nothing else
+        -- a slot holding one could offer. Change grip is quick, so this
+        -- isn't gated on `restricted` the way an actual swap is below.
+        if weaponEntries[weaponId].handedness == "two-handed" then
+            combatWin.setVisible(false)
+            combatWin.clear()
+            combatWin.setCursorPos(1, 1)
+            combatWin.write(weaponEntries[weaponId].name .. " - what do you want to do?")
+            writeWrapped(combatWin, 1, 3, "[1] Change grip (quick)")
+            writeWrapped(combatWin, 1, 4, "[2] Back")
+            combatWin.setVisible(true)
+
+            while true do
+                local _, key = os.pullEvent("key")
+                local index = keyToNumber[key]
+                if index == 2 then
+                    return nil
+                elseif index == 1 then
+                    return changeGrip(chosen.slot)
+                end
+            end
         end
 
-        -- swapSlots only ever touches the two slots it's given - fine for
-        -- an ordinary weapon, but a two-handed one occupies a slot this
-        -- doesn't know about too (see getWieldingHands), so swapping it
-        -- here would leave that other hand still pointing at a weapon
-        -- that's just moved out from under it. Simplest safe answer:
-        -- don't - the full re-equip flow (the inventory screen's own
-        -- picker) stays overworld-only.
-        if weaponEntries[weaponId].handedness == "two-handed" then
-            logCombat("Two-handed weapons can't be swapped mid-fight.")
+        if restricted then
+            logCombat("You don't have time to swap weapons.")
             return nil
         end
 
@@ -2935,20 +3100,19 @@ local function runBeltAction(combatant, droppedItems, enemy, restricted)
             return nil
         end
 
-        -- Same "just don't list it" convention as everywhere else: a
-        -- two-handed weapon needs its own picker to say which two hands
-        -- (see the inventory screen's pickWieldingHands), which this flow
-        -- has no room for mid-fight - holstering one back stays an
-        -- overworld-only trip for now, same as swapping one out is.
+        -- A two-handed weapon can't be *holstered* mid-fight (nowhere to
+        -- put it - see the belt's own restriction), but it can still be
+        -- *drawn* into a bare hand, same "just don't list it" filtering
+        -- as everywhere else applied only to the belt side of things.
         local candidates = {}
         for _, slotDescriptor in ipairs(slots) do
             local candidateWeaponId = getSlotContents(combatant, slotDescriptor)
-            if candidateWeaponId and weaponEntries[candidateWeaponId].handedness ~= "two-handed" then
+            if candidateWeaponId and not (chosen.kind == "belt" and weaponEntries[candidateWeaponId].handedness == "two-handed") then
                 table.insert(candidates, { kind = "slot", slotDescriptor = slotDescriptor, weaponId = candidateWeaponId })
             end
         end
         for i, dropped in ipairs(droppedItems) do
-            if weaponEntries[dropped.weaponId].handedness ~= "two-handed" then
+            if not (chosen.kind == "belt" and weaponEntries[dropped.weaponId].handedness == "two-handed") then
                 table.insert(candidates, { kind = "dropped", index = i, weaponId = dropped.weaponId })
             end
         end
@@ -2980,7 +3144,26 @@ local function runBeltAction(combatant, droppedItems, enemy, restricted)
                 return nil
             elseif index and candidates[index] then
                 local candidate = candidates[index]
-                if candidate.kind == "slot" then
+                -- A two-handed weapon drawn this way always ends up in
+                -- just this one hand (see changeGrip for reaching a
+                -- proper grip afterward) - wherever it's coming from
+                -- empties out entirely, ammo included, rather than
+                -- trying to fill a second hand nobody chose.
+                if weaponEntries[candidate.weaponId].handedness == "two-handed" then
+                    local ammo = 0
+                    if candidate.kind == "slot" then
+                        local hands = getWieldingHands(combatant, candidate.slotDescriptor.slot)
+                        ammo = combatant.ammo[hands[1].label] or 0
+                        for _, hand in ipairs(hands) do
+                            combatant.equipped[hand.label] = "none"
+                            combatant.ammo[hand.label] = nil
+                        end
+                    else
+                        table.remove(droppedItems, candidate.index)
+                    end
+                    combatant.equipped[chosen.slot] = candidate.weaponId
+                    combatant.ammo[chosen.slot] = ammo
+                elseif candidate.kind == "slot" then
                     swapSlots(combatant, chosen, candidate.slotDescriptor)
                 else
                     table.remove(droppedItems, candidate.index)
@@ -3002,7 +3185,7 @@ end
 -- its one shared ammo pool (tracked on whichever hand was canonical) to
 -- the bag exactly once, not per hand. A weapon is removed from `equipped`
 -- entirely and tracked in `droppedItems` until it's picked back up mid-
--- fight (see runBeltAction's empty-slot branch) or auto-returned to the
+-- fight (see runEquipmentAction's empty-slot branch) or auto-returned to the
 -- inventory once the encounter ends; a plain consumable just falls
 -- straight back into the pack instead, since it was never "wielded" in
 -- the first place - there's nothing to clatter to the ground or reclaim.
@@ -3324,7 +3507,7 @@ local function runEncounter(triggeringObject)
         end
 
         if action == "belt" then
-            speed = runBeltAction(player, droppedItems, foe, quickened)
+            speed = runEquipmentAction(player, droppedItems, foe, quickened)
         end
 
         -- nil: nothing happened, quickened untouched, prompt again.
