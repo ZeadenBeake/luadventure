@@ -25,341 +25,30 @@ Luadventure = {
 
 }
 
--- Organs can't be damaged directly; they add abilities/modifiers to the part
--- they're installed in (or, for global grants, to the whole character), and
--- can require/forbid tags the same way slots can.
-local organEntries = {
-    -- Baseline human organs. No grants, no requires, no conflicts - every
-    -- other organ in the game is defined relative to these doing nothing.
-    human_skin = { category = "skin", grantsLocal = { "SKIN" } },
-    human_bone = { category = "bone" },
-    human_muscle = { category = "muscle" },
-    human_vitals = { category = "vitals" },
-    human_auxiliary = { category = "auxiliary" },
-
-    -- Insectoid's skin/bone: chitin instead of the human baseline. The
-    -- exoskeleton is what actually supports a tail or wings at all, hence
-    -- granting TAILED/WINGED globally here rather than on the torso itself
-    -- - swap the bone organ out and those slots would lock again. The
-    -- species' own reflex penalty/endurance bonus (see speciesEntries)
-    -- isn't modeled as an organ modifier - there's no live system that
-    -- consumes a per-part reflex modifier yet, so it's just a flat
-    -- character-stat adjustment applied once at creation instead.
-    chitin_skin = { category = "skin", grantsLocal = { "SKIN" } },
-    chitin_bone = { category = "bone", grantsLocal = { "CHITIN" }, grantsGlobal = { "TAILED", "WINGED" } },
-
-    -- Compound eyes, mandibles, the general look - a generic organ (not a
-    -- swappable category slot) since it's about the head's fundamental
-    -- shape rather than something you could organ-swap away.
-    insectoid_features = { grantsGlobal = { "UNSIGHTLY" } },
-
-    subdermal_plating = { -- generic organ, not tied to a hardcoded category
-        requires = { "SKIN" },
-        conflicts = { "SUBDERMAL", "CHITIN" },
-        grantsLocal = { "SUBDERMAL" },
-        modifiers = { defense = 2 }, -- data only for now, nothing consumes this yet
-    },
-
-    -- Test organ for the strength system: a muscle-slot swap that boosts
-    -- STRENGTH for whatever's attached below it (a hand punching with a
-    -- reinforced arm behind it hits harder).
-    reinforced_muscle = { category = "muscle", modifiers = { strength = 1.5 } },
-
-    spinal_graft = { -- meant for the torso itself; unlocks the extra-arm slots
-        grantsLocal = { "MULTI_LIMBED" },
-    },
-
-    cybernetic_eye = { -- grants a tag body-wide, not just to its own limb
-        grantsGlobal = { "OCULAR_IMPLANT" },
-    },
-    neural_targeting_suite = { -- needs an eye installed *somewhere* on the body
-        requires = { "OCULAR_IMPLANT" },
-        abilities = { "called_shot" }, -- data only for now, nothing consumes this yet
-    },
-
-    -- Generic chest implant granting the adrenaline_shot ability (see
-    -- abilityEntries, defined later once applyCharacterStatus exists).
-    adrenal_auto_injector = { abilities = { "adrenaline_shot" } },
-}
-
--- Library of every swappable bodypart template in the game. The torso is the
--- one part that's never swapped wholesale (see newTorso below) - everything
--- that attaches to it comes from here.
---
--- `zone` is which apparel coverage zone this part draws its protection from
--- (see COVERAGE_AREAS/getPartZone below) - horns, antennae, wings and
--- stingers can't be covered at all, so their templates just don't set one,
--- which makes them fall through to whatever zone their parent has instead.
-local partEntries = {
-    human_head = {
-        tags = { MORTAL = true },
-        health = 100,
-        zone = "head",
-        organSlots = { skin = "human_skin", bone = "human_bone", muscle = "human_muscle" },
-        subSlots = {
-            horns = { requires = {} },
-        },
-    },
-    human_arm = {
-        tags = {},
-        health = 100,
-        zone = "arms",
-        organSlots = { skin = "human_skin", bone = "human_bone", muscle = "human_muscle" },
-        subSlots = {
-            hand = { requires = {} },
-        },
-    },
-    human_hand = {
-        tags = { MANIPULATE = true }, -- can hold something, so can also throw an unarmed punch
-        health = 100,
-        zone = "hands",
-        organSlots = { skin = "human_skin", bone = "human_bone", muscle = "human_muscle" },
-        subSlots = {},
-    },
-    human_leg = {
-        tags = {},
-        health = 100,
-        zone = "legs",
-        organSlots = { skin = "human_skin", bone = "human_bone", muscle = "human_muscle" },
-        subSlots = {
-            foot = { requires = {} },
-        },
-    },
-    human_foot = {
-        tags = {},
-        health = 100,
-        zone = "feet",
-        organSlots = { skin = "human_skin", bone = "human_bone", muscle = "human_muscle" },
-        subSlots = {},
-    },
-
-    -- No species uses this one for real yet, but a horn can't be covered
-    -- by anything, so it has no zone of its own - getPartZone falls
-    -- through to whatever it's attached to (the head).
-    horn = {
-        tags = {},
-        health = 100,
-        organSlots = { skin = "human_skin", bone = "human_bone", muscle = "human_muscle" },
-        subSlots = {},
-    },
-
-    -- Insectoid's head - same shape as a human head (subSlots is where the
-    -- horns/antennae/etc difference actually lives), just chitin instead of
-    -- skin/bone, and unsettling enough to grant UNSIGHTLY globally (see
-    -- insectoid_features).
-    insectoid_head = {
-        tags = { MORTAL = true },
-        health = 100,
-        zone = "head",
-        organSlots = { skin = "chitin_skin", bone = "chitin_bone", muscle = "human_muscle" },
-        subSlots = {
-            antennae = { requires = {} },
-        },
-    },
-
-    -- Neither of these have a zone of their own, same reasoning as horn
-    -- above - a stinger or antenna can't be covered by apparel, so they
-    -- inherit whatever protects the part they're attached to instead.
-    -- naturalWeapon marks a part as its own unarmed attack, separate from
-    -- (and not requiring) MANIPULATE/equipped-gear - see pickAttack. Unlike
-    -- a hand's weapon, it's never equipped and so can never be dropped or
-    -- disarmed; destroying the stinger itself is the only way to disable it
-    -- (see isLimbFunctional, which pickAttack already checks for everyone).
-    stinger = {
-        tags = {},
-        health = 100,
-        organSlots = { skin = "chitin_skin", bone = "chitin_bone", muscle = "human_muscle" },
-        subSlots = {},
-        naturalWeapon = "stinger_sting",
-    },
-    antenna = {
-        tags = {},
-        health = 100,
-        organSlots = { skin = "chitin_skin", bone = "chitin_bone", muscle = "human_muscle" },
-        subSlots = {},
-    },
-}
-
--- Weapons have a damage range rather than a flat number, since real weapons
--- will vary; fists just happen to have min == max for now. `type` is a plain
--- field rather than a tag - tags are for binary presence/absence, and this is
--- meaningfully more than that (it decides whether STRENGTH even applies).
--- range is a hard cap (a square, not a circle - cheap and simple): beyond it
--- the attack isn't available at all. spread is a per-tile-of-distance hit
--- chance penalty, applied on top of the aim/reflex roll; melee weapons only
--- feel it if they have reach beyond range 1 (a flail, say), since at range 1
--- there are zero tiles between attacker and target.
--- All damage types in the game, for reference - physical and (now that
--- we're going sci-fi) energy alike. Lasers will deal fire once they exist.
--- untyped is the odd one out: it never gets a resistance multiplier of any
--- kind, for stuff like bleeding that doesn't cleanly fit a "real" type.
--- toxic is poison's own damage type - a real one (unlike untyped), just one
--- nothing resists yet.
-local damageTypes = { "bludgeoning", "piercing", "slashing", "fire", "frost", "radiation", "toxic", "untyped" }
-
--- Every coverage zone (a body part category - see partEntries' `zone`) and
--- the finer-grained areas within it. Areas only matter for apparel-vs-
--- apparel overlap (two things on the same layer can't both claim an area -
--- see canWearItem); damage reduction itself only cares about the zone as a
--- whole (see getCoverage), since we don't track hit location any finer than
--- "which part got hit." Note: "belt" here is a coverage area (a waist
--- accessory slot), unrelated to the combat belt slots.
-local COVERAGE_AREAS = {
-    head = { "face", "head", "neck" },
-    torso = { "upper_body", "lower_body", "pelvis", "belt" },
-    arms = { "upper_arm", "lower_arm" },
-    hands = { "hand" },
-    legs = { "upper_leg", "lower_leg" },
-    feet = { "foot" },
-    tail = { "upper_tail", "lower_tail" },
-}
-
--- Reverse lookup: which zone a given area belongs to.
-local AREA_TO_ZONE = {}
-for zone, areas in pairs(COVERAGE_AREAS) do
-    for _, area in ipairs(areas) do
-        AREA_TO_ZONE[area] = zone
-    end
-end
-
--- Status effects can be applied to a single part (an injury like a fracture)
--- or to the whole character (a body-wide condition like adrenaline). A
--- part-scoped status is just another source of the same organ-style
--- `modifiers`, folded in wherever a limb's own contribution is computed.
--- A character-scoped status instead sets flags read by specific mechanics -
--- `ignoresCondition` is the only one so far, read by getConditionMultiplier.
---
--- duration counts down by one every full round; -1 means permanent (needs
--- explicit removal instead, which nothing does yet). `stacks` controls what
--- happens when the same status gets applied again on top of an existing
--- one: true duration (stacks unset/false) takes the higher of the two,
--- while a stacking status (like bleed) adds them together instead.
---
--- damagePerStack names a damage type dealt equal to the current duration,
--- once per round, right before it decrements - that's how bleed works: each
--- "stack" is really just a turn of duration that hurts on its way out.
-local statusEntries = {
-    fracture = { scope = "part", modifiers = { strength = 0.5 }, duration = -1 },
-    adrenaline = { scope = "character", ignoresCondition = true, duration = 1 },
-    bleed = { scope = "part", duration = 1, stacks = true, damagePerStack = "untyped" },
-    poison = { scope = "part", duration = 1, stacks = true, damagePerStack = "toxic" },
-}
-
--- Verb for reporting a damagePerStack tick (see applyDamageOverTime) -
--- keyed by statusId since "bleeds" wouldn't make sense for poison. Falls
--- back to a generic phrase for any future damagePerStack status that
--- doesn't bother adding its own.
-local DOT_VERBS = {
-    bleed = "bleeds",
-    poison = "is poisoned",
-}
-
--- chain_sword's onHit is attached later, once applyPartStatus exists (see
--- below the organ/status install functions) - can't reference it yet here.
--- handedness determines an attack's action speed: one-handed weapons are a
--- quick action, freeing up the rest of your turn; two-handed weapons (none
--- yet) are a full action, the tradeoff being room for much bigger numbers.
--- ammoCapacity/ammoClass mark a weapon as needing ammo at all (melee
--- weapons just don't have these fields); ammoPerShot is how many rounds a
--- normal shot burns, in case a future weapon needs something other than 1.
--- Current ammo lives per-combatant in .ammo (see character:new), keyed by
--- equip slot - never on the weapon entry itself, since that's a shared
--- template every wielder of this weapon would otherwise be reading/draining
--- from together.
-local weaponEntries = {
-    -- The generic bare-handed attack any MANIPULATE limb falls back to when
-    -- nothing (or nothing anymore - see the inventory's equip slots) is
-    -- equipped there. Named generically ("Strike") rather than "Fist" since
-    -- not every species punches with a fist specifically.
-    strike = { name = "Strike", damage = { min = 10, max = 10 }, type = "melee", range = 1, spread = 0, damageType = "bludgeoning", handedness = "one-handed" },
-
-    -- `itemId` is what lets a weapon exist outside a hand at all - the
-    -- carryable, inventory-and-bulk-having form it becomes when unequipped
-    -- (see itemEntries), looked up by the inventory screen's equip-slot
-    -- swapping. Strike has none - it's never a real, droppable item, just
-    -- what an empty hand always falls back to.
-    chain_sword = { name = "Chain Sword", damage = { min = 15, max = 25 }, type = "melee", range = 1, spread = 0, damageType = "slashing", handedness = "one-handed", abilities = { "rev_it_up" }, itemId = "chain_sword" },
-    laser_pistol = {
-        name = "Laser Pistol",
-        damage = { min = 10, max = 15 },
-        type = "ranged",
-        range = 5,
-        spread = 2,
-        damageType = "fire",
-        handedness = "one-handed",
-        ammoCapacity = 10,
-        ammoPerShot = 1,
-        ammoClass = "energy",
-        abilities = { "charge_shot" },
-        itemId = "laser_pistol",
-    },
-
-    -- A natural weapon (see partEntries.stinger), not equipment - barely
-    -- any direct damage, but onHit (attached below once applyPartStatus
-    -- exists) stacks a hefty dose of poison on every landed hit.
-    stinger_sting = { name = "Sting", damage = { min = 1, max = 1 }, type = "melee", range = 1, spread = 0, damageType = "piercing", handedness = "one-handed" },
-}
-
--- Carried items, Pathfinder-style: bulk is a plain number, except 0.1
--- ("Light") which displays as "L" instead - see formatBulk. `abilities`
--- works exactly like an organ's or weapon's: anything in the belt grants
--- whatever it lists. Unlike a reusable organ/weapon ability, using an
--- item-granted ability consumes it from the belt instead of starting a
--- cooldown - that's handled generically in runEncounter, keyed off whether
--- collectAbilities tagged the entry with an itemId.
-local itemEntries = {
-    dermoregenesis_salve = {
-        name = "Dermoregenesis Salve",
-        bulk = 1,
-        abilities = { "use_dermoregenesis_salve" },
-    },
-
-    -- A weapon's carryable form - `weaponId` is what tells the inventory
-    -- screen "moving this into an equip slot means wielding that weapon",
-    -- the reverse of the weapon's own `itemId` (used going the other way,
-    -- putting a *displaced* weapon back into the bag). Name is duplicated
-    -- from the weapon entry rather than looked up, same as any other item.
-    chain_sword = { name = "Chain Sword", bulk = 2, weaponId = "chain_sword" },
-    laser_pistol = { name = "Laser Pistol", bulk = 1, weaponId = "laser_pistol" },
-
-    -- Kinetic ammo: a bullet is one shot, plain and simple, reloaded exactly
-    -- like you'd expect - pull however many are missing from the gun out of
-    -- inventory.
-    bullet = { name = "Bullet", bulk = 0.1, ammoClass = "kinetic" },
-
-    -- Energy ammo is fudged, since we can't store a partial charge on a
-    -- single stateful "battery" item without a bigger inventory rework.
-    -- Instead: energy_charge is one shot, just like a bullet, except it
-    -- weighs nothing (0 bulk) - a battery doesn't hold charges at all, it
-    -- just raises how many energy_charge items you're allowed to carry by
-    -- chargeCapacity each (see getMaxEnergyCharges), which is what actually
-    -- keeps two batteries' worth of charges at a svelte 0.2 Bulk instead of
-    -- the 2.0 Bulk the same twenty shots would cost as bullets.
-    battery = { name = "Battery", bulk = 0.1, ammoClass = "energy", chargeCapacity = 10 },
-    energy_charge = { name = "Energy Charge", bulk = 0, ammoClass = "energy" },
-
-    -- Apparel: `layer` is "inner" or "outer" (can't stack two of the same
-    -- layer over overlapping areas - see canWearItem), `covers` is which
-    -- areas it claims, and `coverage` is flat damage reduction per type,
-    -- applied to whichever zone(s) those areas belong to (see getCoverage).
-    -- Ballistic armor covers the three physical types; a shield-type item
-    -- would instead lean on energy types like fire/radiation.
-    padded_shirt = {
-        name = "Padded Shirt", bulk = 1, layer = "inner",
-        covers = { "upper_body", "lower_body" },
-        coverage = { bludgeoning = 2, piercing = 1, slashing = 1 },
-    },
-    ballistic_vest = {
-        name = "Ballistic Vest", bulk = 2, layer = "outer",
-        covers = { "upper_body" },
-        coverage = { bludgeoning = 5, piercing = 8, slashing = 5 },
-    },
-    helmet = {
-        name = "Helmet", bulk = 1, layer = "outer",
-        covers = { "head" },
-        coverage = { bludgeoning = 4, piercing = 3, slashing = 3 },
-    },
-}
+-- All game content - organs, body parts, damage types, coverage zones,
+-- statuses, weapons, items, abilities, species, the world map, quests, and
+-- dynamic greetings - lives in gamedata.lua now; this file is just the
+-- engine that reads it. Still pulled into their own locals below (rather
+-- than writing gamedata.organEntries etc. at every call site) since engine
+-- code reads them constantly - see gamedata.lua's own header comment for
+-- the Luadventure bridge API that lets content call back into the engine
+-- (populated further down, once everything on that list actually exists -
+-- see the comment right before it).
+local gamedata = require("gamedata")
+local organEntries = gamedata.organEntries
+local partEntries = gamedata.partEntries
+local damageTypes = gamedata.damageTypes
+local COVERAGE_AREAS = gamedata.COVERAGE_AREAS
+local AREA_TO_ZONE = gamedata.AREA_TO_ZONE
+local statusEntries = gamedata.statusEntries
+local DOT_VERBS = gamedata.DOT_VERBS
+local weaponEntries = gamedata.weaponEntries
+local itemEntries = gamedata.itemEntries
+local abilityEntries = gamedata.abilityEntries
+local speciesEntries = gamedata.speciesEntries
+local questEntries = gamedata.questEntries
+local dynamicGreetings = gamedata.dynamicGreetings
+world = gamedata.world
 
 -- Tags in here exist for engine bookkeeping only and should never be shown on
 -- normal player-facing UI (e.g. gating body access during a tutorial).
@@ -637,18 +326,6 @@ local function applyCharacterStatus(combatant, statusId, amount)
     combatant.statuses[statusId] = combineDuration(combatant.statuses[statusId], amount or def.duration, def.stacks)
 end
 
--- Attached here rather than in weaponEntries itself, since applyPartStatus
--- didn't exist yet up there: a chain sword bites deep and keeps bleeding.
-weaponEntries.chain_sword.onHit = function(target)
-    applyPartStatus(target, "bleed", 2)
-end
-
--- Barely a scratch on its own, but 5 stacks of poison at once is a real
--- threat over the next few rounds.
-weaponEntries.stinger_sting.onHit = function(target)
-    applyPartStatus(target, "poison", 5)
-end
-
 -- Ticks every active status on a combatant (itself and every part of its
 -- body) down by one round, removing anything that hits 0. Permanent (-1)
 -- statuses are left untouched. Called once a full round has actually
@@ -683,43 +360,6 @@ local function decrementCooldowns(combatant)
         end
     end
 end
-
--- Abilities can come from anything the combatant is holding, carrying, or
--- has installed in them - organs, equipped weapons, and belt items all
--- grant them. `speed` is one of "full" (the default - takes the whole
--- turn), "quick" (half a turn - see the action-economy comment above
--- runEncounter), or "instant" (doesn't cost anything, same as it always
--- has). `cooldown` is turns before it can be used again, tracked per-
--- combatant in `cooldowns` (see character:new) - item-granted abilities
--- ignore this and get consumed instead (see the itemId handling in
--- runEncounter). `effect` is attached down near runEncounter instead of
--- here, once showCombatMessage/pickLimb/etc actually exist - it's given
--- (user, opponent, sourcePart) and can return "noop" (didn't actually do
--- anything, e.g. out of range - don't spend the turn) or "miss" (attack
--- rolled, but didn't land - spend the turn, but refund the cooldown);
--- anything else resolves normally at whatever speed this ability is. Killing
--- the opponent needs no special signal - runEncounter checks the scene for
--- survivors at the start of every turn regardless of what killed them.
-local abilityEntries = {
-    adrenaline_shot = {
-        name = "Adrenal Auto-Injector",
-        speed = "instant",
-        cooldown = 5,
-    },
-    rev_it_up = {
-        name = "Rev it up!",
-        speed = "full", -- a committed special attack, not a quick one
-        cooldown = 3,
-    },
-    use_dermoregenesis_salve = {
-        name = "Use Dermoregenesis Salve",
-        speed = "quick", -- most item interactions are
-    },
-    charge_shot = {
-        name = "Charge Shot",
-        speed = "full", -- always, even wielded one-handed - no cooldown to offset it
-    },
-}
 
 -- Unlike tags, numeric modifiers (like STRENGTH) flow up through a part's
 -- ancestors - a reinforced upper arm makes the hand attached to it hit
@@ -1179,58 +819,6 @@ local function newInsectoidBody(globalTags)
     return body
 end
 
--- Every species a character can be built as. `build(globalTags)` mirrors
--- newHumanBody's own signature; `statAdjustments` are flat, one-time deltas
--- applied to character.stats once at creation - the same granularity as
--- character creation's own +5%-per-point stat allocation, just
--- species-driven instead of player-chosen.
-local speciesEntries = {
-    human = {
-        name = "Human",
-        build = newHumanBody,
-        statAdjustments = {},
-    },
-    insectoid = {
-        name = "Insectoid",
-        build = newInsectoidBody,
-        statAdjustments = { reflex = -0.05 },
-    },
-}
-
-local location = {
-    name = "",
-    directions = {
-        -- up = "somewhere"
-        -- right = "somewhere_else"
-        -- etc.
-    }
-}
-
-function location:navigate(dir)
-    if not dir then
-        return self.directions
-    else
-        return world[self.directions[dir]]
-    end
-end
-
-function location:new(
-    o,
-    name,
-    locations, -- table of directions
-    width, -- size of the walkable grid within this location
-    height
-)
-    o = o or {}
-    setmetatable(o, self)
-    self.__index = self
-    o.name = name or error("Location must have a name!", 2)
-    o.directions = locations or {}
-    o.width = width or 7
-    o.height = height or 5
-    return o
-end
-
 local character = {
     stats = {
         level = 0,
@@ -1365,89 +953,6 @@ function npc:decide(state)
     return { action = "idle" }
 end
 
---[[
-    So, worlds will work some funky ways.
-
-    Entries in the world table are each a unique place. I don't need to fill in areas with lots of dead space since this is text-based,
-    so that'll work fine. Each world has potential directions (up, down, left, right) and you can navigate them. I might make a "location"
-    object that contains functions for this navigation, to let me define them fluidly.
---]]
-
-world = {
-    --[[
-    village = {
-        up = nil,
-        down = nil,
-        left = nil,
-        right = "grasslands",
-        name = "Village"
-    },
-    --]]
-    village = location:new(
-        nil,
-        "Village",
-        {
-            right = "grasslands"
-        }
-    ),
-    grasslands = location:new(
-        nil,
-        "Grasslands",
-        {
-            left = "village"
-        }
-    )
-}
-
--- A quest's own definition: dialogue for each state, its completion check,
--- and what it hands over on turn-in. `nextQuestId` is what the giver's
--- questId becomes after that (nil = nothing more, they go quiet - see
--- getPersonSymbol/interactWithPerson).
-local questEntries = {
-    test_the_dummy = {
-        name = "Blunt the Blade",
-        offerLines = {
-            "\"That test dummy out back in the grasslands",
-            "could use a good working-over. Rough it up",
-            "for me, would you?\"",
-        },
-        activeLines = { "\"Still waiting on that test dummy...\"" },
-        turnInLines = { "\"Ha! Knew you had it in you. Here, take this.\"" },
-        isReady = function() return (player.killLog.test_dummy or 0) > 0 end,
-        rewardItemId = "dermoregenesis_salve",
-        nextQuestId = nil,
-    },
-}
-
--- Greetings that depend on live player state (rather than always showing
--- the same lines) can't just be a table sitting on the object - a save
--- captures the whole world snapshot as plain data, and a function isn't
--- serializable at all. So a dynamic greeting is a plain string id
--- (`greetingId`, same convention as questId/itemId/saveId) looked up in
--- here at interaction time instead - never stored on the object itself.
-local dynamicGreetings = {
-    -- Two villagers gossiping about the player right in front of them,
-    -- without realizing {{subject}} can hear every word - functionally
-    -- just two adjacent people who happen to say the exact same thing (see
-    -- dialogue()), rather than a real NPC-to-NPC conversation system. An
-    -- UNSIGHTLY player (an insectoid's freaky-looking head, so far - see
-    -- speciesEntries/insectoid_features) gets gossiped about differently.
-    villager_gossip = function()
-        if player.globalTags.UNSIGHTLY then
-            return {
-                "\"Psst - have you seen {{name}}?\"",
-                "\"Something about {{object}} just... unsettles",
-                "me. Can't put my finger on why.\"",
-            }
-        end
-        return {
-            "\"Psst - have you heard about {{name}}?\"",
-            "\"They say {{subject}} walked right up to that",
-            "test dummy without blinking. Word is nothing",
-            "rattles {{object}} one bit!\"",
-        }
-    end,
-}
 
 -- Environment interactions: * is an item, auto-collected (and logged, see
 -- logActivity) the moment the player steps onto it - no blurb needed
@@ -1457,25 +962,6 @@ local dynamicGreetings = {
 -- tryMove/tryInteract) and shown as `.` while open; $ is a save point -
 -- `saveId` is how a save file remembers which one made it, so loading
 -- knows where to put the player back (see findSavePointById).
-world.village.objects = {
-    { kind = "item", x = 3, y = 3, itemId = "bullet" },
-    { kind = "person", x = 5, y = 2, name = "Old Soldier", questId = "test_the_dummy" },
-    { kind = "person", x = 2, y = 4, name = "Villager",
-      greeting = { "\"Nice weather we're having, isn't it?\"" } },
-    { kind = "save_point", x = 6, y = 4, saveId = "village_terminal" },
-    { kind = "person", x = 1, y = 5, name = "Villager", greetingId = "villager_gossip" },
-    { kind = "person", x = 2, y = 5, name = "Villager", greetingId = "villager_gossip" },
-}
-
--- A short wall with a door in it, hiding the test dummy in a small back
--- area - keeps it out of the way of ordinary exploration, but still right
--- there to spar with whenever we want to test something.
-world.grasslands.objects = {
-    { kind = "wall", x1 = 5, y1 = 1, x2 = 5, y2 = 2 },
-    { kind = "door", x = 5, y = 3, orientation = "vertical", open = false },
-    { kind = "wall", x1 = 5, y1 = 4, x2 = 5, y2 = 5 },
-    { kind = "enemy", x = 6, y = 3 },
-}
 
 --[[
     Screen is split into four corners:
@@ -2844,6 +2330,41 @@ local function pickLimb(prompt, torso)
     end
 end
 
+-- Populates the bridge table gamedata.lua's content reaches back into the
+-- engine through - see its own header comment for the full list with
+-- signatures. Done here, in one block, once everything on that list
+-- actually exists as a local (pickLimb, just above, is the last one) -
+-- gamedata.lua's own top-level code (building its tables, defining ability
+-- effects/species builds/quest checks/greetings as functions) already ran
+-- when it was required, further up, but nothing in it actually calls
+-- Luadventure.anything eagerly - every reference sits inside a function
+-- body that doesn't run until real gameplay, well after this point.
+Luadventure.player = player
+Luadventure.logActivity = logActivity
+Luadventure.logCombat = logCombat
+Luadventure.dialogue = dialogue
+Luadventure.pickLimb = pickLimb
+Luadventure.damagePart = damagePart
+Luadventure.healPart = healPart
+Luadventure.applyPartStatus = applyPartStatus
+Luadventure.applyCharacterStatus = applyCharacterStatus
+Luadventure.isDead = isDead
+Luadventure.isLimbFunctional = isLimbFunctional
+Luadventure.getLimbStrength = getLimbStrength
+Luadventure.getFinalHitChance = getFinalHitChance
+Luadventure.gridDistance = gridDistance
+Luadventure.collectLabeledParts = collectLabeledParts
+Luadventure.getPartLocalTags = getPartLocalTags
+Luadventure.walkBody = walkBody
+Luadventure.combatState = combatState
+Luadventure.newTorso = newTorso
+Luadventure.attachPart = attachPart
+Luadventure.installCategoryOrgan = installCategoryOrgan
+Luadventure.installGenericOrgan = installGenericOrgan
+Luadventure.recalcGlobalTags = recalcGlobalTags
+Luadventure.newHumanBody = newHumanBody
+Luadventure.newInsectoidBody = newInsectoidBody
+
 -- A read-only version of pickLimb's list, for the Look action - a size-up,
 -- not a targeting prompt, so it never asks the player to choose one, just
 -- waits for any key to close.
@@ -3220,132 +2741,6 @@ local function dropEquippedItem(droppedItems, slot)
     player.equipped[slot] = "none"
     table.insert(droppedItems, { slot = slot, weaponId = weaponId })
     return weaponId
-end
-
--- Effects attached here rather than up in abilityEntries itself, since they
--- need showCombatMessage/pickLimb/getFinalHitChance/etc, none of which
--- exist yet up there.
-abilityEntries.adrenaline_shot.effect = function(user)
-    applyCharacterStatus(user, "adrenaline")
-    logCombat("You use the Adrenal Auto-Injector!")
-end
-
--- A special attack in its own right rather than an instant buff: one single
--- swing (one hit roll) that, on a hit, saws through the target for five
--- separate 5-10 damage instances (still STRENGTH-scaled, still slashing),
--- each triggering the chain sword's onHit individually - five landed cuts
--- stacks a full ten bleed. It's one swing, not five, so a miss is a miss
--- for the whole thing; runEncounter refunds the cooldown in that case (see
--- the "miss" return below), since revving up for nothing shouldn't cost you
--- the same as connecting. Melee range still applies, same as any other
--- attack with this weapon.
-abilityEntries.rev_it_up.effect = function(user, enemy, sourcePart)
-    local weapon = weaponEntries.chain_sword
-    local distance = gridDistance(user.gridX, user.gridY, enemy.gridX, enemy.gridY)
-
-    if distance > weapon.range then
-        logCombat("Nothing is in range.")
-        return "noop"
-    end
-
-    local target, label = pickLimb("Target the " .. enemy.name .. "'s:", enemy.body)
-    if not target then
-        return "noop"
-    end
-    combatState.redrawPanes()
-    local hitChance = getFinalHitChance(user, enemy, weapon, distance)
-
-    if math.random() > hitChance then
-        logCombat("You rev up your Chain Sword and swing at the " .. enemy.name .. "'s " .. label .. "... You miss!")
-        return "miss"
-    end
-
-    local strength = user.stats.strength * getLimbStrength(user, sourcePart)
-    logCombat("The Chain Sword saws through the " .. enemy.name .. "'s " .. label .. "!")
-
-    local totalDealt = 0
-    for i = 1, 5 do
-        if isDead(enemy.body) then
-            break
-        end
-
-        local roll = math.random(5, 10)
-        local raw = math.floor(roll * strength + 0.5)
-        local dealt = damagePart(enemy, target, raw, weapon.damageType)
-        if weapon.onHit then
-            weapon.onHit(target)
-        end
-        totalDealt = totalDealt + dealt
-        logCombat("Cut " .. i .. " deals " .. dealt .. "!")
-        combatState.flash(enemy.gridX, enemy.gridY, "E")
-    end
-
-    logCombat("You dealt " .. totalDealt .. " damage to the " .. enemy.name .. "'s " .. label .. "!")
-end
-
--- Heals yourself, not the opponent - a wound-tending action, not an attack.
--- `enemy` is only ever real when this is called mid-fight (runEncounter
--- always passes one; the inventory screen's own "use immediately" doesn't
--- have one at all) - used here purely to decide how to report the result,
--- not for anything about the heal itself.
-abilityEntries.use_dermoregenesis_salve.effect = function(user, enemy)
-    local target, label = pickLimb("Target your own:", user.body)
-    if not target then
-        return "noop"
-    end
-    local healed = healPart(target, 25)
-    if enemy then
-        combatState.redrawPanes()
-        logCombat("You apply the salve to your " .. label .. "! Healed " .. healed .. " (" .. target.health .. "/" .. target.maxHealth .. ")")
-    else
-        -- Outside a fight there's no combat log to report to (see
-        -- logCombat) - this goes to the overworld's activity log instead.
-        logActivity(dialogue("{{name}} used the Dermoregenesis Salve on {{him}}self.", user))
-        logActivity(dialogue("{{name}} healed for " .. healed .. ".", user))
-    end
-end
-
--- A single heavy shot: double a normal shot's damage, three shots of ammo,
--- no cooldown to make up for always costing the full turn. Fires (and
--- burns ammo) whether it hits or not, same as an ordinary shot.
-local CHARGE_SHOT_AMMO_COST = 3
-
-abilityEntries.charge_shot.effect = function(user, enemy, sourcePart, sourceSlot)
-    local weapon = weaponEntries.laser_pistol
-    local distance = gridDistance(user.gridX, user.gridY, enemy.gridX, enemy.gridY)
-
-    if distance > weapon.range then
-        logCombat("Nothing is in range.")
-        return "noop"
-    end
-
-    if (user.ammo[sourceSlot] or 0) < CHARGE_SHOT_AMMO_COST then
-        logCombat("Not enough ammo to charge a shot.")
-        return "noop"
-    end
-
-    local target, label = pickLimb("Target the " .. enemy.name .. "'s:", enemy.body)
-    if not target then
-        return "noop"
-    end
-    combatState.redrawPanes()
-    local hitChance = getFinalHitChance(user, enemy, weapon, distance)
-    local hitPercent = math.floor(hitChance * 100 + 0.5)
-
-    user.ammo[sourceSlot] = user.ammo[sourceSlot] - CHARGE_SHOT_AMMO_COST
-
-    logCombat("You charge the Laser Pistol and fire at the " .. enemy.name .. "'s " .. label .. " (" .. hitPercent .. "% to hit)...")
-
-    if math.random() > hitChance then
-        logCombat("You miss!")
-        return
-    end
-
-    local roll = math.random(weapon.damage.min, weapon.damage.max)
-    local dealt = damagePart(enemy, target, roll * 2, weapon.damageType)
-
-    logCombat("The charged shot hits for " .. dealt .. "! (" .. target.health .. "/" .. target.maxHealth .. ")")
-    combatState.flash(enemy.gridX, enemy.gridY, "E")
 end
 
 -- "The scene" is whoever's left to fight this encounter - just one enemy
