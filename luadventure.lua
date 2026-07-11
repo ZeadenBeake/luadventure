@@ -1173,6 +1173,8 @@ function engine.getObjectGlyph(obj)
             return "."
         end
         return obj.orientation == "horizontal" and "-" or "|"
+    elseif obj.kind == "window" then
+        return ":"
     elseif obj.kind == "person" then
         if not obj.questId then
             return "0"
@@ -1196,6 +1198,130 @@ function engine.getCameraOrigin(loc, focusX, focusY, viewW, viewH)
         return math.max(1, math.min(focus - math.floor(view / 2), maxOrigin))
     end
     return axis(focusX, loc.width, viewW), axis(focusY, loc.height, viewH)
+end
+
+-- Precomputes which floor tiles belong to which sealed "zone" - a static
+-- flood-fill run once per location (see the bottom of this file and
+-- engine.applySaveData for the only call sites) rather than every frame,
+-- since only a wall or a door (open or closed - its state doesn't matter
+-- here, only its position) ever seals a room; glass/windows are freely
+-- passable, so two areas joined only by a window permanently merge into
+-- one zone. Populates loc.tileZone[x][y] (left nil for wall/door tiles
+-- themselves - see engine.drawRoomView, which always renders those
+-- regardless of visibility, same as you can always see a door whether or
+-- not you can see through it) and loc.doorZones[door] = {a=, b=} (the
+-- zone on each side of a door, keyed by the door object itself - a
+-- vertical door's bar blocks left/right passage, so it checks its
+-- horizontal neighbors for the two zones; a horizontal door checks
+-- vertical neighbors).
+function engine.computeRoomZones(loc)
+    local function isBoundary(x, y)
+        local obj = engine.findObjectAt(loc, x, y)
+        return obj and (obj.kind == "wall" or obj.kind == "door")
+    end
+
+    loc.tileZone = {}
+    for x = 1, loc.width do
+        loc.tileZone[x] = {}
+    end
+
+    local nextZone = 1
+    local deltas = { { dx = 0, dy = -1 }, { dx = 0, dy = 1 }, { dx = -1, dy = 0 }, { dx = 1, dy = 0 } }
+    for x = 1, loc.width do
+        for y = 1, loc.height do
+            if not loc.tileZone[x][y] and not isBoundary(x, y) then
+                local zoneId = nextZone
+                nextZone = nextZone + 1
+                loc.tileZone[x][y] = zoneId
+                local stack = { { x = x, y = y } }
+                while #stack > 0 do
+                    local cell = table.remove(stack)
+                    for _, delta in ipairs(deltas) do
+                        local nx, ny = cell.x + delta.dx, cell.y + delta.dy
+                        if nx >= 1 and nx <= loc.width and ny >= 1 and ny <= loc.height
+                            and not loc.tileZone[nx][ny] and not isBoundary(nx, ny) then
+                            loc.tileZone[nx][ny] = zoneId
+                            table.insert(stack, { x = nx, y = ny })
+                        end
+                    end
+                end
+            end
+        end
+    end
+
+    loc.doorZones = {}
+    for _, obj in ipairs(loc.objects or {}) do
+        if obj.kind == "door" then
+            local ax, ay, bx, by
+            if obj.orientation == "vertical" then
+                ax, ay, bx, by = obj.x - 1, obj.y, obj.x + 1, obj.y
+            else
+                ax, ay, bx, by = obj.x, obj.y - 1, obj.x, obj.y + 1
+            end
+            loc.doorZones[obj] = {
+                a = loc.tileZone[ax] and loc.tileZone[ax][ay],
+                b = loc.tileZone[bx] and loc.tileZone[bx][by],
+            }
+        end
+    end
+end
+
+-- The small set of zones currently reachable from the player's position
+-- through open doors (walking the static graph engine.computeRoomZones
+-- built) - cached on loc.visibleZones and recomputed only on the two
+-- events that can actually change it: a door toggling (see
+-- engine.toggleDoor) or the player's own tile landing in a different
+-- zone than before (see engine.refreshPlayerZone) - never on every
+-- render.
+function engine.recomputeVisibleZones(loc)
+    local startZone = loc.tileZone[player.gridX] and loc.tileZone[player.gridX][player.gridY]
+    local visible = {}
+    if startZone then
+        visible[startZone] = true
+    else
+        -- Standing exactly on a door - the only zoneless tile that's
+        -- ever walkable (see engine.computeRoomZones) - whichever door
+        -- it is must be open right now, since a closed one blocks its
+        -- own tile outright; both zones it borders are immediately
+        -- visible from right in the doorway.
+        local obj = engine.findObjectAt(loc, player.gridX, player.gridY)
+        local doorZones = obj and loc.doorZones[obj]
+        if doorZones then
+            if doorZones.a then visible[doorZones.a] = true end
+            if doorZones.b then visible[doorZones.b] = true end
+        end
+    end
+
+    local changed = true
+    while changed do
+        changed = false
+        for door, zones in pairs(loc.doorZones or {}) do
+            if door.open and zones.a and zones.b then
+                if visible[zones.a] and not visible[zones.b] then
+                    visible[zones.b] = true
+                    changed = true
+                elseif visible[zones.b] and not visible[zones.a] then
+                    visible[zones.a] = true
+                    changed = true
+                end
+            end
+        end
+    end
+
+    loc.visibleZones = visible
+end
+
+-- Re-seeds loc.visibleZones only when the player's own zone actually
+-- changed since last checked (loc.playerZone) - called after every
+-- successful move (see engine.tryMove) so an ordinary step within the
+-- same zone doesn't redo the door fixed-point loop for nothing.
+function engine.refreshPlayerZone()
+    local loc = world[player.location]
+    local zone = loc.tileZone[player.gridX] and loc.tileZone[player.gridX][player.gridY]
+    if zone ~= loc.playerZone then
+        loc.playerZone = zone
+        engine.recomputeVisibleZones(loc)
+    end
 end
 
 -- Shared by engine.drawMain and engine.drawCombatField: draws a
@@ -1236,8 +1362,20 @@ function engine.drawRoomView(win, loc, focusX, focusY, extraCells)
             elseif overlay[gridY] and overlay[gridY][gridX] then
                 line[col] = overlay[gridY][gridX]
             else
-                local obj = engine.findObjectAt(loc, gridX, gridY)
-                line[col] = obj and engine.getObjectGlyph(obj) or "."
+                -- A tile with no zone of its own (a wall or a door - see
+                -- engine.computeRoomZones) always shows its real glyph;
+                -- it's the boundary itself, visible from either side.
+                -- Anything else only shows if its zone is currently
+                -- reachable (see loc.visibleZones) - otherwise it's
+                -- "something's here, you can't see it", a blank space
+                -- distinct from the "~" out-of-room-bounds margin above.
+                local zoneId = loc.tileZone and loc.tileZone[gridX] and loc.tileZone[gridX][gridY]
+                if zoneId and not (loc.visibleZones and loc.visibleZones[zoneId]) then
+                    line[col] = " "
+                else
+                    local obj = engine.findObjectAt(loc, gridX, gridY)
+                    line[col] = obj and engine.getObjectGlyph(obj) or "."
+                end
             end
         end
         win.setCursorPos(1, row + 1)
@@ -3942,11 +4080,26 @@ function engine.applySaveData(data)
 
     engine.applyWorldSnapshot(data.world)
 
+    -- applyWorldSnapshot just replaced every location's objects outright,
+    -- doors included - loc.doorZones is keyed by the door object's own
+    -- identity (see engine.computeRoomZones), so it'd be pointing at
+    -- objects that no longer exist in loc.objects at all. Room shapes
+    -- themselves never change at runtime, so re-running it is cheap and
+    -- always correct, whether this load came from the title screen or
+    -- an in-game save terminal.
+    for _, loc in pairs(world) do
+        engine.computeRoomZones(loc)
+    end
+
     local locName, obj = engine.findSavePointById(data.saveId)
     if locName and obj then
         player.location = locName
         player.gridX, player.gridY = engine.findSpawnSpotNear(world[locName], obj)
     end
+
+    local loc = world[player.location]
+    loc.playerZone = loc.tileZone[player.gridX] and loc.tileZone[player.gridX][player.gridY]
+    engine.recomputeVisibleZones(loc)
 end
 
 -- A slot's menu label: what's actually in it, so save/load can show a
@@ -4050,6 +4203,7 @@ end
 -- it's ending up in, purely for the log line.
 function engine.toggleDoor(obj, open)
     obj.open = open
+    engine.recomputeVisibleZones(world[player.location])
     engine.logActivity(engine.dialogue("{{name}} " .. (open and "opened" or "closed") .. " the door.", player))
 end
 
@@ -4089,6 +4243,7 @@ function engine.tryMove(dir)
             -- Walking onto it is the whole interaction - see engine.collectItem.
             player.gridX, player.gridY = nx, ny
             player.steps = player.steps + 1
+            engine.refreshPlayerZone()
             engine.collectItem(loc, obj)
             message = ""
             return true, false, false
@@ -4112,6 +4267,7 @@ function engine.tryMove(dir)
 
         player.gridX, player.gridY = nx, ny
         player.steps = player.steps + 1
+        engine.refreshPlayerZone()
         message = ""
         return true, false, false
     end
@@ -4134,6 +4290,7 @@ function engine.tryMove(dir)
         player.gridX, player.gridY = math.min(player.gridX, nextLoc.width), nextLoc.height
     end
     player.steps = player.steps + 1
+    engine.refreshPlayerZone()
     message = ""
     engine.logActivity(engine.dialogue("{{name}} went to " .. nextLoc.name .. ".", player))
     return true, false, false
@@ -4558,6 +4715,16 @@ if menuChoice == "quit" then
 end
 if menuChoice == "new" then
     engine.runCharacterCreation()
+    -- A fresh game's world never had its zones computed at all (a
+    -- loaded one already did, inside engine.applySaveData) - seed both
+    -- the static graph and the starting room's visible set before the
+    -- first frame ever renders.
+    for _, loc in pairs(world) do
+        engine.computeRoomZones(loc)
+    end
+    local loc = world[player.location]
+    loc.playerZone = loc.tileZone[player.gridX] and loc.tileZone[player.gridX][player.gridY]
+    engine.recomputeVisibleZones(loc)
 end
 engine.render()
 

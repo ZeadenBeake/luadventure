@@ -749,7 +749,14 @@ local world = {
             { kind = "wall", x1 = 20, y1 = 10, x2 = 20, y2 = 14 },
             { kind = "wall", x1 = 20, y1 = 16, x2 = 20, y2 = 20 },
             { kind = "door", x = 20, y = 15, orientation = "vertical", open = false },
-            { kind = "wall", x1 = 30, y1 = 10, x2 = 30, y2 = 20 },
+            -- A window in the east wall, opposite the entrance - lets
+            -- anyone outside see the dummy waiting in here without a
+            -- door for it to walk through (see the engine's zone/
+            -- visibility system: glass merges zones permanently, unlike
+            -- a door's own open/closed state).
+            { kind = "wall", x1 = 30, y1 = 10, x2 = 30, y2 = 14 },
+            { kind = "window", x = 30, y = 15 },
+            { kind = "wall", x1 = 30, y1 = 16, x2 = 30, y2 = 20 },
             { kind = "enemy", x = 25, y = 15 },
         },
     },
