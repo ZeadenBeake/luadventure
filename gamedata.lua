@@ -32,7 +32,9 @@
     player object), `Luadventure.logCombat`/`.logActivity` (report
     something, see the ability effects below for examples), `.dialogue`
     (fills `{{name}}`/`{{subject}}`/`{{object}}` templates), `.pickLimb`
-    (prompt to target a limb on a body), `.damagePart`/`.healPart`,
+    (prompt to target a limb on a body), `.pickSpecialAmmo` (prompt to pick
+    a reserve-shell item from inventory - see the shotgun's Special Shot),
+    `.removeInventoryItems`, `.damagePart`/`.healPart`,
     `.applyPartStatus`/`.applyCharacterStatus`, `.isDead`/`.isLimbFunctional`,
     `.getLimbStrength`/`.getFinalHitChance`, `.gridDistance`,
     `.collectLabeledParts`/`.getPartLocalTags`/`.walkBody`, `.combatState`
@@ -373,6 +375,37 @@ local weaponEntries = {
         abilities = { "spray" },
         itemId = "rifle",
     },
+
+    -- The first `imprecise` weapon (see engine.pickAttack/engine.pickWeightedPart) -
+    -- there's no limb to pick at all, just one roll for whether the whole
+    -- spread connects (at the generic aimDifficulty-1 chance every weapon's
+    -- own preview line already shows), then `pellets` separate rolls for
+    -- which part each one happens to catch, weighted by the inverse of that
+    -- part's own aimDifficulty - a part that's already hard to aim for on
+    -- purpose is also less likely to catch a stray pellet by chance. `damage`
+    -- is read per-pellet here, not per-shot, so the real payout is `pellets`
+    -- times this range - roughly double a rifle's already-high average, at
+    -- the cost of a much shorter range and spread heavy enough to make that
+    -- range mostly theoretical (an all-or-nothing miss on the whole volley,
+    -- not just a per-pellet penalty). Grants no ability of its own the usual
+    -- way - see abilityEntries.special_shot and itemEntries.slug_round for
+    -- what it does instead.
+    shotgun = {
+        name = "Shotgun",
+        damage = { min = 5, max = 9 },
+        type = "ranged",
+        range = 8,
+        spread = 6,
+        imprecise = true,
+        pellets = 8,
+        damageType = "piercing",
+        handedness = "two-handed",
+        ammoCapacity = 6,
+        ammoPerShot = 1,
+        ammoClass = "shotgun",
+        abilities = { "special_shot" },
+        itemId = "shotgun",
+    },
 }
 
 -- A chain sword bites deep and keeps bleeding; a sting is barely a scratch
@@ -407,11 +440,41 @@ local itemEntries = {
     chain_sword = { name = "Chain Sword", bulk = 2, weaponId = "chain_sword" },
     laser_pistol = { name = "Laser Pistol", bulk = 1, weaponId = "laser_pistol" },
     rifle = { name = "Rifle", bulk = 4, weaponId = "rifle" },
+    shotgun = { name = "Shotgun", bulk = 4, weaponId = "shotgun" },
 
     -- Kinetic ammo: a bullet is one shot, plain and simple, reloaded exactly
     -- like you'd expect - pull however many are missing from the gun out of
     -- inventory.
     bullet = { name = "Bullet", bulk = 0.1, ammoClass = "kinetic" },
+
+    -- Shotgun shells are their own ammo class - different enough from a
+    -- bullet or a charge to deserve one - but reload the exact same way,
+    -- one shell in inventory per shot of capacity regained (see
+    -- engine.getAmmoItemId).
+    shotgun_shell = { name = "Shotgun Shell", bulk = 0.1, ammoClass = "shotgun" },
+
+    -- A "special" shell: never loaded into the gun's ordinary ammo pool at
+    -- all (no ammoClass - engine.getAmmoItemId/engine.reloadWeapon never
+    -- see it), just a loose reserve round the Special Shot ability (see
+    -- abilityEntries.special_shot) picks straight out of inventory and
+    -- fires on its own, one at a time. `specialAmmoFor` is what makes it
+    -- show up in that picker (engine.pickSpecialAmmo) at all - matched
+    -- against a weapon id, not an ammo class, since a special round is
+    -- its own one-off thing rather than a fungible restock. A slug is a
+    -- single solid piece of metal rather than a shell full of pellets -
+    -- real single-target stopping power (`damage`, read by
+    -- special_shot's own effect rather than the weapon's ordinary
+    -- per-pellet one) and `ignoresEndurance` (a target's flat damage-
+    -- reduction shrug, see engine.damagePart) to sell "armor-piercing",
+    -- at the cost of drawing (and paying for) each one individually
+    -- rather than just topping up a magazine.
+    slug_round = {
+        name = "Slug Round",
+        bulk = 0.3,
+        specialAmmoFor = "shotgun",
+        damage = { min = 35, max = 50 },
+        ignoresEndurance = true,
+    },
 
     -- Energy ammo is fudged, since we can't store a partial charge on a
     -- single stateful "battery" item without a bigger inventory rework.
@@ -483,6 +546,13 @@ local abilityEntries = {
         name = "Spray",
         speed = "full", -- the rifle's own normal shot already is, being two-handed
         cooldown = 3,
+    },
+    special_shot = {
+        name = "Special Shot",
+        speed = "full", -- the shotgun's own normal shot already is, being two-handed
+        -- No cooldown at all - the real constraint is stocking special
+        -- shells in the first place (see itemEntries.slug_round), not
+        -- waiting one out.
     },
 }
 
@@ -664,6 +734,57 @@ abilityEntries.spray.effect = function(user, enemy, sourcePart, sourceSlot)
     end
 
     Luadventure.logCombat("You dealt " .. totalDealt .. " damage to the " .. enemy.name .. "'s " .. label .. "!")
+end
+
+-- The shotgun's whole "special attack" is that it doesn't really have one
+-- - no cooldown to wait out, just whether there's still a special shell
+-- (see itemEntries.slug_round) actually in the bag. Luadventure.pickSpecialAmmo
+-- surfaces every distinct one carried (matched by `specialAmmoFor`, not a
+-- fixed ammo class - a special round is a one-off pull from inventory,
+-- never the gun's ordinary loaded pool); picking one, then a limb same as
+-- any other precise attack, fires that single shell on its own terms
+-- (its own `damage`, and `ignoresEndurance` if it sets that) rather than
+-- the weapon's usual per-pellet spread.
+abilityEntries.special_shot.effect = function(user, enemy, sourcePart, sourceSlot)
+    local weapon = weaponEntries.shotgun
+    local distance = Luadventure.gridDistance(user.gridX, user.gridY, enemy.gridX, enemy.gridY)
+
+    if distance > weapon.range then
+        Luadventure.logCombat("Nothing is in range.")
+        return "noop"
+    end
+
+    local shellId = Luadventure.pickSpecialAmmo(user, "shotgun", "Fire which shell?")
+    Luadventure.combatState.redrawPanes()
+    if not shellId or shellId == "back" then
+        return "noop"
+    end
+    local shell = itemEntries[shellId]
+
+    local target, label = Luadventure.pickLimb("Target the " .. enemy.name .. "'s:", enemy.body)
+    if not target then
+        return "noop"
+    end
+    Luadventure.combatState.redrawPanes()
+    local hitChance = Luadventure.getFinalHitChance(user, enemy, weapon, distance, target)
+    local hitPercent = math.floor(hitChance * 100 + 0.5)
+
+    -- The shell's spent the instant it's chambered, hit or miss - same
+    -- "firing burns it either way" rule ordinary ammo follows.
+    Luadventure.removeInventoryItems(user, shellId, 1)
+
+    Luadventure.logCombat("You load a " .. shell.name .. " into the " .. weapon.name .. " and fire at the " .. enemy.name .. "'s " .. label .. " (" .. hitPercent .. "% to hit)...")
+
+    if math.random() > hitChance then
+        Luadventure.logCombat("You miss!")
+        return "miss"
+    end
+
+    local roll = math.random(shell.damage.min, shell.damage.max)
+    local dealt = Luadventure.damagePart(enemy, target, roll, weapon.damageType, shell.ignoresEndurance)
+
+    Luadventure.logCombat("It punches through for " .. dealt .. "! (" .. target.health .. "/" .. target.maxHealth .. ")")
+    Luadventure.combatState.flash(enemy.gridX, enemy.gridY, "E")
 end
 
 -- Every species a character can be built as. `build(globalTags)` returns a

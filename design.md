@@ -549,9 +549,13 @@ Shot), `stinger_sting` (melee, piercing, barely any damage but applies 5
 stacks of poison - see "Natural weapons"), `rifle` (ranged, piercing,
 12-shot kinetic weapon, roughly double a pistol's damage with better range
 and less spread, grants Spray - see "Two-handed weapons" for what makes it
-different to wield). `handedness` (`"one-handed"` or `"two-handed"`)
-decides whether a normal attack with it is a quick or full action - and,
-for `"two-handed"`, quite a bit more besides.
+different to wield), `shotgun` (ranged, piercing, 6-shot, 8 pellets per
+blast at a punishing spread - see "Imprecise weapons" - grants Special
+Shot, which doesn't come from the shotgun itself so much as from whatever
+special shells happen to be in the bag - see "Ammo"). `handedness`
+(`"one-handed"` or `"two-handed"`) decides whether a normal attack with it
+is a quick or full action - and, for `"two-handed"`, quite a bit more
+besides.
 
 ### Two-handed weapons
 
@@ -649,6 +653,25 @@ way to take it away is destroying the part carrying it (see "Limb
 destruction & disarming", which every attacker - natural weapon or not -
 is already subject to).
 
+### Imprecise weapons
+
+A weapon flagged `imprecise` (the shotgun, so far) skips limb-targeting
+entirely - `pickAttack`'s Fight branch never calls `pickLimb` for one at
+all. Instead: one roll decides whether the whole spread connects, at the
+same generic (no target part chosen, `aimDifficulty` 1) chance every
+weapon's own preview line already shows; a hit then rolls `pellets`
+separate part hits, each via `pickWeightedPart` (a `collectLabeledParts`
+list, weighted by the inverse of each part's own `aimDifficulty` - a part
+that's already harder to aim for on purpose is also less likely to catch a
+stray pellet by chance). `damage` on an imprecise weapon is read
+per-pellet, not per-shot, so the real payout per trigger pull is `pellets`
+times that range - a lot more than a single precise shot, offset by the
+whole volley being one all-or-nothing roll (no partial credit for some
+pellets connecting and others missing) rather than a per-pellet miss
+chance, plus a short `range` and heavy `spread` that make that range mostly
+theoretical in practice. Ammo still burns once per trigger pull
+(`ammoPerShot`), same as any other weapon.
+
 ### Limb destruction & disarming
 
 A destroyed limb takes everything attached to it (further from the root)
@@ -682,7 +705,9 @@ knowing anything about *why* something got dropped.
 
 Weapons with `ammoCapacity` need a matching ammo item to reload
 (`ammoClass`/`getAmmoItemId`) - `bullet` for kinetic weapons, `energy_charge`
-for energy weapons. Ammo is tracked per-**named-slot** on the combatant
+for energy weapons, `shotgun_shell` for the shotgun's own `"shotgun"` class
+(different enough from either to warrant its own, though it reloads
+exactly the same way). Ammo is tracked per-**named-slot** on the combatant
 (`character.ammo`) - an equip slot's own label, or a belt slot's synthetic
 `"beltN"` one (see "Inventory & equipment") - never on the weapon template
 itself, and never attached to the item sitting in the bag either, since
@@ -705,6 +730,25 @@ the *item*. The one place this doesn't apply is a straight slot-to-slot
 move (an equip slot to a belt slot or back, see "Inventory & equipment") -
 there, the ammo count just travels along with the swap directly, since both
 ends are real tracked slots and nothing needs to spill.
+
+**Special ammo**: some items (the shotgun's `slug_round`) never enter a
+weapon's ordinary loaded pool at all - no `ammoClass`, so
+`reloadWeapon`/`getAmmoItemId` don't recognize them, and `Reload` never
+lists them. Instead an item's `specialAmmoFor` names which weapon id can
+fire it, and a weapon-granted ability (`special_shot`, on the shotgun)
+reads that off inventory directly: `pickSpecialAmmo(combatant, weaponId,
+prompt)` lists every distinct matching item id still carried (with a
+count), the ability's own `effect` removes exactly one on firing
+(`removeInventoryItems`), same "burns whether it hits or not" rule ordinary
+ammo follows. This is a one-off pull from the bag, not a restock of
+anything - there's no cooldown to gate it either, the way there is for
+Rev it up!/Charge Shot/Spray; the real cost is just having stocked one in
+the first place. A special round can also declare its own `damage` (read
+by the ability, not the weapon's own per-pellet one) and `ignoresEndurance`
+- passed straight through to `damagePart`'s own optional argument, skipping
+a target's flat endurance reduction (but not its resistance or worn
+coverage) entirely, for something billed as armor-piercing enough to earn
+that.
 
 ## Inventory & equipment
 

@@ -531,6 +531,31 @@ function engine.collectLabeledParts(torso)
     return parts
 end
 
+-- Picks one entry from a engine.collectLabeledParts list, weighted by the
+-- inverse of each part's own aimDifficulty (default 1) - used by an
+-- imprecise weapon's spread of hits (see weaponEntries.shotgun), where the
+-- player never chooses a target part: one that's already hard to aim for on
+-- purpose is also less likely to catch a stray pellet by chance.
+function engine.pickWeightedPart(parts)
+    local totalWeight = 0
+    for _, entry in ipairs(parts) do
+        totalWeight = totalWeight + 1 / (entry.part.aimDifficulty or 1)
+    end
+    local roll = math.random() * totalWeight
+    local cumulative = 0
+    for _, entry in ipairs(parts) do
+        cumulative = cumulative + 1 / (entry.part.aimDifficulty or 1)
+        if roll <= cumulative then
+            return entry.part, entry.label
+        end
+    end
+    -- Floating-point rounding could in principle leave `roll` a hair past
+    -- the last cumulative weight - fall back to the last entry rather than
+    -- returning nothing.
+    local last = parts[#parts]
+    return last.part, last.label
+end
+
 -- Carrying capacity: 10x average limb strength across the whole body, plus
 -- whatever flat bonus equipment grants (backpacks etc - none exist yet, but
 -- bulkBonus is where they'd add in).
@@ -614,6 +639,8 @@ function engine.getAmmoItemId(weapon)
         return "bullet"
     elseif weapon.ammoClass == "energy" then
         return "energy_charge"
+    elseif weapon.ammoClass == "shotgun" then
+        return "shotgun_shell"
     end
     return nil
 end
@@ -732,13 +759,17 @@ end
 -- applied, post-everything, so callers can report it honestly. Otherwise
 -- doesn't do anything beyond tracking health yet - stat penalties for
 -- damaged/destroyed limbs are a later concern. Only a MORTAL part reaching
--- 0 has any effect right now (see engine.isDead).
-function engine.damagePart(owner, part, amount, damageType)
+-- 0 has any effect right now (see engine.isDead). `ignoreEndurance` (only
+-- the shotgun's slug round sets this so far - see itemEntries.slug_round)
+-- skips the endurance step entirely, for something billed as armor-piercing
+-- enough to shrug that reduction off - still respects resistance and worn
+-- coverage, since neither of those is what "endurance" means here.
+function engine.damagePart(owner, part, amount, damageType, ignoreEndurance)
     local resistance = 1
     if damageType ~= "untyped" then
         resistance = (part.resistances and part.resistances[damageType]) or 1
     end
-    local endurance = part.endurance or 0
+    local endurance = ignoreEndurance and 0 or (part.endurance or 0)
     local coverage = engine.getCoverage(owner, part, damageType)
     local applied = math.max(0, math.floor(amount * resistance * (1 - endurance) - coverage + 0.5))
     part.health = math.max(0, part.health - applied)
@@ -2783,8 +2814,12 @@ function engine.pickAttack(equipped, enemy, distance, restricted)
                 math.floor(strength * 100 + 0.5), engine.formatDamageRange(scaled), hitPercent, speedTag, ammoTag
             )
         else
-            line = ("[%s] %s - %s %s dmg (ranged, %d%% to hit)%s%s"):format(
-                engine.digitLabel(i), label, weapon.name, engine.formatDamageRange(weapon.damage), hitPercent, speedTag, ammoTag
+            -- An imprecise weapon's own `damage` is per-pellet, not
+            -- per-shot (see engine.pickWeightedPart) - shown as such
+            -- rather than looking like the whole blast's total.
+            local pelletsTag = weapon.imprecise and (" x" .. weapon.pellets .. " pellets") or ""
+            line = ("[%s] %s - %s %s dmg%s (ranged, %d%% to hit)%s%s"):format(
+                engine.digitLabel(i), label, weapon.name, engine.formatDamageRange(weapon.damage), pelletsTag, hitPercent, speedTag, ammoTag
             )
         end
         row = row + engine.writeWrapped(combatWin, 1, row, line)
@@ -2841,6 +2876,56 @@ function engine.pickLimb(prompt, torso)
     end
 end
 
+-- A generic picker for "special" ammo - anything in `combatant`'s
+-- inventory whose itemEntries.specialAmmoFor matches `weaponId` (see
+-- itemEntries.slug_round), one line per distinct item id with its carried
+-- count, same digit-menu convention as everywhere else. Matched by weapon
+-- id rather than a shared ammo class, since a special round is a one-off
+-- pull from inventory, never something that tops up a weapon's ordinary
+-- loaded pool (see engine.getAmmoItemId/engine.reloadWeapon for that).
+-- Returns nil if nothing qualifies at all, or "back" if the player
+-- explicitly backs out instead.
+function engine.pickSpecialAmmo(combatant, weaponId, prompt)
+    local counts, order = {}, {}
+    for _, itemId in ipairs(combatant.inventory) do
+        local item = itemEntries[itemId]
+        if item and item.specialAmmoFor == weaponId then
+            if not counts[itemId] then
+                table.insert(order, itemId)
+            end
+            counts[itemId] = (counts[itemId] or 0) + 1
+        end
+    end
+
+    if #order == 0 then
+        return nil
+    end
+
+    combatWin.setVisible(false)
+    combatWin.clear()
+    combatWin.setCursorPos(1, 1)
+    combatWin.write(prompt)
+    local row = 3
+    for i, itemId in ipairs(order) do
+        row = row + engine.writeWrapped(combatWin, 1, row, ("[%s] %s x%d"):format(
+            engine.digitLabel(i), itemEntries[itemId].name, counts[itemId]
+        ))
+    end
+    local backIndex = #order + 1
+    engine.writeWrapped(combatWin, 1, row, "[" .. engine.digitLabel(backIndex) .. "] Back")
+    combatWin.setVisible(true)
+
+    while true do
+        local _, key = os.pullEvent("key")
+        local index = keyToNumber[key]
+        if index == backIndex then
+            return "back"
+        elseif index and order[index] then
+            return order[index]
+        end
+    end
+end
+
 -- Populates the bridge table gamedata.lua's content reaches back into the
 -- engine through - see its own header comment for the full list with
 -- signatures. Done here, in one block, once everything on that list
@@ -2855,6 +2940,8 @@ Luadventure.logActivity = engine.logActivity
 Luadventure.logCombat = engine.logCombat
 Luadventure.dialogue = engine.dialogue
 Luadventure.pickLimb = engine.pickLimb
+Luadventure.pickSpecialAmmo = engine.pickSpecialAmmo
+Luadventure.removeInventoryItems = engine.removeInventoryItems
 Luadventure.damagePart = engine.damagePart
 Luadventure.healPart = engine.healPart
 Luadventure.applyPartStatus = engine.applyPartStatus
@@ -3686,12 +3773,22 @@ function engine.runEncounter(triggeringObject)
             elseif not attacker then
                 engine.logCombat("Nothing is in range.")
             else
-                local target, label = engine.pickLimb("Target the " .. foe.name .. "'s:", foe.body)
-                combatState.redrawPanes()
+                local attackerLabel = attacker.label
+                if weapon.handedness == "two-handed" then
+                    local labels = {}
+                    for _, hand in ipairs(engine.getWieldingHands(player, attacker.label)) do
+                        table.insert(labels, hand.label)
+                    end
+                    attackerLabel = table.concat(labels, "+")
+                end
 
-                if target then
-                    local hitChance = engine.getFinalHitChance(player, foe, weapon, distance, target)
-                    local hitPercent = math.floor(hitChance * 100 + 0.5)
+                if weapon.imprecise then
+                    -- No limb to pick at all - see engine.pickWeightedPart -
+                    -- just one roll for whether the whole spread connects,
+                    -- at the generic (no target part, aimDifficulty 1)
+                    -- chance engine.pickAttack's own preview line already
+                    -- showed; a hit then rolls each pellet's own target and
+                    -- damage separately.
                     speed = weapon.handedness == "two-handed" and "full" or "quick"
 
                     -- Firing burns ammo whether it hits or not.
@@ -3699,33 +3796,61 @@ function engine.runEncounter(triggeringObject)
                         player.ammo[attacker.label] = player.ammo[attacker.label] - (weapon.ammoPerShot or 1)
                     end
 
-                    local attackerLabel = attacker.label
-                    if weapon.handedness == "two-handed" then
-                        local labels = {}
-                        for _, hand in ipairs(engine.getWieldingHands(player, attacker.label)) do
-                            table.insert(labels, hand.label)
-                        end
-                        attackerLabel = table.concat(labels, "+")
-                    end
-
-                    engine.logCombat("Your " .. attackerLabel .. " swings with " .. weapon.name .. " at the " .. foe.name .. "'s " .. label .. " (" .. hitPercent .. "% to hit)...")
+                    local hitChance = engine.getFinalHitChance(player, foe, weapon, distance)
+                    local hitPercent = math.floor(hitChance * 100 + 0.5)
+                    engine.logCombat("Your " .. attackerLabel .. " fires " .. weapon.name .. " at the " .. foe.name .. " (" .. hitPercent .. "% to hit)...")
 
                     if math.random() > hitChance then
-                        engine.logCombat("You miss!")
+                        engine.logCombat("The whole spread misses!")
                     else
-                        local strength = 1
-                        if weapon.type == "melee" then
-                            strength = player.stats.strength * engine.getWeaponStrength(player, attacker, weapon)
+                        local parts = engine.collectLabeledParts(foe.body)
+                        local totalDealt = 0
+                        for i = 1, weapon.pellets do
+                            local pelletTarget, pelletLabel = engine.pickWeightedPart(parts)
+                            local roll = math.random(weapon.damage.min, weapon.damage.max)
+                            local dealt = engine.damagePart(foe, pelletTarget, roll, weapon.damageType)
+                            if weapon.onHit then
+                                weapon.onHit(pelletTarget)
+                            end
+                            totalDealt = totalDealt + dealt
+                            engine.logCombat("Pellet " .. i .. " hits the " .. pelletLabel .. " for " .. dealt .. "!")
                         end
-                        local roll = math.random(weapon.damage.min, weapon.damage.max)
-                        local raw = math.floor(roll * strength + 0.5)
-                        local dealt = engine.damagePart(foe, target, raw, weapon.damageType)
-                        if weapon.onHit then
-                            weapon.onHit(target)
+                        engine.logCombat("Dealt " .. totalDealt .. " total across " .. weapon.pellets .. " pellets!")
+                        combatState.flash(foe.gridX, foe.gridY, "E")
+                    end
+                else
+                    local target, label = engine.pickLimb("Target the " .. foe.name .. "'s:", foe.body)
+                    combatState.redrawPanes()
+
+                    if target then
+                        local hitChance = engine.getFinalHitChance(player, foe, weapon, distance, target)
+                        local hitPercent = math.floor(hitChance * 100 + 0.5)
+                        speed = weapon.handedness == "two-handed" and "full" or "quick"
+
+                        -- Firing burns ammo whether it hits or not.
+                        if weapon.ammoCapacity then
+                            player.ammo[attacker.label] = player.ammo[attacker.label] - (weapon.ammoPerShot or 1)
                         end
 
-                        engine.logCombat("Hits for " .. dealt .. "! (" .. target.health .. "/" .. target.maxHealth .. ")")
-                        combatState.flash(foe.gridX, foe.gridY, "E")
+                        engine.logCombat("Your " .. attackerLabel .. " swings with " .. weapon.name .. " at the " .. foe.name .. "'s " .. label .. " (" .. hitPercent .. "% to hit)...")
+
+                        if math.random() > hitChance then
+                            engine.logCombat("You miss!")
+                        else
+                            local strength = 1
+                            if weapon.type == "melee" then
+                                strength = player.stats.strength * engine.getWeaponStrength(player, attacker, weapon)
+                            end
+                            local roll = math.random(weapon.damage.min, weapon.damage.max)
+                            local raw = math.floor(roll * strength + 0.5)
+                            local dealt = engine.damagePart(foe, target, raw, weapon.damageType)
+                            if weapon.onHit then
+                                weapon.onHit(target)
+                            end
+
+                            engine.logCombat("Hits for " .. dealt .. "! (" .. target.health .. "/" .. target.maxHealth .. ")")
+                            combatState.flash(foe.gridX, foe.gridY, "E")
+                        end
                     end
                 end
             end
