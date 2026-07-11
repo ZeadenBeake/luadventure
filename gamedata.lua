@@ -34,7 +34,9 @@
     (fills `{{name}}`/`{{subject}}`/`{{object}}` templates), `.pickLimb`
     (prompt to target a limb on a body), `.pickSpecialAmmo` (prompt to pick
     a reserve-shell item from inventory - see the shotgun's Special Shot),
-    `.removeInventoryItems`, `.damagePart`/`.healPart`,
+    `.pickThrowTarget`/`.queuePendingGrenade` (aim and register a delayed
+    blast - see the grenade's Throw Grenade), `.removeInventoryItems`,
+    `.damagePart`/`.healPart`,
     `.applyPartStatus`/`.applyCharacterStatus`, `.isDead`/`.isLimbFunctional`,
     `.getLimbStrength`/`.getFinalHitChance`, `.gridDistance`,
     `.collectLabeledParts`/`.getPartLocalTags`/`.walkBody`, `.combatState`
@@ -432,6 +434,24 @@ local itemEntries = {
         abilities = { "use_dermoregenesis_salve" },
     },
 
+    -- A belt item, same as the salve above - never equipped, just thrown
+    -- straight from the belt via Throw Grenade. `range` is how far it can
+    -- be lobbed (see engine.pickThrowTarget), `radius` how far its blast
+    -- reaches from wherever it lands (engine.gridDistance, same metric
+    -- weapon range/spread already use); `damage`/`damageType` are read by
+    -- engine.resolvePendingGrenade, not by a weapon's own Fight
+    -- resolution - a grenade throw is its own action, not an attack roll
+    -- against a chosen limb.
+    grenade = {
+        name = "Grenade",
+        bulk = 1,
+        abilities = { "throw_grenade" },
+        range = 4,
+        radius = 2,
+        damage = { min = 20, max = 35 },
+        damageType = "bludgeoning",
+    },
+
     -- A weapon's carryable form - `weaponId` is what tells the inventory
     -- screen "moving this into an equip slot means wielding that weapon",
     -- the reverse of the weapon's own `itemId` (used going the other way,
@@ -553,6 +573,10 @@ local abilityEntries = {
         -- No cooldown at all - the real constraint is stocking special
         -- shells in the first place (see itemEntries.slug_round), not
         -- waiting one out.
+    },
+    throw_grenade = {
+        name = "Throw Grenade",
+        speed = "quick", -- the throw itself is quick; the blast is delayed, not the action
     },
 }
 
@@ -785,6 +809,32 @@ abilityEntries.special_shot.effect = function(user, enemy, sourcePart, sourceSlo
 
     Luadventure.logCombat("It punches through for " .. dealt .. "! (" .. target.health .. "/" .. target.maxHealth .. ")")
     Luadventure.combatState.flash(enemy.gridX, enemy.gridY, "E")
+end
+
+-- Doesn't target the enemy at all - a grenade goes wherever it's aimed
+-- (Luadventure.pickThrowTarget, a whole different picker than every other
+-- ability here: a reticle on the real map instead of a limb list), and
+-- doesn't deal any damage itself either - Luadventure.queuePendingGrenade
+-- just registers where it's going to land; engine.resolvePendingGrenade is
+-- what actually detonates it, one full enemy turn later (see the design
+-- doc's "Grenades" section for why). The item itself is consumed the
+-- usual way for a belt-granted ability (see engine.collectAbilities) the
+-- instant it's thrown, whether or not it ever gets to go off.
+abilityEntries.throw_grenade.effect = function(user, enemy, sourcePart, sourceSlot)
+    if Luadventure.combatState.pendingGrenade then
+        Luadventure.logCombat("You've already got one in the air.")
+        return "noop"
+    end
+
+    local grenade = itemEntries.grenade
+    local tx, ty = Luadventure.pickThrowTarget(grenade.range)
+    if not tx then
+        return "noop"
+    end
+    Luadventure.combatState.redrawPanes()
+
+    Luadventure.queuePendingGrenade(tx, ty, grenade.radius, grenade.damage, grenade.damageType)
+    Luadventure.logCombat("You lob the grenade toward (" .. tx .. ", " .. ty .. "). It'll go off after this round.")
 end
 
 -- Every species a character can be built as. `build(globalTags)` returns a

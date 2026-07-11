@@ -2379,6 +2379,13 @@ end
 -- likely to get tuned later.
 local REFLEX_QUICK_THRESHOLD = 1.25
 
+-- The most a grenade's blast damage can ever be reduced by reflex alone
+-- (see engine.getBlastDamageMultiplier) - a blast isn't dodged the way an
+-- aimed attack is, only softened, so this is a hard floor rather than
+-- letting a high enough reflex approach zero the way engine.getHitChance's
+-- own dodge term can.
+local GRENADE_MAX_DAMAGE_REDUCTION = 0.5
+
 -- Unlike aim, reflex reads each leg's full limb strength (organ/status
 -- multiplier and condition together), not just raw health - a leg-strength
 -- bonus or a fracture matters here exactly as it would for a punch.
@@ -2413,6 +2420,16 @@ function engine.getFinalHitChance(attacker, defender, weapon, distance, targetPa
     local chance = math.max(0, base - spreadPenalty)
     local aimDifficulty = (targetPart and targetPart.aimDifficulty) or 1
     return chance / aimDifficulty
+end
+
+-- A grenade's blast always connects - there's no dodging an explosion the
+-- way engine.getHitChance lets a defender dodge an aimed attack - but good
+-- reflex still softens it, capped at GRENADE_MAX_DAMAGE_REDUCTION so it's
+-- never a full dodge in disguise. Returns a multiplier (1 = full damage) to
+-- apply to a blast's raw damage roll.
+function engine.getBlastDamageMultiplier(defender)
+    local reduction = math.min(GRENADE_MAX_DAMAGE_REDUCTION, engine.getEffectiveReflex(defender) / 4)
+    return 1 - reduction
 end
 
 -- Digit keys double as the selector for both the action menu and the limb
@@ -2926,21 +2943,101 @@ function engine.pickSpecialAmmo(combatant, weaponId, prompt)
     end
 end
 
+-- Registers a grenade thrown this turn (see abilityEntries.throw_grenade) -
+-- doesn't detonate here. engine.resolvePendingGrenade is what actually
+-- applies its damage, and only once it's `armed` - set at the bottom of
+-- engine.runEncounter's own round-ending block, once a full enemy turn has
+-- actually passed since the throw. The whole point of the delay is giving
+-- whatever's caught in the blast that one turn's warning before it goes
+-- off, rather than detonating the instant it's thrown.
+function engine.queuePendingGrenade(x, y, radius, damage, damageType)
+    combatState.pendingGrenade = {
+        x = x, y = y, radius = radius, damage = damage, damageType = damageType, armed = false,
+    }
+end
+
+-- The grenade's own targeting picker: arrow keys walk a reticle ("O")
+-- around the battlefield, Enter confirms, Backspace cancels. Unlike every
+-- other combat picker, this one keeps the real map pane visible and lets
+-- it double as the aim, rather than jumping to the fullscreen combatWin
+-- every list-style picker uses - the whole point is seeing where the
+-- reticle actually sits relative to the room and whoever's on it. Reads
+-- `combatState.loc`/`.scene`/`.selectedIndex` rather than taking them as
+-- parameters, same reason combatState.redrawPanes does - this is called
+-- from a gamedata.lua ability effect, which has no loc/scene locals of its
+-- own to pass in. Clamped to `range` tiles of the thrower
+-- (engine.gridDistance, same metric weapon range already uses) and the
+-- room's own bounds. Starts centered on whichever enemy is currently
+-- selected, if that's actually in range (the likeliest thing being aimed
+-- at) - the thrower's own tile otherwise. Returns the chosen (x, y), or
+-- nil if the player backs out instead.
+function engine.pickThrowTarget(range)
+    local loc, scene = combatState.loc, combatState.scene
+    local originX, originY = player.gridX, player.gridY
+    local foe = scene[combatState.selectedIndex]
+
+    local targetX, targetY = originX, originY
+    if foe and engine.gridDistance(originX, originY, foe.gridX, foe.gridY) <= range then
+        targetX, targetY = foe.gridX, foe.gridY
+    end
+
+    while true do
+        local extraCells = { { x = player.gridX, y = player.gridY, glyph = "@" } }
+        for _, f in ipairs(scene) do
+            table.insert(extraCells, { x = f.gridX, y = f.gridY, glyph = "E" })
+        end
+        table.insert(extraCells, { x = targetX, y = targetY, glyph = "O" })
+
+        combatMapWin.setVisible(false)
+        combatMapWin.clear()
+        combatState.cameraX, combatState.cameraY = engine.drawRoomView(combatMapWin, loc, originX, originY, extraCells)
+        combatMapWin.setVisible(true)
+
+        combatActionWin.setVisible(false)
+        combatActionWin.clear()
+        combatActionWin.setCursorPos(1, 1)
+        combatActionWin.write("Arrow keys to aim, Enter to throw, Backspace to cancel.")
+        combatActionWin.setVisible(true)
+
+        local _, key = os.pullEvent("key")
+        if key == ACTIVATE_KEY then
+            return targetX, targetY
+        elseif key == keys.backspace then
+            return nil
+        elseif debugConsole.enabled and debugConsole.openKeys[key] then
+            debugConsole.run()
+        else
+            local dir = keyToDir[key]
+            if dir then
+                local delta = dirDelta[dir]
+                local nx, ny = targetX + delta.dx, targetY + delta.dy
+                if engine.gridDistance(originX, originY, nx, ny) <= range
+                    and nx >= 1 and nx <= loc.width and ny >= 1 and ny <= loc.height then
+                    targetX, targetY = nx, ny
+                end
+            end
+        end
+    end
+end
+
 -- Populates the bridge table gamedata.lua's content reaches back into the
 -- engine through - see its own header comment for the full list with
 -- signatures. Done here, in one block, once everything on that list
--- actually exists as a local (engine.pickLimb, just above, is the last one) -
--- gamedata.lua's own top-level code (building its tables, defining ability
--- effects/species builds/quest checks/greetings as functions) already ran
--- when it was required, further up, but nothing in it actually calls
--- Luadventure.anything eagerly - every reference sits inside a function
--- body that doesn't run until real gameplay, well after this point.
+-- actually exists as a local (engine.pickThrowTarget, just above, is the
+-- last one) - gamedata.lua's own top-level code (building its tables,
+-- defining ability effects/species builds/quest checks/greetings as
+-- functions) already ran when it was required, further up, but nothing in
+-- it actually calls Luadventure.anything eagerly - every reference sits
+-- inside a function body that doesn't run until real gameplay, well after
+-- this point.
 Luadventure.player = player
 Luadventure.logActivity = engine.logActivity
 Luadventure.logCombat = engine.logCombat
 Luadventure.dialogue = engine.dialogue
 Luadventure.pickLimb = engine.pickLimb
 Luadventure.pickSpecialAmmo = engine.pickSpecialAmmo
+Luadventure.pickThrowTarget = engine.pickThrowTarget
+Luadventure.queuePendingGrenade = engine.queuePendingGrenade
 Luadventure.removeInventoryItems = engine.removeInventoryItems
 Luadventure.damagePart = engine.damagePart
 Luadventure.healPart = engine.healPart
@@ -3553,6 +3650,56 @@ function engine.joinEnemyNames(scene)
     return table.concat(names, ", ", 1, #names - 1) .. ", and " .. names[#names]
 end
 
+-- Resolves a grenade once it's actually armed (see engine.queuePendingGrenade) -
+-- called right at the top of engine.runEncounter's own loop, before the
+-- scene-cleared/victory check, so a kill from the blast counts
+-- immediately. Checks every combatant still standing - the player
+-- included, since a thrown grenade doesn't distinguish who's holding it,
+-- so picking a spot too close to yourself is a real risk, not just for
+-- foes - within `radius` tiles (engine.gridDistance) of where it landed;
+-- each one caught takes one damage roll against a weighted-random part
+-- (engine.pickWeightedPart, same "small/fast parts are also less likely to
+-- catch it" logic the shotgun's own pellets use), reduced but never
+-- zeroed by their own reflex (engine.getBlastDamageMultiplier). Returns
+-- true if the player died from it, same convention as the rest of
+-- engine.runEncounter.
+function engine.resolvePendingGrenade(scene)
+    local pending = combatState.pendingGrenade
+    combatState.pendingGrenade = nil
+
+    engine.logCombat("The grenade goes off!")
+
+    local combatants = { player }
+    for _, foe in ipairs(scene) do
+        table.insert(combatants, foe)
+    end
+
+    for _, combatant in ipairs(combatants) do
+        if not engine.isDead(combatant.body)
+            and engine.gridDistance(pending.x, pending.y, combatant.gridX, combatant.gridY) <= pending.radius then
+            local parts = engine.collectLabeledParts(combatant.body)
+            local target, label = engine.pickWeightedPart(parts)
+            local roll = math.random(pending.damage.min, pending.damage.max)
+            local raw = math.floor(roll * engine.getBlastDamageMultiplier(combatant) + 0.5)
+            local dealt = engine.damagePart(combatant, target, raw, pending.damageType)
+
+            if combatant == player then
+                engine.logCombat("It catches your " .. label .. " for " .. dealt .. "! (" .. target.health .. "/" .. target.maxHealth .. ")")
+                combatState.flash(player.gridX, player.gridY, "@")
+                if engine.isDead(player.body) then
+                    engine.showCombatMessage({ "You died.", "", "Press any key." }, true)
+                    return true
+                end
+            else
+                engine.logCombat("It catches the " .. combatant.name .. "'s " .. label .. " for " .. dealt .. "!")
+                combatState.flash(combatant.gridX, combatant.gridY, "E")
+            end
+        end
+    end
+
+    return false
+end
+
 -- `triggeringObject` is whichever map object (an enemy-kind entry in the
 -- current location's objects) started this fight, if any - used purely so
 -- a win can remove it from the map afterward (see the victory branch
@@ -3569,6 +3716,11 @@ function engine.runEncounter(triggeringObject)
     -- second one shows up.
     local selectedEnemyIndex = 1
     combatState.loc, combatState.scene, combatState.selectedIndex = loc, scene, selectedEnemyIndex
+
+    -- A grenade left in the air from a fight that ended before it could go
+    -- off (a win, a death, a flee) has nowhere to detonate anymore - reset
+    -- here rather than at every one of those exit points.
+    combatState.pendingGrenade = nil
 
     -- Fights happen wherever the enemy actually is on the map, not
     -- somewhere randomly reshuffled - real walls/doors only mean anything
@@ -3628,6 +3780,19 @@ function engine.runEncounter(triggeringObject)
     end
 
     while true do
+        -- A grenade thrown last round (see abilityEntries.throw_grenade)
+        -- goes off right here, before anything else - a full enemy turn
+        -- has already passed since it armed (see the bottom of the
+        -- endTurn block below), and resolving it before the scene-cleared
+        -- check means a kill from the blast counts as victory immediately
+        -- rather than waiting one more prompt.
+        if combatState.pendingGrenade and combatState.pendingGrenade.armed then
+            if engine.resolvePendingGrenade(scene) then
+                returnUnclaimedDrops()
+                return true
+            end
+        end
+
         -- The start of the player's turn: check the scene before prompting
         -- for an action at all, rather than each attack path guessing
         -- whether its own hit was the one that won the fight.
@@ -3986,6 +4151,14 @@ function engine.runEncounter(triggeringObject)
             engine.decrementStatuses(enemy)
             engine.decrementCooldowns(player)
             engine.decrementCooldowns(enemy)
+
+            -- A full enemy turn has now actually happened since any
+            -- grenade got thrown this round (see abilityEntries.throw_grenade) -
+            -- arm it so the next pass through the loop's own top detonates
+            -- it, rather than the instant it was thrown.
+            if combatState.pendingGrenade then
+                combatState.pendingGrenade.armed = true
+            end
         end
     end
 end

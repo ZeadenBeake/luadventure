@@ -672,6 +672,41 @@ chance, plus a short `range` and heavy `spread` that make that range mostly
 theoretical in practice. Ammo still burns once per trigger pull
 (`ammoPerShot`), same as any other weapon.
 
+### Grenades
+
+A grenade (`itemEntries.grenade`) is a belt item like the Dermoregenesis
+Salve, not a weapon - Throw Grenade is granted and consumed exactly the
+same way, via `collectAbilities`/the ability action's own item-consumption
+branch, whether or not it ever actually goes off. Its own `effect` doesn't
+target the currently-selected enemy at all: `pickThrowTarget(range)` opens
+a dedicated aiming picker - arrow keys walk a reticle (`O`) around the
+*real* map pane instead of a limb list, clamped to `range` tiles
+(`gridDistance`) of the thrower and the room's own bounds, defaulting to
+the selected enemy's tile if that's in range - Enter confirms, Backspace
+cancels. Confirming doesn't deal any damage on the spot; it just registers
+where the grenade's going to land (`queuePendingGrenade`, on
+`combatState.pendingGrenade`) and logs that it's away.
+
+**The delay is the whole point**: a thrown grenade doesn't detonate until
+a full enemy turn has actually passed, not the instant it's thrown - a
+`pendingGrenade` only arms (right after the enemy's own turn resolves, at
+the bottom of the round-ending block) once the round it was thrown in
+has actually ended, and only detonates (`resolvePendingGrenade`) at the
+very top of the *next* pass through `runEncounter`'s own loop, before even
+the scene-cleared check. Whatever's still standing within `radius` tiles
+of where it landed when that moment comes - the player included, since a
+grenade doesn't know whose hand it left - takes one damage roll against a
+weighted-random part (`pickWeightedPart`, same logic the shotgun's pellets
+use). A blast can't be dodged outright the way an aimed attack can, but
+`getBlastDamageMultiplier` still lets good reflex soften it, capped
+(`GRENADE_MAX_DAMAGE_REDUCTION`) so it's never a full dodge in disguise.
+Only one grenade can be in the air at a time - `pendingGrenade` is a
+single slot, not a queue, so Throw Grenade's own effect refuses (and
+doesn't consume anything) rather than silently overwriting an already-
+pending one and wasting it for nothing. A fight ending (win, death,
+flee) before a pending grenade goes off just discards it - reset at the
+top of every `runEncounter` call rather than resolved retroactively.
+
 ### Limb destruction & disarming
 
 A destroyed limb takes everything attached to it (further from the root)
