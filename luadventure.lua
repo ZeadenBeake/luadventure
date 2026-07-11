@@ -3488,6 +3488,22 @@ function engine.runEncounter(triggeringObject)
     -- if position carries over from the moment the fight actually starts.
     enemy.gridX, enemy.gridY = triggeringObject.x, triggeringObject.y
 
+    -- `triggeringObject` is the same enemy now walking around the
+    -- battlefield as `enemy` - pull it off loc.objects for the fight's
+    -- duration so it doesn't also exist as a stale marker sitting at its
+    -- old spawn point. Re-inserted (wherever it actually ended up) if
+    -- the player flees, so a fled fight can be re-engaged later in its
+    -- new spot (see the "flee" action below); gone for good on victory,
+    -- same as before. Safe against a save happening mid-fight - that's
+    -- structurally unreachable, since the main loop that reaches the
+    -- save prompt is fully suspended for this whole function's duration.
+    for i, o in ipairs(loc.objects) do
+        if o == triggeringObject then
+            table.remove(loc.objects, i)
+            break
+        end
+    end
+
     engine.resetCombatLog()
     engine.logActivity(engine.dialogue("{{name}} fought " .. engine.joinEnemyNames(scene) .. ".", player))
     engine.logCombat("A " .. enemy.name .. " attacks!")
@@ -3534,17 +3550,11 @@ function engine.runEncounter(triggeringObject)
 
             -- Winning shouldn't leave you wherever the fight happened to
             -- wander to - back to the tile you were standing on when it
-            -- started, and the enemy's map object (if any) is actually
-            -- gone, not just a fresh dummy waiting to respawn on contact.
+            -- started. The enemy's map object is already gone (pulled off
+            -- loc.objects at the top of this function) - a win just
+            -- leaves it that way, not a fresh dummy waiting to respawn on
+            -- contact.
             player.gridX, player.gridY = startX, startY
-            if triggeringObject then
-                for i, o in ipairs(loc.objects) do
-                    if o == triggeringObject then
-                        table.remove(loc.objects, i)
-                        break
-                    end
-                end
-            end
 
             returnUnclaimedDrops()
             return false
@@ -3558,6 +3568,13 @@ function engine.runEncounter(triggeringObject)
         if action == "flee" then
             engine.logCombat("You break off and flee.")
             engine.logActivity(engine.dialogue("{{name}} fled.", player))
+
+            -- Unlike a win, a fled fight isn't over - put the enemy back
+            -- on the map wherever it actually ended up, so it's still
+            -- there to re-engage (on sight or on bump) later.
+            triggeringObject.x, triggeringObject.y = enemy.gridX, enemy.gridY
+            table.insert(loc.objects, triggeringObject)
+
             returnUnclaimedDrops()
             return false
         end
@@ -3575,8 +3592,22 @@ function engine.runEncounter(triggeringObject)
                 local delta = dirDelta[moveDir]
                 local nx, ny = player.gridX + delta.dx, player.gridY + delta.dy
                 if nx >= 1 and nx <= loc.width and ny >= 1 and ny <= loc.height then
-                    player.gridX, player.gridY = nx, ny
-                    speed = moveIsQuick and "quick" or "full"
+                    -- The real map is the battlefield now - same
+                    -- step-resolution walls/doors/items get in the
+                    -- overworld (see engine.resolveStep), just without
+                    -- its edge-of-room region transition (leaving the
+                    -- room entirely is simply blocked mid-fight - Flee
+                    -- is its own explicit action already). A door
+                    -- swinging open still spends the move, same as an
+                    -- ordinary step; a dead-stop wall bump re-prompts
+                    -- for free.
+                    local result = engine.resolveStep(loc, nx, ny)
+                    if result == "moved" then
+                        engine.refreshPlayerZone()
+                    end
+                    if result ~= "blocked" then
+                        speed = moveIsQuick and "quick" or "full"
+                    end
 
                     -- The step itself should feel instant - redraw the map
                     -- with the player already in the new spot right away,
@@ -3584,6 +3615,15 @@ function engine.runEncounter(triggeringObject)
                     -- as long as whatever comes next (the enemy's turn,
                     -- with its own paced engine.logCombat calls) takes to resolve.
                     combatState.redrawPanes()
+
+                    -- A door swinging open (or a step into a newly-visible
+                    -- zone) could put a second enemy in sight, once more
+                    -- than one exists at once - same awareness check
+                    -- exploration uses, just also reachable mid-fight.
+                    if result ~= "blocked" and engine.checkAwareness() then
+                        returnUnclaimedDrops()
+                        return true
+                    end
                 end
                 -- Stepping into a wall silently does nothing - same as
                 -- promptMove used to just ignore an out-of-bounds press
@@ -4197,6 +4237,47 @@ function engine.collectItem(loc, obj)
     engine.logActivity(engine.dialogue("{{name}} picked up " .. itemEntries[obj.itemId].name .. ".", player))
 end
 
+-- The capped distance a sight-triggered fight can start from -
+-- independent of however far a zone/glass chain might otherwise let the
+-- player see (see engine.recomputeVisibleZones), so a big sealed room
+-- doesn't start a fight with something too far away to reasonably close
+-- distance on. Checked against real weapon ranges (melee 1, pistol 5,
+-- rifle 8) - plenty of headroom without being effectively unlimited.
+local SIGHT_DISTANCE = 15
+
+-- The first enemy (if any) whose own zone is currently reachable (see
+-- loc.visibleZones) and within SIGHT_DISTANCE of the player right now -
+-- what engine.checkAwareness actually watches for.
+function engine.findAwareEnemy(loc)
+    for _, obj in ipairs(loc.objects or {}) do
+        if obj.kind == "enemy" then
+            local zoneId = loc.tileZone and loc.tileZone[obj.x] and loc.tileZone[obj.x][obj.y]
+            if zoneId and loc.visibleZones and loc.visibleZones[zoneId]
+                and engine.gridDistance(player.gridX, player.gridY, obj.x, obj.y) <= SIGHT_DISTANCE then
+                return obj
+            end
+        end
+    end
+    return nil
+end
+
+-- Starts a fight the instant a hostile becomes aware of the player - no
+-- bump required, same "in sight, in range" rule engine.drawRoomView's own
+-- masking already uses (see engine.findAwareEnemy). Called after every
+-- player action that could newly reveal or close distance on an enemy: a
+-- step, a door toggling either way (see engine.toggleDoor), or combat's
+-- own move action (a second enemy becoming aware mid-fight, once more
+-- than one exists at once). Returns true if the resulting fight killed
+-- the player, same convention as engine.tryMove/engine.tryInteract's own
+-- playerDied.
+function engine.checkAwareness()
+    local aware = engine.findAwareEnemy(world[player.location])
+    if aware then
+        return engine.runEncounter(aware)
+    end
+    return false
+end
+
 -- Same idea for a door: opening (or closing) one is harmless enough not to
 -- need a prompt either - see engine.tryMove (bumping a closed one opens it) and
 -- engine.tryInteract (the only way to close one again). `open` names which state
@@ -4226,6 +4307,48 @@ function engine.interactWithObject(loc, obj)
     return false, false
 end
 
+-- Shared by engine.tryMove and combat's own move action (see
+-- engine.runEncounter's action == "move" branch) - resolves stepping
+-- onto (nx, ny) in `loc`: picking up an item, auto-opening a closed
+-- door, or being blocked by whatever else is there. Doesn't touch
+-- player.steps, the zone/visibility refresh, or the message line -
+-- those are each caller's own business (combat has its own turn/speed
+-- bookkeeping instead of a message line, and the overworld's own
+-- edge-of-room region transition doesn't belong here at all). Returns
+-- (result, playerDied, quitRequested): result is "moved" (the player's
+-- own tile changed - a plain step or an item pickup), "door_opened"
+-- (didn't move, but the door blocking the way just swung open - the
+-- *next* step actually goes through it), or "blocked" (nothing
+-- happened at all, or engine.interactWithObject handled it in place).
+function engine.resolveStep(loc, nx, ny)
+    local obj = engine.findObjectAt(loc, nx, ny)
+
+    if obj and obj.kind == "item" then
+        -- Walking onto it is the whole interaction - see engine.collectItem.
+        player.gridX, player.gridY = nx, ny
+        engine.collectItem(loc, obj)
+        return "moved", false, false
+    end
+
+    if obj and obj.kind == "door" and not obj.open then
+        -- Bumping a closed door just opens it, no prompt - but that's
+        -- the whole action for this turn, same as bumping into
+        -- anything else that was blocking the way; stepping through
+        -- happens on the *next* move, once it's actually open.
+        engine.toggleDoor(obj, true)
+        return "door_opened", false, false
+    end
+
+    local blocked = obj and not (obj.kind == "door" and obj.open)
+    if blocked then
+        local playerDied, quitRequested = engine.interactWithObject(loc, obj)
+        return "blocked", playerDied, quitRequested
+    end
+
+    player.gridX, player.gridY = nx, ny
+    return "moved", false, false
+end
+
 -- Movement is grid-based; walking off an edge that has a matching exit
 -- moves the player to the connected location, entering from the opposite
 -- edge. Returns (moved, playerDied, quitRequested) - walking into an object
@@ -4237,39 +4360,18 @@ function engine.tryMove(dir)
     local nx, ny = player.gridX + delta.dx, player.gridY + delta.dy
 
     if nx >= 1 and nx <= loc.width and ny >= 1 and ny <= loc.height then
-        local obj = engine.findObjectAt(loc, nx, ny)
-
-        if obj and obj.kind == "item" then
-            -- Walking onto it is the whole interaction - see engine.collectItem.
-            player.gridX, player.gridY = nx, ny
+        local result, playerDied, quitRequested = engine.resolveStep(loc, nx, ny)
+        if result == "moved" then
             player.steps = player.steps + 1
             engine.refreshPlayerZone()
-            engine.collectItem(loc, obj)
+        end
+        if result ~= "blocked" then
             message = ""
-            return true, false, false
         end
-
-        if obj and obj.kind == "door" and not obj.open then
-            -- Bumping a closed door just opens it, no prompt - but that's
-            -- the whole action for this turn, same as bumping into
-            -- anything else that was blocking the way; stepping through
-            -- happens on the *next* move, once it's actually open.
-            engine.toggleDoor(obj, true)
-            message = ""
-            return false, false, false
+        if not playerDied and not quitRequested then
+            playerDied = engine.checkAwareness()
         end
-
-        local blocked = obj and not (obj.kind == "door" and obj.open)
-        if blocked then
-            local playerDied, quitRequested = engine.interactWithObject(loc, obj)
-            return false, playerDied, quitRequested
-        end
-
-        player.gridX, player.gridY = nx, ny
-        player.steps = player.steps + 1
-        engine.refreshPlayerZone()
-        message = ""
-        return true, false, false
+        return result == "moved", playerDied, quitRequested
     end
 
     local nextName = loc.directions[dir]
@@ -4293,7 +4395,8 @@ function engine.tryMove(dir)
     engine.refreshPlayerZone()
     message = ""
     engine.logActivity(engine.dialogue("{{name}} went to " .. nextLoc.name .. ".", player))
-    return true, false, false
+    local playerDied = engine.checkAwareness()
+    return true, playerDied, false
 end
 
 -- The dedicated interact key: checks each of the four cardinal-adjacent
@@ -4316,7 +4419,7 @@ function engine.tryInteract()
                 return false, false
             elseif obj.kind == "door" then
                 engine.toggleDoor(obj, not obj.open)
-                return false, false
+                return engine.checkAwareness(), false
             else
                 return engine.interactWithObject(loc, obj)
             end

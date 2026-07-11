@@ -59,11 +59,13 @@ screen as their own modal window instead of sharing the four corners.
 Combat gets its *own* four-corner layout rather than a single full-screen
 window - map (top-left), the action menu (bottom-left), a combat-scoped log
 (top-right - see "Activity log"), and the enemies in the scene (bottom-right
-- see "Combat menu & movement"). Combat's own sub-pickers (choosing an
-attack, a limb, an ability, a reload/belt target) and the two moments that
-still genuinely warrant stopping the player in their tracks (victory,
-death) fall back to the same full-screen window the inventory and dialogue
-use.
+- see "Combat menu & movement"). The map pane is the real room the fight
+started in, not a separate arena - it shares `drawRoomView` (see "Camera")
+with the overworld's own map, camera and line-of-sight masking included.
+Combat's own sub-pickers (choosing an attack, a limb, an ability, a
+reload/belt target) and the two moments that still genuinely warrant
+stopping the player in their tracks (victory, death) fall back to the same
+full-screen window the inventory and dialogue use.
 
 Controls: arrow keys move, `Space` interacts with whatever's cardinally
 adjacent (see "Environment objects & symbols"), `i` opens the inventory,
@@ -139,15 +141,63 @@ exploration screen bleeding through the fight.
 
 Two layers, intentionally not the same thing:
 
-- **Region graph** (`world`, `location:new`) - a handful of named places
-  (`village`, `grasslands` right now) connected by `directions` (up/down/
-  left/right). This is the coarse map.
-- **Walkable grid** - each location also has its own small grid
-  (`width`/`height`, default 7x5) you move around one cell at a time. Walking
-  off the edge of a grid in a direction that has a matching region-graph
-  connection moves you to the connected location, entering from the
-  opposite edge (walk off the right edge, arrive on the left edge of
-  wherever's next).
+- **Region graph** (`world`) - a handful of named places (`village`,
+  `grasslands` right now) connected by `directions` (up/down/left/right).
+  This is the coarse map.
+- **Walkable grid** - each location also has its own grid (`width`/
+  `height` - both existing rooms are 40x30, big enough for exploration and
+  the camera below to mean something) you move around one cell at a time.
+  Walking off the edge of a grid in a direction that has a matching
+  region-graph connection moves you to the connected location, entering
+  from the opposite edge (walk off the right edge, arrive on the left edge
+  of wherever's next).
+
+### Camera
+
+`drawRoomView` (shared by the overworld's `drawMain` and combat's
+`drawCombatField`) draws a scrolling, player-centered viewport rather than
+the whole grid at once - `getCameraOrigin` clamps independently per axis so
+it never scrolls past a room's edge, and collapses to no scrolling at all
+whenever the room is smaller than the viewport in that dimension. Cells
+outside the room's own bounds (the camera showing past a small room's edge)
+render as `~`. `extraCells` is how a caller overlays things that aren't
+part of the room itself - the player's own `@` always, combat's enemies
+too (see "Combat menu & movement"). `drawRoomView` returns the camera
+origin it used so a caller that needs to translate grid coordinates back
+into screen ones later can (`combatState.flash`, which stashes it via
+`combatState.cameraX/cameraY`, set each time `drawCombatField` runs).
+
+### Line of sight & room zones
+
+A room seals itself off visually the same simple rule decides everything
+else by: walls and doors (open or closed) are opaque, glass and open floor
+aren't. Rather than flood-filling the room fresh every render (most tiles
+never move - only a door's own open/closed state ever changes what's
+reachable), this is precomputed once as a static **zone graph**
+(`computeRoomZones`, run once per location at startup and again after a
+load, since a load replaces every location's objects wholesale - see
+"Save & load"): a wall or a door (regardless of state) is a zone boundary,
+glass and floor are freely connected. Two areas joined only by glass
+permanently merge into one zone (matches "vision is one room if a wall has
+glass in it" exactly); a door always separates two zones, but its own
+open/closed state gates them at runtime instead (`doorZones[door] = {a=,
+b=}`, the zone on each side). Wall/door tiles themselves have no zone at
+all - they're the boundary, always rendered regardless of visibility,
+same as you can always see a door whether or not you can see through it.
+
+The **currently visible set** (`loc.visibleZones`) starts from whichever
+zone the player is standing in and spreads through any *open* door to
+whatever's on the other side (`recomputeVisibleZones` - a small
+fixed-point loop over the room's doors, not its tiles). Standing exactly
+on an open door tile (the one walkable tile with no zone of its own) seeds
+both zones it borders instead, since being in the doorway means seeing
+both ways at once. This only ever gets recomputed on the two things that
+can actually change it - a door toggling (`toggleDoor`) or the player's
+own tile landing in a different zone than before (`refreshPlayerZone`,
+cheaply no-op'ing via `loc.playerZone` when it hasn't) - never per render.
+`drawRoomView` masks anything outside the visible set to a blank space,
+distinct from the `~` out-of-room-bounds margin - "something's here, you
+can't see it" as opposed to "there's nothing here at all".
 
 ### Environment objects & symbols
 
@@ -156,23 +206,25 @@ Each location has an `objects` list. `findObjectAt` resolves collisions,
 
 | Glyph | Kind | Notes |
 |---|---|---|
-| `#` | wall | Solid rectangle (`x1,y1,x2,y2`), blocks movement, no interaction |
+| `#` | wall | Solid rectangle (`x1,y1,x2,y2`), blocks movement, no interaction, always a zone boundary |
 | `*` | item | Auto-collected the moment you step onto it (`collectItem`) - logged, no prompt |
-| `-` / `\|` | door | Horizontal/vertical; see below - opens/closes without a prompt either |
+| `-` / `\|` | door | Horizontal/vertical; see below - opens/closes without a prompt either, always a zone boundary regardless of state |
+| `:` | window | Blocks movement like a wall, but never a zone boundary - glass merges whatever's on either side into one visible zone permanently |
 | `!` | person (quest) | Quest not yet taken, or done and ready to hand in |
 | `?` | person (quest) | Quest active, not yet ready to turn in |
 | `0` | person | Flavor-only NPC, or a quest giver with nothing left to give |
-| `E` | enemy | Walking into it starts `runEncounter()` |
+| `E` | enemy | Fight starts the moment it's aware of you (see "Sight-triggered combat") - walking into it directly still works too |
 | `$` | save point | Save / Load / Quit Game (see "Save & load") |
 
 Two different ways to trigger a reaction from something on the map:
 
 - **Bumping into it** (walking into a cell that isn't clear) - `tryMove`
-  handles an item or a closed door itself, without a prompt (see below);
-  anything else still blocking (a person, a save point, an enemy, a wall)
-  goes through `interactWithObject`, which dispatches on `obj.kind` and
-  returns `(playerDied, quitRequested)` - both bubble all the way up to the
-  main loop, since either one ends the program.
+  (via the shared `resolveStep` - see below) handles an item or a closed
+  door itself, without a prompt; anything else still blocking (a person, a
+  save point, an enemy, a wall, a window) goes through `interactWithObject`,
+  which dispatches on `obj.kind` and returns `(playerDied, quitRequested)` -
+  both bubble all the way up to the main loop, since either one ends the
+  program.
 - **`Space`** (`tryInteract`) - checks each of the four cardinal-adjacent
   tiles (never diagonals, so two interactables sitting right next to each
   other don't create ambiguity) and acts on the first one found. This is
@@ -185,11 +237,43 @@ doing the thing: standing on an item just picks it up (`collectItem` -
 inserts it, removes the map object, logs it - see "Activity log"); bumping
 a closed door just opens it (`toggleDoor`), logged the same way, but that's
 the whole action for that move - stepping through still takes a second one,
-same as bumping into anything else that was blocking the way. Neither ever
-reaches `interactWithObject` at all anymore; both callers (`tryMove`,
-`tryInteract`) handle them directly. A person, a save point, and a fight
-still go through a real prompt - those have actual stakes or a meaningful
-back-and-forth, so simplifying them away wouldn't make sense.
+same as bumping into anything else that was blocking the way. Both are
+handled by `resolveStep(loc, nx, ny)` - a shared step-resolution helper
+returning `"moved"`, `"door_opened"`, or `"blocked"` - rather than each
+caller reaching `interactWithObject` directly for them. `tryMove` (the
+overworld) and combat's own move action (see "Combat menu & movement") both
+call it, so a fight plays out with the same collision, item pickup, and
+door-opening rules exploration has, just without the overworld's
+edge-of-room region transition (leaving the room entirely is simply
+blocked mid-fight - Flee is its own explicit action). A person, a save
+point, and a fight still go through a real prompt via `interactWithObject`
+- those have actual stakes or a meaningful back-and-forth, so simplifying
+them away wouldn't make sense.
+
+### Sight-triggered combat
+
+A fight starts the instant a hostile becomes *aware* of the player - no
+bump required - using the same rule the zone/visibility system above
+already tracks: `checkAwareness` (called after every player action that
+could reveal something or close distance - a step, a door toggling either
+way, combat's own move action) scans for any `enemy` object whose own zone
+is in `loc.visibleZones` and within `SIGHT_DISTANCE` (15 tiles, a flat cap
+independent of however far a zone/glass chain might otherwise let you see -
+checked against real weapon ranges so a big sealed room can't start a fight
+with something too far away to reasonably close distance on) of the
+player, and calls `runEncounter` on the first one it finds. The direct-bump
+path (`interactWithObject`'s `enemy` branch) still exists underneath this
+as a fallback, but in practice sight triggers a fight well before the
+player ever gets close enough to bump it.
+
+Fights happen on the real map now, not a separate arena - `runEncounter`
+pulls the triggering object off `loc.objects` for the fight's duration (so
+it doesn't also sit there as a stale marker while the same enemy is
+walking around the battlefield as a live combatant), puts it back
+(wherever it actually ended up) if the player flees, and leaves it gone
+for good on a win. This is safe against a save happening mid-fight -
+that's structurally unreachable, since the main loop that reaches the save
+prompt is fully suspended for the whole encounter's duration.
 
 ## Body system
 
@@ -424,14 +508,18 @@ header, since between the numbered options and the move hint that's already
 everything the pane has room for without needing to scroll. Movement isn't
 a menu entry - arrow keys reposition immediately, same turn cost and
 quickened/full gating as ever (a "You don't have time to move" rejection if
-quickened and reflex isn't fast enough, silently no-op on stepping into a
-wall), just without a separate confirmation step in between. A hint line
-("Arrow keys to move (quick)" or "(full)", read off `getEffectiveReflex`)
-sits under the numbered options so this isn't a hidden control. A
-successful step calls `combatState.redrawPanes()` immediately, before
-whatever comes next (ending the round, the enemy's own paced turn) - the
-step itself should read as instant, not wait behind the round it might
-trigger.
+quickened and reflex isn't fast enough), just without a separate
+confirmation step in between. Stepping onto the real map now goes through
+the same `resolveStep` the overworld uses (see "Environment objects &
+symbols") - a wall silently blocks for free (re-prompts, no turn spent), an
+item gets picked up, and a closed door swings open, spending the move the
+same way an ordinary step does (the *next* step actually goes through it).
+A hint line ("Arrow keys to move (quick)" or "(full)", read off
+`getEffectiveReflex`) sits under the numbered options so this isn't a
+hidden control. A successful step calls `combatState.redrawPanes()`
+immediately, before whatever comes next (ending the round, the enemy's own
+paced turn) - the step itself should read as instant, not wait behind the
+round it might trigger.
 
 **Enemy selection**: the bottom-right pane (`drawEnemyList`) lists every foe
 in `scene`, health included, with whichever one's currently selected marked
@@ -893,6 +981,10 @@ NPC-to-NPC conversation system.
   function plus a `speciesEntries` entry - nothing else references a
   species by name anywhere.
 - Save slots have no way to delete/rename, only overwrite.
+- Enemy movement (`testDummyType:decide`) only clamps to room bounds - no
+  wall/door awareness at all, so it can walk straight through one closing
+  distance on the player. Deliberately left alone for now (the dummy's AI
+  is meant to stay simple for testing) - real pathfinding is a later pass.
 - The test dummy always attacks with a bare Strike and doesn't go through
   `equipped` at all, so limb destruction never disables *its* attacks and
   it has nothing to drop - disarming (arm/hand destruction, a future disarm
