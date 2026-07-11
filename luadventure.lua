@@ -3710,11 +3710,13 @@ end
 -- action just below) - a save point is the one that actually matters
 -- (letting the player save mid-fight would break the assumption the whole
 -- grenade-fuse/flee-and-reinsert system leans on: that a save can never
--- happen while an encounter's still running), but this is a real set
--- rather than one hardcoded check specifically so a later environmental
--- interactable (a button, a lever) can just declare itself exempt-or-not
--- here instead of needing its own bespoke gate.
-local COMBAT_BLOCKED_INTERACT_KINDS = { save_point = true }
+-- happen while an encounter's still running); a person is blocked too,
+-- not because it'd break anything, but because stopping to make small
+-- talk mid-fight doesn't make sense. This is a real set rather than
+-- hardcoded checks specifically so a later environmental interactable (a
+-- button, a lever) can just declare itself exempt-or-not here instead of
+-- needing its own bespoke gate.
+local COMBAT_BLOCKED_INTERACT_KINDS = { save_point = true, person = true }
 
 -- `triggeringObject` is whichever map object (an enemy-kind entry in the
 -- current location's objects) started this fight, if any - used purely so

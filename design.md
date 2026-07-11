@@ -539,10 +539,12 @@ and shares `resolveInteract` with the overworld's own interact key (see
 "Environment objects & symbols") - a closed door, or later an
 environmental object like a button or lever, works exactly the same way
 mid-fight it does outside one, `blockedKinds` set to
-`COMBAT_BLOCKED_INTERACT_KINDS` so a save point stays unreachable while an
+`COMBAT_BLOCKED_INTERACT_KINDS` - a save point stays unreachable while an
 encounter's running (see "Save & load" for why that specifically can't be
-allowed). Finding nothing adjacent, or finding something blocked, both
-stay free to re-prompt - only actually reaching something spends the
+allowed), and a person too, since stopping for dialogue mid-fight doesn't
+make sense even though nothing about it would actually break. Finding
+nothing adjacent, or finding something blocked, both stay free to
+re-prompt - only actually reaching something spends the
 turn.
 
 **Enemy selection**: the bottom-right pane (`drawEnemyList`) lists every foe
