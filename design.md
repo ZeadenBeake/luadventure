@@ -282,7 +282,10 @@ anything yet.
   "Body system"). Reused by nothing else yet, but meant to be - a shared
   "small/fast target" factor rather than a hit-chance-only special case.
 - **Melee damage**: `stats.strength * getLimbStrength(attacker, the limb
-  doing the hitting)`. Ranged weapons don't scale with strength at all.
+  doing the hitting)` - averaged across every hand for a two-handed weapon
+  instead of read off just one (`getWeaponStrength`; see "Two-handed
+  weapons"). Ranged weapons don't scale with strength at all, regardless
+  of hand count.
 - **Damage types**: `bludgeoning`, `piercing`, `slashing`, `fire`, `frost`,
   `radiation`, `toxic` (poison's own damage type), `untyped`. A part can
   have `resistances` per type (a multiplier, default 1); `untyped` never
@@ -360,7 +363,13 @@ Currently defined: **Adrenal Auto-Injector** (instant, pops adrenaline),
 5-10 damage sub-hits, refunds its cooldown on that single roll missing),
 **Use Dermoregenesis Salve** (quick, heals 25 to a chosen part, consumed
 from the belt), **Charge Shot** (laser pistol only, always a full action
-even one-handed, no cooldown, double damage for 3 ammo instead of 1).
+even one-handed, no cooldown, double damage for 3 ammo instead of 1),
+**Spray** (rifle only, full action, cooldown 3, three separate shots at
+one target - each its own hit roll at a flat accuracy penalty, unlike Rev
+it up!'s single roll covering every sub-hit - burning 3 ammo regardless of
+how many land; always resolves at full cooldown once it starts firing,
+since there's no single roll to gate a refund on the way Charge Shot and
+Rev it up! each have).
 
 ### Victory
 
@@ -420,8 +429,55 @@ grants another turn, same as the Adrenal Auto-Injector.
 (melee, slashing, applies 2 stacks of bleed on hit, grants Rev it up!),
 `laser_pistol` (ranged, fire damage, 10-shot energy weapon, grants Charge
 Shot), `stinger_sting` (melee, piercing, barely any damage but applies 5
-stacks of poison - see "Natural weapons"). `handedness` decides whether a
-normal attack with it is a quick or full action.
+stacks of poison - see "Natural weapons"), `rifle` (ranged, piercing,
+12-shot kinetic weapon, roughly double a pistol's damage with better range
+and less spread, grants Spray - see "Two-handed weapons" for what makes it
+different to wield). `handedness` (`"one-handed"` or `"two-handed"`)
+decides whether a normal attack with it is a quick or full action - and,
+for `"two-handed"`, quite a bit more besides.
+
+### Two-handed weapons
+
+A `"two-handed"` weapon needs two of a wielder's MANIPULATE hands at once,
+not one - the rifle, so far. `getWieldingHands(combatant, label)` is the
+one place that knows which hands currently share a given weapon: every
+hand whose `equipped` slot names the same weapon id, in stable body-tree
+order (`collectLabeledParts`). Its first entry is always the **canonical**
+hand for the group - the only one that actually gets a row in the
+inventory screen, an option in `pickAttack`, or an entry from
+`collectAbilities` (every other function that touches equipped weapons
+would otherwise list a two-handed one twice, once per hand) - and the only
+one `character.ammo` is ever keyed under for it, since ammo tracking is
+still per-slot and a two-handed weapon only has the one shared pool.
+Melee damage for a two-handed weapon averages `getLimbStrength` across
+every hand holding it (`getWeaponStrength`) rather than reading just one,
+so a fracture on either side of the grip drags the whole swing down, not
+only its own half; ranged weapons like the rifle don't scale with strength
+at all regardless of hand count, same as ever.
+
+**Equipping**: Move (see "Inventory & equipment") can express "this slot"
+but not "these two slots at once", so dropping a two-handed weapon onto
+*any* hand opens a dedicated picker (`pickWieldingHands`, nested inside
+`runInventoryScreen` itself) instead of equipping it outright - every
+MANIPULATE hand listed, toggled green/white with Enter, capped at two
+selected, with a Confirm option that only does anything once exactly two
+are picked (and a Cancel that backs out with the weapon still carried, to
+try again or Move it to the bag instead). Confirming displaces whatever
+was on both chosen hands back to the bag first, same as an ordinary
+one-handed equip does. This picker is inventory-screen-only - the
+in-combat Belt action refuses to swap or holster a two-handed weapon at
+all (`swapSlots`/`fillSlot` only ever touch the two slots they're given,
+which can't express a weapon spanning three), so re-equipping one that's
+been dropped or unequipped stays an overworld trip.
+
+**Destruction**: a two-handed weapon can't fire at all with even one of
+its hands destroyed (`pickAttack`/`collectAbilities` both check every
+wielding hand, not just one), but it doesn't actually clatter to the
+ground until *every* hand holding it is (`dropEquippedItem` - see "Limb
+destruction & disarming") - a fresh Dermoregenesis Salve on the first hand
+lost can still save it before the second one goes. Once it does drop, its
+one shared ammo pool returns to the bag exactly once, from whichever hand
+was canonical, and every slot it occupied clears together.
 
 ### Natural weapons
 
@@ -476,7 +532,9 @@ for energy weapons. Ammo is tracked per-**named-slot** on the combatant
 (`character.ammo`) - an equip slot's own label, or a belt slot's synthetic
 `"beltN"` one (see "Inventory & equipment") - never on the weapon template
 itself, and never attached to the item sitting in the bag either, since
-there's no mechanism to hang per-instance data off an item id at all.
+there's no mechanism to hang per-instance data off an item id at all. A
+two-handed weapon still only ever gets the one named slot's worth (its
+canonical hand's - see "Two-handed weapons"), not one per hand.
 Energy ammo is deliberately fudged: there's no stateful partial-charge
 battery item, instead a carried `battery` just raises how many loose
 `energy_charge` items you're allowed to carry (`getMaxEnergyCharges`),
@@ -536,10 +594,12 @@ Two keys do the work, split by what they mean rather than what they touch:
   resting place regardless of where it came from, which is also how
   unequipping works: pick it up, then press `M` again without needing a
   matching slot at all. Closing the inventory mid-carry safely undoes the
-  pickup rather than losing whatever was picked up.
+  pickup rather than losing whatever was picked up. A two-handed weapon
+  dropped on an equip slot is the one exception to "goes there outright" -
+  see "Two-handed weapons" for the picker it opens instead.
 
 **Weapons as items**: a weapon can have an `itemId` (chain_sword,
-laser_pistol so far) naming its carryable, bulk-having form in
+laser_pistol, rifle so far) naming its carryable, bulk-having form in
 `itemEntries`, which in turn has a `weaponId` pointing back - the two
 together are what let the inventory screen swap a weapon between
 "wielded", "holstered", and "sitting loose in the bag". `strike` (the
@@ -590,6 +650,11 @@ consumable isn't gated this way at all, since the one ability reachable
 through it (the salve) is quick regardless. With only one belt slot right
 now hand-to-hand is the common case, but every helper (`getAllSlots` and
 friends) is written generically, so a second belt slot falls out for free.
+`getAllSlots` itself leaves out a two-handed weapon's secondary hand
+entirely (its canonical hand's row already represents the whole thing),
+and both the swap and holster sub-actions refuse a two-handed weapon
+outright - see "Two-handed weapons" for why re-equipping one stays an
+overworld-only trip.
 
 ## Quests
 

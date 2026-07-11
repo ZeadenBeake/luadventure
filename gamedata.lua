@@ -350,6 +350,29 @@ local weaponEntries = {
     -- any direct damage, but onHit below stacks a hefty dose of poison on
     -- every landed hit.
     stinger_sting = { name = "Sting", damage = { min = 1, max = 1 }, type = "melee", range = 1, spread = 0, damageType = "piercing", handedness = "one-handed" },
+
+    -- The first two-handed weapon: needs both of a wielder's hands (see
+    -- the inventory screen's pickWieldingHands, and getWieldingHands/
+    -- getWeaponStrength for how combat reads a weapon spanning two of
+    -- them), which is what earns it a full action to fire instead of a
+    -- pistol's quick one - and, as the tradeoff for that, real stopping
+    -- power: roughly double a pistol's damage per shot, plus better range
+    -- and a steadier aim (lower spread) from being braced two-handed
+    -- rather than held out at arm's length.
+    rifle = {
+        name = "Rifle",
+        damage = { min = 20, max = 30 },
+        type = "ranged",
+        range = 8,
+        spread = 1,
+        damageType = "piercing",
+        handedness = "two-handed",
+        ammoCapacity = 12,
+        ammoPerShot = 1,
+        ammoClass = "kinetic",
+        abilities = { "spray" },
+        itemId = "rifle",
+    },
 }
 
 -- A chain sword bites deep and keeps bleeding; a sting is barely a scratch
@@ -383,6 +406,7 @@ local itemEntries = {
     -- from the weapon entry rather than looked up, same as any other item.
     chain_sword = { name = "Chain Sword", bulk = 2, weaponId = "chain_sword" },
     laser_pistol = { name = "Laser Pistol", bulk = 1, weaponId = "laser_pistol" },
+    rifle = { name = "Rifle", bulk = 4, weaponId = "rifle" },
 
     -- Kinetic ammo: a bullet is one shot, plain and simple, reloaded exactly
     -- like you'd expect - pull however many are missing from the gun out of
@@ -454,6 +478,11 @@ local abilityEntries = {
     charge_shot = {
         name = "Charge Shot",
         speed = "full", -- always, even wielded one-handed - no cooldown to offset it
+    },
+    spray = {
+        name = "Spray",
+        speed = "full", -- the rifle's own normal shot already is, being two-handed
+        cooldown = 3,
     },
 }
 
@@ -578,6 +607,63 @@ abilityEntries.charge_shot.effect = function(user, enemy, sourcePart, sourceSlot
 
     Luadventure.logCombat("The charged shot hits for " .. dealt .. "! (" .. target.health .. "/" .. target.maxHealth .. ")")
     Luadventure.combatState.flash(enemy.gridX, enemy.gridY, "E")
+end
+
+-- Three separate shots at one target, each its own hit roll (not one roll
+-- covering all three the way Rev it up!'s single swing does - a spray is
+-- three separate trigger pulls, so three separate chances to actually
+-- connect), each at a small accuracy penalty for the sake of speed over
+-- precision. Ammo burns per shot fired regardless of whether it lands,
+-- same as an ordinary one; unlike Charge Shot there's no single roll to
+-- gate the whole thing on, so this always resolves at its full cooldown
+-- once it actually starts firing - some rounds landing and some missing
+-- is the point, not an edge case to refund.
+local SPRAY_SHOTS = 3
+local SPRAY_ACCURACY_PENALTY = 0.1
+
+abilityEntries.spray.effect = function(user, enemy, sourcePart, sourceSlot)
+    local weapon = weaponEntries.rifle
+    local distance = Luadventure.gridDistance(user.gridX, user.gridY, enemy.gridX, enemy.gridY)
+
+    if distance > weapon.range then
+        Luadventure.logCombat("Nothing is in range.")
+        return "noop"
+    end
+
+    if (user.ammo[sourceSlot] or 0) < SPRAY_SHOTS then
+        Luadventure.logCombat("Not enough ammo to spray.")
+        return "noop"
+    end
+
+    local target, label = Luadventure.pickLimb("Target the " .. enemy.name .. "'s:", enemy.body)
+    if not target then
+        return "noop"
+    end
+    Luadventure.combatState.redrawPanes()
+
+    Luadventure.logCombat("You spray the " .. enemy.name .. "'s " .. label .. " with the Rifle!")
+
+    local totalDealt = 0
+    for i = 1, SPRAY_SHOTS do
+        if Luadventure.isDead(enemy.body) then
+            break
+        end
+
+        user.ammo[sourceSlot] = user.ammo[sourceSlot] - 1
+        local hitChance = math.max(0, Luadventure.getFinalHitChance(user, enemy, weapon, distance, target) - SPRAY_ACCURACY_PENALTY)
+
+        if math.random() > hitChance then
+            Luadventure.logCombat("Shot " .. i .. " misses!")
+        else
+            local roll = math.random(weapon.damage.min, weapon.damage.max)
+            local dealt = Luadventure.damagePart(enemy, target, roll, weapon.damageType)
+            totalDealt = totalDealt + dealt
+            Luadventure.logCombat("Shot " .. i .. " deals " .. dealt .. "!")
+            Luadventure.combatState.flash(enemy.gridX, enemy.gridY, "E")
+        end
+    end
+
+    Luadventure.logCombat("You dealt " .. totalDealt .. " damage to the " .. enemy.name .. "'s " .. label .. "!")
 end
 
 -- Every species a character can be built as. `build(globalTags)` returns a

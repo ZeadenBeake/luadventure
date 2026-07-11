@@ -1268,6 +1268,48 @@ local function getManipulateLimbs(combatant)
     return limbs
 end
 
+-- Every MANIPULATE hand currently wielding the same weapon as the one in
+-- `label` - just that hand alone for an ordinary one-handed weapon (or an
+-- empty one), every hand sharing a two-handed one otherwise, always in
+-- stable body-tree order (see collectLabeledParts). The first entry is
+-- always the "canonical" hand for the group: where its one shared ammo
+-- pool actually lives (character.ammo is still keyed per equip slot, so a
+-- two-handed weapon just doesn't use the second one), and what represents
+-- the whole thing in the inventory screen/attack list/ability list, so it
+-- never gets listed or asked about twice over.
+local function getWieldingHands(combatant, label)
+    local weaponId = combatant.equipped[label]
+    local weapon = weaponId and weaponEntries[weaponId]
+    local hands = {}
+    for _, entry in ipairs(collectLabeledParts(combatant.body)) do
+        if getPartLocalTags(entry.part).MANIPULATE then
+            if entry.label == label
+                or (weapon and weapon.handedness == "two-handed" and combatant.equipped[entry.label] == weaponId) then
+                table.insert(hands, entry)
+            end
+        end
+    end
+    return hands
+end
+
+-- A melee weapon's effective strength multiplier: a single hand's own
+-- getLimbStrength normally, or the average across every hand holding a
+-- two-handed one - a reinforced arm on one side of the grip still pulls
+-- its own weight, but a fracture on the other side drags the whole swing
+-- down too, not just its own half. Ranged weapons never call this at all
+-- (strength doesn't scale them regardless of hand count).
+local function getWeaponStrength(combatant, entry, weapon)
+    if weapon.handedness ~= "two-handed" then
+        return getLimbStrength(combatant, entry.part)
+    end
+    local hands = getWieldingHands(combatant, entry.label)
+    local total = 0
+    for _, hand in ipairs(hands) do
+        total = total + getLimbStrength(combatant, hand.part)
+    end
+    return total / #hands
+end
+
 -- A unified view of "a slot that can hold a weapon or a plain item" - a
 -- hand (`{kind="equip", slot=label}`) or a belt slot
 -- (`{kind="belt", index=N}`). Both the inventory screen and the in-combat
@@ -1275,11 +1317,18 @@ end
 -- written lives in one place instead of two.
 
 -- Every hand and belt slot, hands first, in the same stable order
--- getManipulateLimbs/1..beltSize already give.
+-- getManipulateLimbs/1..beltSize already give - except a two-handed
+-- weapon's secondary hand (see getWieldingHands), which is left out
+-- entirely rather than listed as its own slot: it isn't one to swap into
+-- or out of independently, only alongside its canonical hand.
 local function getAllSlots(combatant)
     local slots = {}
     for _, limb in ipairs(getManipulateLimbs(combatant)) do
-        table.insert(slots, { kind = "equip", slot = limb.label })
+        local weaponId = combatant.equipped[limb.label]
+        local isSecondaryHand = weaponId and getWieldingHands(combatant, limb.label)[1].label ~= limb.label
+        if not isSecondaryHand then
+            table.insert(slots, { kind = "equip", slot = limb.label })
+        end
     end
     for i = 1, combatant.beltSize do
         table.insert(slots, { kind = "belt", index = i })
@@ -1422,27 +1471,44 @@ local function getInventoryRows(combatant)
 
     for _, limb in ipairs(getManipulateLimbs(combatant)) do
         local weaponId, itemId = getSlotContents(combatant, { kind = "equip", slot = limb.label })
-        if itemId then
-            local item = itemEntries[itemId]
-            table.insert(rows, {
-                kind = "equip", slot = limb.label, itemId = itemId,
-                name = limb.label .. ": " .. item.name,
-                countText = "", bulkText = formatBulk(item.bulk),
-            })
-        else
-            local weapon = weaponId and weaponEntries[weaponId] or weaponEntries.strike
-            table.insert(rows, {
-                kind = "equip", slot = limb.label, weaponId = weaponId,
-                name = limb.label .. ": " .. weapon.name,
-                countText = "", bulkText = "",
-            })
-            if weaponId and weapon.ammoCapacity then
+        -- A two-handed weapon occupies more than one of these limbs at
+        -- once (see getWieldingHands) - only its canonical (first) hand
+        -- gets a row at all, combining every hand's label into one, so it
+        -- reads as one held weapon rather than two identical-looking rows
+        -- fighting over which one's "real."
+        local hands = weaponId and getWieldingHands(combatant, limb.label) or nil
+        local isSecondaryHand = hands and #hands > 1 and hands[1].label ~= limb.label
+        if not isSecondaryHand then
+            local label = limb.label
+            if hands and #hands > 1 then
+                local labels = {}
+                for _, hand in ipairs(hands) do
+                    table.insert(labels, hand.label)
+                end
+                label = table.concat(labels, "+")
+            end
+            if itemId then
+                local item = itemEntries[itemId]
                 table.insert(rows, {
-                    kind = "ammo", slot = limb.label, weapon = weapon,
-                    name = weapon.name .. " Ammo",
-                    countText = (combatant.ammo[limb.label] or 0) .. "/" .. weapon.ammoCapacity,
-                    bulkText = "",
+                    kind = "equip", slot = limb.label, itemId = itemId,
+                    name = label .. ": " .. item.name,
+                    countText = "", bulkText = formatBulk(item.bulk),
                 })
+            else
+                local weapon = weaponId and weaponEntries[weaponId] or weaponEntries.strike
+                table.insert(rows, {
+                    kind = "equip", slot = limb.label, weaponId = weaponId,
+                    name = label .. ": " .. weapon.name,
+                    countText = "", bulkText = "",
+                })
+                if weaponId and weapon.ammoCapacity then
+                    table.insert(rows, {
+                        kind = "ammo", slot = limb.label, weapon = weapon,
+                        name = weapon.name .. " Ammo",
+                        countText = (combatant.ammo[limb.label] or 0) .. "/" .. weapon.ammoCapacity,
+                        bulkText = "",
+                    })
+                end
             end
         end
     end
@@ -1640,12 +1706,103 @@ local function runInventoryScreen()
                 player.ammo["belt" .. carrying.from.index] = carrying.ammo
             end
         elseif carrying.from.kind == "equip" then
-            player.equipped[carrying.from.slot] = carrying.weaponId or carrying.itemId
-            if carrying.weaponId then
-                player.ammo[carrying.from.slot] = carrying.ammo
+            -- carrying.from.slots is every hand it was lifted from (see
+            -- Move's pickup handling above) - just one, normally, both
+            -- for a two-handed weapon. Ammo only ever goes back on the
+            -- first (canonical) one, same as it was taken from.
+            for i, slot in ipairs(carrying.from.slots) do
+                player.equipped[slot] = carrying.weaponId or carrying.itemId
+                if carrying.weaponId and i == 1 then
+                    player.ammo[slot] = carrying.ammo
+                end
             end
         end
         carrying = nil
+    end
+
+    -- The dedicated picker Move falls into when a weapon needs more than
+    -- one hand (see weaponEntries.handedness) - a plain "drop it on this
+    -- slot" can't express "these two slots at once" the way it can a
+    -- single hand. Same arrow-key-navigate/Enter-to-act feel as the rest
+    -- of the inventory screen (rather than the digit-select combat
+    -- pickers use) since it's part of that same flow. Each hand toggles
+    -- independently (green once selected, back to white if toggled off
+    -- again), capped at `handsNeeded` - Confirm only actually does
+    -- anything once exactly that many are picked. Returns the chosen hand
+    -- labels in stable body-tree order (so whichever's first is always
+    -- the same one - see getWieldingHands), or nil if the player backs
+    -- out via Cancel instead. Nested here (rather than a top-level local)
+    -- since only Move's own drop-handling below ever calls it - see "A
+    -- note on locals" in the design doc.
+    local function pickWieldingHands(handsNeeded, weaponName)
+        local limbs = getManipulateLimbs(player)
+        local selected = {}
+        local selectedCount = 0
+        local cursor = 1
+        local confirmRow = #limbs + 1
+        local cancelRow = #limbs + 2
+
+        while true do
+            inventoryWin.setVisible(false)
+            inventoryWin.clear()
+            inventoryWin.setCursorPos(1, 1)
+            inventoryWin.write(("Which %d hands hold the %s?"):format(handsNeeded, weaponName))
+
+            for i, limb in ipairs(limbs) do
+                local marker = (cursor == i) and ">" or " "
+                inventoryWin.setCursorPos(1, 2 + i)
+                inventoryWin.write(marker)
+                if selected[limb.label] then
+                    inventoryWin.setTextColor(colors.green)
+                    inventoryWin.write("[x] " .. limb.label)
+                    inventoryWin.setTextColor(colors.white)
+                else
+                    inventoryWin.write("[ ] " .. limb.label)
+                end
+            end
+
+            local confirmMarker = (cursor == confirmRow) and ">" or " "
+            inventoryWin.setCursorPos(1, 2 + #limbs + 1)
+            inventoryWin.write(confirmMarker .. (selectedCount == handsNeeded
+                and "Confirm"
+                or ("Confirm (pick " .. (handsNeeded - selectedCount) .. " more)")))
+
+            local cancelMarker = (cursor == cancelRow) and ">" or " "
+            inventoryWin.setCursorPos(1, 2 + #limbs + 2)
+            inventoryWin.write(cancelMarker .. "Cancel")
+
+            inventoryWin.setVisible(true)
+
+            local _, key = os.pullEvent("key")
+            if key == keys.up then
+                cursor = math.max(1, cursor - 1)
+            elseif key == keys.down then
+                cursor = math.min(cancelRow, cursor + 1)
+            elseif key == ACTIVATE_KEY then
+                if cursor == cancelRow then
+                    return nil
+                elseif cursor == confirmRow then
+                    if selectedCount == handsNeeded then
+                        local hands = {}
+                        for _, limb in ipairs(limbs) do
+                            if selected[limb.label] then
+                                table.insert(hands, limb.label)
+                            end
+                        end
+                        return hands
+                    end
+                else
+                    local label = limbs[cursor].label
+                    if selected[label] then
+                        selected[label] = nil
+                        selectedCount = selectedCount - 1
+                    elseif selectedCount < handsNeeded then
+                        selected[label] = true
+                        selectedCount = selectedCount + 1
+                    end
+                end
+            end
+        end
     end
 
     redraw()
@@ -1702,20 +1859,29 @@ local function runInventoryScreen()
                             from = { kind = "belt", index = entry.index },
                         }
                     elseif entry.kind == "equip" and entry.weaponId then
-                        local ammo = player.ammo[entry.slot]
-                        player.ammo[entry.slot] = nil
-                        player.equipped[entry.slot] = "none"
+                        -- entry.slot is already the canonical hand for a
+                        -- two-handed weapon (see getInventoryRows - only
+                        -- its row exists at all), so this lifts every
+                        -- hand it occupies together, ammo included.
+                        local hands = getWieldingHands(player, entry.slot)
+                        local ammo = player.ammo[hands[1].label]
+                        local slots = {}
+                        for _, hand in ipairs(hands) do
+                            player.ammo[hand.label] = nil
+                            player.equipped[hand.label] = "none"
+                            table.insert(slots, hand.label)
+                        end
                         carrying = {
                             weaponId = entry.weaponId, itemId = weaponEntries[entry.weaponId].itemId, ammo = ammo,
                             name = weaponEntries[entry.weaponId].name,
-                            from = { kind = "equip", slot = entry.slot },
+                            from = { kind = "equip", slots = slots },
                         }
                     elseif entry.kind == "equip" and entry.itemId then
                         player.equipped[entry.slot] = "none"
                         carrying = {
                             itemId = entry.itemId,
                             name = itemEntries[entry.itemId].name,
-                            from = { kind = "equip", slot = entry.slot },
+                            from = { kind = "equip", slots = { entry.slot } },
                         }
                     end
                 end
@@ -1732,7 +1898,35 @@ local function runInventoryScreen()
                 -- resting place regardless of where it came from, which is
                 -- also how unequipping works: pick it up here, then press
                 -- Move again without needing a matching slot at all.
-                if carrying.weaponId and entry and entry.kind == "equip" then
+                if carrying.weaponId and weaponEntries[carrying.weaponId].handedness == "two-handed" and entry and entry.kind == "equip" then
+                    -- A two-handed weapon can't just take the one slot it
+                    -- was dropped on - which other hand joins it is
+                    -- genuinely ambiguous the moment there's more than a
+                    -- pair to choose from (a multi-limbed body), so this
+                    -- always asks rather than guessing. Cancelling leaves
+                    -- carrying untouched, same as dropping nowhere valid
+                    -- normally would - try again, or Move it to the bag.
+                    local hands = pickWieldingHands(2, weaponEntries[carrying.weaponId].name)
+                    if hands then
+                        for _, slot in ipairs(hands) do
+                            local oldWeaponId, oldItemId = getSlotContents(player, { kind = "equip", slot = slot })
+                            if oldWeaponId then
+                                returnAmmoToInventory(player, oldWeaponId, slot)
+                                local oldItemForm = weaponEntries[oldWeaponId].itemId
+                                if oldItemForm then
+                                    table.insert(player.inventory, oldItemForm)
+                                end
+                            elseif oldItemId then
+                                table.insert(player.inventory, oldItemId)
+                            end
+                        end
+                        for i, slot in ipairs(hands) do
+                            player.equipped[slot] = carrying.weaponId
+                            player.ammo[slot] = (i == 1) and carrying.ammo or nil
+                        end
+                        carrying = nil
+                    end
+                elseif carrying.weaponId and entry and entry.kind == "equip" then
                     if entry.weaponId then
                         returnAmmoToInventory(player, entry.weaponId, entry.slot)
                         local oldItemId = weaponEntries[entry.weaponId].itemId
@@ -1744,6 +1938,7 @@ local function runInventoryScreen()
                     end
                     player.equipped[entry.slot] = carrying.weaponId
                     player.ammo[entry.slot] = carrying.ammo
+                    carrying = nil
                 elseif carrying.itemId and not carrying.weaponId and entry and entry.kind == "equip" then
                     if entry.weaponId then
                         returnAmmoToInventory(player, entry.weaponId, entry.slot)
@@ -1755,6 +1950,7 @@ local function runInventoryScreen()
                         table.insert(player.inventory, entry.itemId)
                     end
                     player.equipped[entry.slot] = carrying.itemId
+                    carrying = nil
                 elseif entry and entry.kind == "belt" and (carrying.itemId or carrying.weaponId) then
                     if entry.itemId then
                         if entry.weaponId then
@@ -1766,6 +1962,7 @@ local function runInventoryScreen()
                     if carrying.weaponId then
                         player.ammo["belt" .. entry.index] = carrying.ammo or 0
                     end
+                    carrying = nil
                 else
                     if carrying.itemId then
                         table.insert(player.inventory, carrying.itemId)
@@ -1773,8 +1970,8 @@ local function runInventoryScreen()
                     if carrying.weaponId then
                         depositAmmo(player, carrying.weaponId, carrying.ammo)
                     end
+                    carrying = nil
                 end
-                carrying = nil
             end
 
             redraw()
@@ -2248,25 +2445,45 @@ end
 -- - MANIPULATE limbs (hands, by default) plus anything with a natural
 -- weapon of its own (a stinger) - but only the ones currently in range and
 -- still functional (see isLimbFunctional: a destroyed arm takes its hand
--- down with it, a destroyed stinger just takes itself). Range is a hard
--- cap, not a penalty. STRENGTH only scales melee weapons; spread is folded
--- into the shown hit chance for every weapon, melee included, since it's
--- driven by actual distance rather than weapon type. When restricted (mid a
--- quick action's bonus turn), two-handed weapons are left out entirely,
--- same as an out-of-range one - an out-of-ammo weapon is left out the same
--- way. Returns nil if nothing qualifies at all, or "back" (as the first
--- value) if the player explicitly backed out instead of picking one.
+-- down with it, a destroyed stinger just takes itself). A two-handed
+-- weapon only ever shows up once, off its canonical hand (see
+-- getWieldingHands), and needs every hand holding it functional, not just
+-- the one this loop happens to be looking at. Range is a hard cap, not a
+-- penalty. STRENGTH only scales melee weapons (averaged across every hand
+-- for a two-handed one - see getWeaponStrength); spread is folded into the
+-- shown hit chance for every weapon, melee included, since it's driven by
+-- actual distance rather than weapon type. When restricted (mid a quick
+-- action's bonus turn), two-handed weapons are left out entirely, same as
+-- an out-of-range one - an out-of-ammo weapon is left out the same way.
+-- Returns nil if nothing qualifies at all, or "back" (as the first value)
+-- if the player explicitly backed out instead of picking one.
 local function pickAttack(equipped, enemy, distance, restricted)
     local limbs = collectLabeledParts(player.body)
     local options = {}
     for _, entry in ipairs(limbs) do
         local weapon = getAttackWeapon(entry, equipped)
-        if weapon and isLimbFunctional(entry.part) then
-            local isQuick = weapon.handedness ~= "two-handed"
-            local hasAmmo = not weapon.ammoCapacity
-                or (player.ammo[entry.label] or 0) >= (weapon.ammoPerShot or 1)
-            if distance <= weapon.range and (not restricted or isQuick) and hasAmmo then
-                table.insert(options, entry)
+        if weapon then
+            -- A two-handed weapon only ever surfaces once, from its
+            -- canonical hand (see getWieldingHands), and needs every hand
+            -- holding it functional, not just this one - same idea as
+            -- isLimbFunctional's own ancestor walk, one level removed.
+            local isTwoHanded = weapon.handedness == "two-handed"
+            local hands = isTwoHanded and getWieldingHands(player, entry.label) or { entry }
+            local isCanonical = hands[1].label == entry.label
+            local allFunctional = true
+            for _, hand in ipairs(hands) do
+                if not isLimbFunctional(hand.part) then
+                    allFunctional = false
+                    break
+                end
+            end
+            if isCanonical and allFunctional then
+                local isQuick = not isTwoHanded
+                local hasAmmo = not weapon.ammoCapacity
+                    or (player.ammo[entry.label] or 0) >= (weapon.ammoPerShot or 1)
+                if distance <= weapon.range and (not restricted or isQuick) and hasAmmo then
+                    table.insert(options, entry)
+                end
             end
         end
     end
@@ -2285,17 +2502,25 @@ local function pickAttack(equipped, enemy, distance, restricted)
         local hitPercent = math.floor(getFinalHitChance(player, enemy, weapon, distance) * 100 + 0.5)
         local speedTag = weapon.handedness == "two-handed" and " (full)" or " (quick)"
         local ammoTag = weapon.ammoCapacity and (" [%d/%d ammo]"):format(player.ammo[entry.label] or 0, weapon.ammoCapacity) or ""
+        local label = entry.label
+        if weapon.handedness == "two-handed" then
+            local labels = {}
+            for _, hand in ipairs(getWieldingHands(player, entry.label)) do
+                table.insert(labels, hand.label)
+            end
+            label = table.concat(labels, "+")
+        end
         local line
         if weapon.type == "melee" then
-            local strength = player.stats.strength * getLimbStrength(player, entry.part)
+            local strength = player.stats.strength * getWeaponStrength(player, entry, weapon)
             local scaled = scaleDamageRange(weapon.damage, strength)
             line = ("[%s] %s - %s %s dmg x %d%% STR = %s dmg (%d%% to hit)%s%s"):format(
-                digitLabel(i), entry.label, weapon.name, formatDamageRange(weapon.damage),
+                digitLabel(i), label, weapon.name, formatDamageRange(weapon.damage),
                 math.floor(strength * 100 + 0.5), formatDamageRange(scaled), hitPercent, speedTag, ammoTag
             )
         else
             line = ("[%s] %s - %s %s dmg (ranged, %d%% to hit)%s%s"):format(
-                digitLabel(i), entry.label, weapon.name, formatDamageRange(weapon.damage), hitPercent, speedTag, ammoTag
+                digitLabel(i), label, weapon.name, formatDamageRange(weapon.damage), hitPercent, speedTag, ammoTag
             )
         end
         row = row + writeWrapped(combatWin, 1, row, line)
@@ -2442,18 +2667,25 @@ local function collectAbilities(combatant)
     for slot, occupant in pairs(combatant.equipped) do
         local weapon = weaponEntries[occupant]
         if weapon then
-            local handPart = nil
-            for _, entry in ipairs(collectLabeledParts(combatant.body)) do
-                if entry.label == slot then
-                    handPart = entry.part
-                    break
+            local hands = getWieldingHands(combatant, slot)
+            -- Only the canonical hand adds the weapon's abilities - same
+            -- weapon, same ability, whichever hand(s) hold it (see
+            -- getWieldingHands); every hand sharing a two-handed one needs
+            -- to still be working, same as an ordinary attack does (see
+            -- pickAttack) - Rev it up! shouldn't be usable with one side
+            -- of a two-handed grip destroyed any more than a one-handed
+            -- weapon is with its own hand gone.
+            if hands[1].label == slot then
+                local allFunctional = true
+                for _, hand in ipairs(hands) do
+                    if not isLimbFunctional(hand.part) then
+                        allFunctional = false
+                        break
+                    end
                 end
-            end
-            -- A weapon's abilities need a working hand to use it with, same
-            -- as an ordinary attack does (see pickAttack) - Rev it up!
-            -- shouldn't be usable out of a hand that's been destroyed.
-            if not handPart or isLimbFunctional(handPart) then
-                tryAdd(weapon, handPart, nil, slot)
+                if allFunctional then
+                    tryAdd(weapon, hands[1].part, nil, slot)
+                end
             end
         elseif occupant and occupant ~= "none" and itemEntries[occupant] then
             -- A plain item held in a hand acts as just another belt slot -
@@ -2523,7 +2755,11 @@ local function pickReloadTarget(combatant)
     local options = {}
     for slot, weaponId in pairs(combatant.equipped) do
         local weapon = weaponEntries[weaponId]
-        if weapon and weapon.ammoCapacity and (combatant.ammo[slot] or 0) < weapon.ammoCapacity then
+        -- A two-handed weapon's ammo only ever lives on its canonical hand
+        -- (see getWieldingHands) - skip a secondary hand entirely rather
+        -- than offering to "reload" a pool that isn't actually there.
+        local isSecondaryHand = weapon and getWieldingHands(combatant, slot)[1].label ~= slot
+        if weapon and not isSecondaryHand and weapon.ammoCapacity and (combatant.ammo[slot] or 0) < weapon.ammoCapacity then
             if countCarriedItem(combatant, getAmmoItemId(weapon)) > 0 then
                 table.insert(options, { slot = slot, weapon = weapon })
             end
@@ -2627,6 +2863,18 @@ local function runBeltAction(combatant, droppedItems, enemy, restricted)
             return nil
         end
 
+        -- swapSlots only ever touches the two slots it's given - fine for
+        -- an ordinary weapon, but a two-handed one occupies a slot this
+        -- doesn't know about too (see getWieldingHands), so swapping it
+        -- here would leave that other hand still pointing at a weapon
+        -- that's just moved out from under it. Simplest safe answer:
+        -- don't - the full re-equip flow (the inventory screen's own
+        -- picker) stays overworld-only.
+        if weaponEntries[weaponId].handedness == "two-handed" then
+            logCombat("Two-handed weapons can't be swapped mid-fight.")
+            return nil
+        end
+
         local destinations = {}
         for _, slotDescriptor in ipairs(slots) do
             if not slotsEqual(slotDescriptor, chosen) then
@@ -2687,15 +2935,22 @@ local function runBeltAction(combatant, droppedItems, enemy, restricted)
             return nil
         end
 
+        -- Same "just don't list it" convention as everywhere else: a
+        -- two-handed weapon needs its own picker to say which two hands
+        -- (see the inventory screen's pickWieldingHands), which this flow
+        -- has no room for mid-fight - holstering one back stays an
+        -- overworld-only trip for now, same as swapping one out is.
         local candidates = {}
         for _, slotDescriptor in ipairs(slots) do
             local candidateWeaponId = getSlotContents(combatant, slotDescriptor)
-            if candidateWeaponId then
+            if candidateWeaponId and weaponEntries[candidateWeaponId].handedness ~= "two-handed" then
                 table.insert(candidates, { kind = "slot", slotDescriptor = slotDescriptor, weaponId = candidateWeaponId })
             end
         end
         for i, dropped in ipairs(droppedItems) do
-            table.insert(candidates, { kind = "dropped", index = i, weaponId = dropped.weaponId })
+            if weaponEntries[dropped.weaponId].handedness ~= "two-handed" then
+                table.insert(candidates, { kind = "dropped", index = i, weaponId = dropped.weaponId })
+            end
         end
 
         if #candidates == 0 then
@@ -2741,14 +2996,19 @@ end
 
 -- Knocks whatever's equipped in a slot right out of the player's hands -
 -- a destroyed hand (see runEncounter's enemy-attack branch), or later, some
--- disarm effect. A weapon is removed from `equipped` entirely and tracked
--- in `droppedItems` until it's picked back up mid-fight (see
--- runBeltAction's empty-slot branch) or auto-returned to the inventory
--- once the encounter ends; a plain consumable just falls straight back
--- into the pack instead, since it was never "wielded" in the first place -
--- there's nothing to clatter to the ground or reclaim. Returns the dropped
--- weapon's id, or nil if that slot had nothing equipped, or held a plain
--- item instead of a weapon.
+-- disarm effect. A two-handed weapon only actually falls once every hand
+-- holding it is gone (see getWieldingHands) - called again later for the
+-- last one, it clears every slot the group occupied together and returns
+-- its one shared ammo pool (tracked on whichever hand was canonical) to
+-- the bag exactly once, not per hand. A weapon is removed from `equipped`
+-- entirely and tracked in `droppedItems` until it's picked back up mid-
+-- fight (see runBeltAction's empty-slot branch) or auto-returned to the
+-- inventory once the encounter ends; a plain consumable just falls
+-- straight back into the pack instead, since it was never "wielded" in
+-- the first place - there's nothing to clatter to the ground or reclaim.
+-- Returns the dropped weapon's id, or nil if that slot had nothing
+-- equipped, held a plain item instead of a weapon, or is still held by
+-- another functional hand.
 local function dropEquippedItem(droppedItems, slot)
     local weaponId, itemId = getSlotContents(player, { kind = "equip", slot = slot })
     if itemId then
@@ -2759,8 +3019,16 @@ local function dropEquippedItem(droppedItems, slot)
     if not weaponId then
         return nil
     end
-    returnAmmoToInventory(player, weaponId, slot)
-    player.equipped[slot] = "none"
+    local hands = getWieldingHands(player, slot)
+    for _, hand in ipairs(hands) do
+        if hand.label ~= slot and isLimbFunctional(hand.part) then
+            return nil
+        end
+    end
+    returnAmmoToInventory(player, weaponId, hands[1].label)
+    for _, hand in ipairs(hands) do
+        player.equipped[hand.label] = "none"
+    end
     table.insert(droppedItems, { slot = slot, weaponId = weaponId })
     return weaponId
 end
@@ -3009,14 +3277,23 @@ local function runEncounter(triggeringObject)
                         player.ammo[attacker.label] = player.ammo[attacker.label] - (weapon.ammoPerShot or 1)
                     end
 
-                    logCombat("Your " .. attacker.label .. " swings with " .. weapon.name .. " at the " .. foe.name .. "'s " .. label .. " (" .. hitPercent .. "% to hit)...")
+                    local attackerLabel = attacker.label
+                    if weapon.handedness == "two-handed" then
+                        local labels = {}
+                        for _, hand in ipairs(getWieldingHands(player, attacker.label)) do
+                            table.insert(labels, hand.label)
+                        end
+                        attackerLabel = table.concat(labels, "+")
+                    end
+
+                    logCombat("Your " .. attackerLabel .. " swings with " .. weapon.name .. " at the " .. foe.name .. "'s " .. label .. " (" .. hitPercent .. "% to hit)...")
 
                     if math.random() > hitChance then
                         logCombat("You miss!")
                     else
                         local strength = 1
                         if weapon.type == "melee" then
-                            strength = player.stats.strength * getLimbStrength(player, attacker.part)
+                            strength = player.stats.strength * getWeaponStrength(player, attacker, weapon)
                         end
                         local roll = math.random(weapon.damage.min, weapon.damage.max)
                         local raw = math.floor(roll * strength + 0.5)
