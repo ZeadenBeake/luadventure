@@ -179,7 +179,9 @@ nothing grants `MULTI_LIMBED` yet, but the insectoid species grants
 Each part has:
 
 - **Health/max health** - damaged independently; death is torso health
-  reaching 0 (`isDead`), not a global HP pool.
+  reaching 0 (`isDead`), not a global HP pool. A template's `aimDifficulty`
+  (default 1, most omit it) divides its starting health at creation - see
+  "Stats & combat" for the other half of what it does.
 - **Organ slots** - hardcoded categories (`skin`, `bone`, `muscle`, plus
   torso-only `vitals`/`auxiliary`) that can be swapped (`installCategoryOrgan`),
   and a generic list for anything else installable (`installGenericOrgan`,
@@ -191,8 +193,8 @@ Each part has:
   engine-only (never shown on player-facing UI).
 - **Zone** - which apparel coverage zone this part's protection comes from
   (see "Apparel & coverage"). Parts that can't be covered by clothing at all
-  (horns, a stinger, antennae) just don't set one, and inherit whatever zone
-  their parent has instead (`getPartZone` walks up the tree).
+  (horns, antennae) just don't set one, and inherit whatever zone their
+  parent has instead (`getPartZone` walks up the tree).
 
 Organs and slots can `requires`/`conflicts` tags, and organs can
 `grantsLocal`/`grantsGlobal` tags of their own - that's the whole
@@ -218,16 +220,21 @@ touches anything species-specific elsewhere, so adding a new one is just
 adding a `build` function and an entry in the table.
 
 - **Human** (`newHumanBody`) - the original baseline, unchanged.
-- **Insectoid** (`newInsectoidBody`) - chitin skin/bone instead of the human
-  baseline (`chitin_skin`/`chitin_bone`); the bone organ is what actually
-  grants `TAILED`/`WINGED` globally (swap it out and those slots would lock
-  again), unlocking the torso's tail slot for a `stinger` (see "Natural
-  weapons") and leaving the wing slots deliberately empty for now. The root
-  part is relabeled "abdomen" instead of "torso" (`body.rootLabel`, read by
-  `collectLabeledParts` - purely cosmetic, doesn't change how anything
-  works structurally) and, same as `newTorso` always sets up, is MORTAL.
-  The head (`insectoid_head`) has an antennae slot, filled with a plain
-  `antenna` (does nothing on its own yet - body-part tuning is a later
+- **Insectoid** (`newInsectoidBody`) - chitin skin/bone on the torso itself
+  instead of the human baseline (`chitin_skin`/`chitin_bone`); the bone
+  organ is what actually grants `TAILED`/`WINGED` globally (swap it out and
+  those slots would lock again), unlocking the torso's tail slot for a
+  separate `abdomen` part (chitin-skinned too) and leaving the wing slots
+  deliberately empty for now. The torso is never relabeled or otherwise
+  treated as anything but a torso - a torso is what every creature has, so
+  species-specific anatomy is expressed entirely in what attaches to it.
+  The abdomen isn't a literal tail, just structurally treated like one
+  (same slot, same `TAILED` gating); the sting itself is a generic
+  `stinger` organ installed on the abdomen (see "Natural weapons"), not a
+  further attached part - destroying the abdomen takes the sting with it,
+  same as destroying any other organ-bearing limb would. The head
+  (`insectoid_head`) has its own antennae slot, filled with a plain
+  `antenna` part (does nothing on its own yet - body-part tuning is a later
   pass), and installs a generic `insectoid_features` organ that grants
   `UNSIGHTLY` globally - compound eyes, mandibles, the whole look, modeled
   as a generic organ rather than a part-intrinsic tag since there's no
@@ -261,7 +268,14 @@ anything yet.
   `aim`/`reflex` aren't read raw: `getEffectiveAim` scales by the
   attacker's own head condition, `getEffectiveReflex` by the average limb
   strength of both legs - a busted head throws off your own aim, worn-down
-  legs make you easier to hit.
+  legs make you easier to hit. Once a specific target part is known (both
+  the player's own attacks and an enemy's now always pick their target
+  before rolling, not after), that part's `aimDifficulty` (default 1)
+  divides the chance again on top of spread - a hand or head (both 1.5) is
+  harder to land a hit on than aiming dead center, at the cost of the same
+  divisor taken off its own health (see "Body system"). Reused by nothing
+  else yet, but meant to be - a shared "small/fast target" factor rather
+  than a hit-chance-only special case.
 - **Melee damage**: `stats.strength * getLimbStrength(attacker, the limb
   doing the hitting)`. Ranged weapons don't scale with strength at all.
 - **Damage types**: `bludgeoning`, `piercing`, `slashing`, `fire`, `frost`,
@@ -294,9 +308,10 @@ the uncovered `lower_body`/`pelvis` drag it back down. The `belt` area is
 excluded from this average entirely - reserved for future belt-slot-
 expanding items, unrelated to armor.
 
-Parts that can't be covered (horns, a stinger, antennae) inherit whatever
-coverage their parent's zone provides, via the same `getPartZone` fallback
-used everywhere else.
+Parts that can't be covered (horns, antennae) inherit whatever coverage
+their parent's zone provides, via the same `getPartZone` fallback used
+everywhere else. The insectoid's abdomen isn't one of these - it has a real
+zone of its own (`tail`), same as any other limb.
 
 ### Status effects
 
@@ -407,14 +422,18 @@ normal attack with it is a quick or full action.
 
 Most attacks come from a MANIPULATE limb (a hand) using whatever's
 equipped there, or a bare Strike if nothing is. A **natural weapon** is the
-other case: a part template with its own fixed `naturalWeapon` (a
-`weaponEntries` id) that attacks with it unconditionally - a stinger's
-sting, so far. `getAttackWeapon` picks between the two for any given part;
-`pickAttack` lists both kinds of attacker side by side. A natural weapon
-is never read from `equipped`, so unlike a held weapon it can't be swapped,
+other case: a fixed `naturalWeapon` (a `weaponEntries` id) that a part
+attacks with unconditionally, unrelated to MANIPULATE/`equipped` - either
+set directly on the part's own template, or granted by a generic organ
+installed in it (`getAttackWeapon` checks both, template first) - the
+insectoid's sting is the latter, a `stinger` organ on its `abdomen` part
+rather than baked into a part template of its own (see "Species"), so a
+future creature could reuse the same organ on a differently-shaped part.
+`pickAttack` lists both kinds of attacker side by side. A natural weapon is
+never read from `equipped`, so unlike a held weapon it can't be swapped,
 dropped, or disarmed - the only way to take it away is destroying the part
-itself (see "Limb destruction & disarming", which every attacker - natural
-weapon or not - is already subject to).
+carrying it (see "Limb destruction & disarming", which every attacker -
+natural weapon or not - is already subject to).
 
 ### Limb destruction & disarming
 
@@ -423,7 +442,9 @@ down with it: `isLimbFunctional` walks a part's whole ancestor chain, and
 if *any* of them (including itself) is at 0 health, nothing there can
 attack - `pickAttack` and weapon-granted abilities (`collectAbilities`)
 both check it. A destroyed arm disables the hand hanging off it without
-touching what's equipped there; a destroyed stinger just disables itself.
+touching what's equipped there; a destroyed abdomen just disables itself
+(and the organ-granted sting living on it) - it's a leaf part, nothing
+attaches below it.
 
 A destroyed **hand** specifically goes one step further: whatever it was
 holding is knocked loose (`dropEquippedItem`, called from the enemy-attack

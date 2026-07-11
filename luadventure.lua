@@ -131,18 +131,25 @@ local function tagsAbsent(forbiddenTags, localTags, globalTags)
     return true
 end
 
+-- `aimDifficulty` (default 1, most templates omit it) divides a part's
+-- starting health here, and its hit chance later (see getFinalHitChance) -
+-- the same factor both ways, so a part that's harder to land a hit on also
+-- folds faster once one actually connects.
 local function instantiatePart(templateId)
     local template = partEntries[templateId] or error("Unknown part template: " .. tostring(templateId), 2)
     local organs = {}
     for category, organId in pairs(template.organSlots or {}) do
         organs[category] = organId
     end
+    local aimDifficulty = template.aimDifficulty or 1
+    local health = math.floor(template.health / aimDifficulty + 0.5)
     return {
         template = templateId,
         tags = shallowCopySet(template.tags),
-        health = template.health,
-        maxHealth = template.health,
+        health = health,
+        maxHealth = health,
         zone = template.zone,
+        aimDifficulty = aimDifficulty,
         organs = organs,
         genericOrgans = {},
         statuses = {},
@@ -158,6 +165,7 @@ local function newTorso()
         health = 100,
         maxHealth = 100,
         zone = "torso",
+        aimDifficulty = 1,
         organs = {
             skin = "human_skin",
             bone = "human_bone",
@@ -494,9 +502,10 @@ end
 -- The walk already visits a part's own children immediately after it and
 -- before any sibling's subtree, so this is already in proper depth-first
 -- tree order - nothing needed there, just carrying the depth along.
--- `torso.rootLabel` lets a species call the root part something other than
--- "torso" (an insectoid's is an abdomen) without changing anything about
--- how it actually works structurally.
+-- `torso.rootLabel` would let a species call the root part something other
+-- than "torso" without changing anything about how it actually works
+-- structurally - unused today (a torso is what every creature has, so no
+-- species relabels its own), but left in for whatever eventually wants it.
 local function collectLabeledParts(torso)
     local parts = {}
     local function walk(part, label, depth)
@@ -772,16 +781,19 @@ local function newHumanBody(globalTags)
     return body
 end
 
--- Insectoid body plan: an abdomen (same shape as a torso, just relabeled -
--- see collectLabeledParts) with chitin skin/bone, which is what unlocks its
--- tail (filled with a stinger) and wing slots (deliberately left empty -
--- nothing attaches there yet); a head with an antennae slot and an
--- inherent UNSIGHTLY global tag. Arms/legs/hands/feet are unchanged from
--- the human plan - nothing about this species is different there.
+-- Insectoid body plan: chitin skin/bone on the torso itself, which is what
+-- unlocks the tail slot for a separate abdomen part (chitin-skinned too,
+-- bearing the sting as a generic organ rather than a further attached part
+-- - see gamedata.lua's partEntries.abdomen/organEntries.stinger) and the
+-- wing slots (deliberately left empty - nothing attaches there yet). The
+-- torso itself is never relabeled or otherwise repurposed - a torso is
+-- what every creature has, so this species' own anatomy is expressed
+-- entirely in what attaches to it. A head with its own antennae slot and
+-- an inherent UNSIGHTLY global tag. Arms/legs/hands/feet are unchanged
+-- from the human plan - nothing about this species is different there.
 local function newInsectoidBody(globalTags)
     globalTags = globalTags or {}
     local body = newTorso()
-    body.rootLabel = "abdomen"
     installCategoryOrgan(body, "skin", "chitin_skin", globalTags)
     installCategoryOrgan(body, "bone", "chitin_bone", globalTags)
 
@@ -802,7 +814,8 @@ local function newInsectoidBody(globalTags)
     attachPart(body.subSlots.right_arm, "hand", "human_hand", unlockedTags)
     attachPart(body.subSlots.left_leg, "foot", "human_foot", unlockedTags)
     attachPart(body.subSlots.right_leg, "foot", "human_foot", unlockedTags)
-    attachPart(body, "tail", "stinger", unlockedTags)
+    attachPart(body, "tail", "abdomen", unlockedTags)
+    installGenericOrgan(body.subSlots.tail, "stinger", unlockedTags)
     attachPart(body.subSlots.head, "antennae", "antenna", unlockedTags)
     installGenericOrgan(body.subSlots.head, "insectoid_features", unlockedTags)
 
@@ -1903,10 +1916,17 @@ end
 -- Spread only bites once there's actual empty space between attacker and
 -- target - point blank (distance 1) is zero tiles walked, so it's a no-op
 -- for anything with range 1, which is why ordinary melee never feels it.
-local function getFinalHitChance(attacker, defender, weapon, distance)
+-- `targetPart` is optional (callers that haven't picked one yet, like
+-- pickAttack's own weapon-choice preview, just skip this step) - when
+-- given, its `aimDifficulty` (see instantiatePart) divides the chance down
+-- further, on top of spread: a small or fast-moving part is harder to land
+-- a hit on than aiming dead center.
+local function getFinalHitChance(attacker, defender, weapon, distance, targetPart)
     local base = getHitChance(attacker, defender)
     local spreadPenalty = (weapon.spread / 100) * (distance - 1)
-    return math.max(0, base - spreadPenalty)
+    local chance = math.max(0, base - spreadPenalty)
+    local aimDifficulty = (targetPart and targetPart.aimDifficulty) or 1
+    return chance / aimDifficulty
 end
 
 -- Digit keys double as the selector for both the action menu and the limb
@@ -2209,17 +2229,28 @@ local function getWieldedWeapon(equipped, label)
 end
 
 -- Whatever a given limb would actually attack with: equipped gear (or a
--- bare Strike) for a MANIPULATE limb, or a fixed natural weapon for a part
--- whose template declares one (a stinger's sting, so far). Natural weapons
--- aren't equipment - never read from `equipped`, so they can't be swapped,
--- dropped, or disarmed the way a held weapon can. Returns nil if this part
--- has no way to attack at all.
+-- bare Strike) for a MANIPULATE limb, or a fixed natural weapon otherwise -
+-- either a part template's own `naturalWeapon` field, or one granted by a
+-- generic organ installed in it (a stinger's sting, so far - see
+-- gamedata.lua's organEntries.stinger). Natural weapons aren't equipment -
+-- never read from `equipped`, so they can't be swapped, dropped, or
+-- disarmed the way a held weapon can. Returns nil if this part has no way
+-- to attack at all.
 local function getAttackWeapon(entry, equipped)
     if getPartLocalTags(entry.part).MANIPULATE then
         return getWieldedWeapon(equipped, entry.label)
     end
     local template = partEntries[entry.part.template]
-    return template and template.naturalWeapon and weaponEntries[template.naturalWeapon] or nil
+    if template and template.naturalWeapon then
+        return weaponEntries[template.naturalWeapon]
+    end
+    for _, organId in ipairs(entry.part.genericOrgans) do
+        local organ = organEntries[organId]
+        if organ and organ.naturalWeapon then
+            return weaponEntries[organ.naturalWeapon]
+        end
+    end
+    return nil
 end
 
 -- Lists every limb the attacker can actually fight with as a weapon choice
@@ -2978,7 +3009,7 @@ local function runEncounter(triggeringObject)
                 combatState.redrawPanes()
 
                 if target then
-                    local hitChance = getFinalHitChance(player, foe, weapon, distance)
+                    local hitChance = getFinalHitChance(player, foe, weapon, distance, target)
                     local hitPercent = math.floor(hitChance * 100 + 0.5)
                     speed = weapon.handedness == "two-handed" and "full" or "quick"
 
@@ -3065,7 +3096,13 @@ local function runEncounter(triggeringObject)
                 elseif decision.action == "attack" then
                     local weapon = weaponEntries.strike
                     local distance = gridDistance(player.gridX, player.gridY, enemy.gridX, enemy.gridY)
-                    local enemyHitChance = getFinalHitChance(enemy, player, weapon, distance)
+                    -- Picked before the roll (not after landing a hit) so
+                    -- its aimDifficulty, if any, actually factors into the
+                    -- chance - same order the player's own Fight action
+                    -- already uses (pickLimb, then getFinalHitChance).
+                    local parts = collectLabeledParts(player.body)
+                    local pick = parts[math.random(#parts)]
+                    local enemyHitChance = getFinalHitChance(enemy, player, weapon, distance, pick.part)
                     local enemyHitPercent = math.floor(enemyHitChance * 100 + 0.5)
 
                     logCombat("The " .. enemy.name .. " attacks (" .. enemyHitPercent .. "% to hit)...")
@@ -3073,8 +3110,6 @@ local function runEncounter(triggeringObject)
                     if math.random() > enemyHitChance then
                         logCombat("It misses!")
                     else
-                        local parts = collectLabeledParts(player.body)
-                        local pick = parts[math.random(#parts)]
                         local roll = math.random(weapon.damage.min, weapon.damage.max)
                         local raw = math.floor(roll * enemy.stats.strength + 0.5)
                         local dealt = damagePart(player, pick.part, raw, weapon.damageType)
