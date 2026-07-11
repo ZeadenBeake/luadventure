@@ -698,40 +698,59 @@ local speciesEntries = {
     exiting off an edge leads to. Nothing here calls into the engine at
     all - it's plain data, read by the engine rather than driving it.
 --]]
+-- Both rooms grew from a snug 7x5 to a real 40x30 to give the camera and
+-- (once it lands) the room-sealing/line-of-sight system something
+-- meaningful to work with - placeholder-quality layouts for now (walls,
+-- a door, a building), not narrative content. A real story and a
+-- from-scratch starting area are their own separate thing later.
 local world = {
     village = {
         name = "Village",
         directions = { right = "grasslands" },
-        width = 7,
-        height = 5,
+        width = 40,
+        height = 30,
         -- * is an item, auto-collected the moment the player steps onto
         -- it; !/?/0 are people (quest not yet taken / quest active /
         -- nothing more to say); $ is a save point - `saveId` is how a
         -- save file remembers which one made it.
         objects = {
-            { kind = "item", x = 3, y = 3, itemId = "bullet" },
-            { kind = "person", x = 5, y = 2, name = "Old Soldier", questId = "test_the_dummy" },
-            { kind = "person", x = 2, y = 4, name = "Villager",
+            { kind = "item", x = 12, y = 12, itemId = "bullet" },
+            { kind = "person", x = 10, y = 8, name = "Old Soldier", questId = "test_the_dummy" },
+            { kind = "person", x = 18, y = 20, name = "Villager",
               greeting = { "\"Nice weather we're having, isn't it?\"" } },
-            { kind = "save_point", x = 6, y = 4, saveId = "village_terminal" },
-            { kind = "person", x = 1, y = 5, name = "Villager", greetingId = "villager_gossip" },
-            { kind = "person", x = 2, y = 5, name = "Villager", greetingId = "villager_gossip" },
+            { kind = "person", x = 5, y = 25, name = "Villager", greetingId = "villager_gossip" },
+            { kind = "person", x = 6, y = 25, name = "Villager", greetingId = "villager_gossip" },
+
+            -- A small terminal building, walled and doored - a save
+            -- point genuinely worth walking into rather than just
+            -- another open-ground object, and a sealed room the
+            -- line-of-sight system can actually seal once it lands.
+            { kind = "wall", x1 = 30, y1 = 20, x2 = 36, y2 = 20 },
+            { kind = "wall", x1 = 30, y1 = 26, x2 = 36, y2 = 26 },
+            { kind = "wall", x1 = 30, y1 = 20, x2 = 30, y2 = 22 },
+            { kind = "wall", x1 = 30, y1 = 24, x2 = 30, y2 = 26 },
+            { kind = "wall", x1 = 36, y1 = 20, x2 = 36, y2 = 26 },
+            { kind = "door", x = 30, y = 23, orientation = "vertical", open = false },
+            { kind = "save_point", x = 33, y = 23, saveId = "village_terminal" },
         },
     },
 
-    -- A short wall with a door in it, hiding the test dummy in a small
-    -- back area - keeps it out of the way of ordinary exploration, but
-    -- still right there to spar with whenever we want to test something.
+    -- A walled arena with a door in it, hiding the test dummy in a back
+    -- area - keeps it out of the way of ordinary exploration, but still
+    -- right there to spar with whenever we want to test something.
     grasslands = {
         name = "Grasslands",
         directions = { left = "village" },
-        width = 7,
-        height = 5,
+        width = 40,
+        height = 30,
         objects = {
-            { kind = "wall", x1 = 5, y1 = 1, x2 = 5, y2 = 2 },
-            { kind = "door", x = 5, y = 3, orientation = "vertical", open = false },
-            { kind = "wall", x1 = 5, y1 = 4, x2 = 5, y2 = 5 },
-            { kind = "enemy", x = 6, y = 3 },
+            { kind = "wall", x1 = 20, y1 = 10, x2 = 30, y2 = 10 },
+            { kind = "wall", x1 = 20, y1 = 20, x2 = 30, y2 = 20 },
+            { kind = "wall", x1 = 20, y1 = 10, x2 = 20, y2 = 14 },
+            { kind = "wall", x1 = 20, y1 = 16, x2 = 20, y2 = 20 },
+            { kind = "door", x = 20, y = 15, orientation = "vertical", open = false },
+            { kind = "wall", x1 = 30, y1 = 10, x2 = 30, y2 = 20 },
+            { kind = "enemy", x = 25, y = 15 },
         },
     },
 }

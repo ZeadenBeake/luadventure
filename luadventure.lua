@@ -1186,30 +1186,80 @@ function engine.getObjectGlyph(obj)
     return "?"
 end
 
+-- Where a viewW x viewH window should start reading from in `loc` to keep
+-- (focusX, focusY) centered in it - clamped per axis so it never scrolls
+-- past a room edge, and collapsing to 1 (no scrolling at all) whenever
+-- the room is smaller than the viewport in that dimension.
+function engine.getCameraOrigin(loc, focusX, focusY, viewW, viewH)
+    local function axis(focus, size, view)
+        local maxOrigin = math.max(1, size - view + 1)
+        return math.max(1, math.min(focus - math.floor(view / 2), maxOrigin))
+    end
+    return axis(focusX, loc.width, viewW), axis(focusY, loc.height, viewH)
+end
+
+-- Shared by engine.drawMain and engine.drawCombatField: draws a
+-- camera-centered viewport of `loc` into `win`, translating grid
+-- coordinates to screen ones. Row 1 is always the location name; the
+-- window's last row is always left alone (reserved for the caller's own
+-- status line, if it has one - whether or not that row is filled in
+-- keeps the usable viewport height identical frame to frame instead of
+-- jumping around). `extraCells` (a list of `{x=, y=, glyph=}`) overlays
+-- on top of the room itself - the player's own "@" always, combat's
+-- enemies too. A cell outside the room's own bounds (the camera showing
+-- past a small room's edge) renders as "~" rather than a real glyph.
+-- Doesn't touch window visibility/clearing - the caller wraps that,
+-- since it may still need to write into the reserved last row first.
+-- Returns the camera origin used, so callers that need to translate grid
+-- coordinates back into screen ones later (see combatState.flash) can.
+function engine.drawRoomView(win, loc, focusX, focusY, extraCells)
+    local winW, winH = win.getSize()
+    local viewW, viewH = winW, winH - 2
+    local camX, camY = engine.getCameraOrigin(loc, focusX, focusY, viewW, viewH)
+
+    win.setCursorPos(1, 1)
+    win.write(loc.name)
+
+    local overlay = {}
+    for _, cell in ipairs(extraCells) do
+        overlay[cell.y] = overlay[cell.y] or {}
+        overlay[cell.y][cell.x] = cell.glyph
+    end
+
+    for row = 1, viewH do
+        local gridY = camY + row - 1
+        local line = {}
+        for col = 1, viewW do
+            local gridX = camX + col - 1
+            if gridX < 1 or gridX > loc.width or gridY < 1 or gridY > loc.height then
+                line[col] = "~"
+            elseif overlay[gridY] and overlay[gridY][gridX] then
+                line[col] = overlay[gridY][gridX]
+            else
+                local obj = engine.findObjectAt(loc, gridX, gridY)
+                line[col] = obj and engine.getObjectGlyph(obj) or "."
+            end
+        end
+        win.setCursorPos(1, row + 1)
+        win.write(table.concat(line))
+    end
+
+    return camX, camY
+end
+
 function engine.drawMain()
     local loc = world[player.location]
 
     mainWin.setVisible(false)
     mainWin.clear()
-    mainWin.setCursorPos(1, 1)
-    mainWin.write(loc.name)
 
-    for y = 1, loc.height do
-        local row = {}
-        for x = 1, loc.width do
-            if x == player.gridX and y == player.gridY then
-                row[x] = "@"
-            else
-                local obj = engine.findObjectAt(loc, x, y)
-                row[x] = obj and engine.getObjectGlyph(obj) or "."
-            end
-        end
-        mainWin.setCursorPos(1, y + 1)
-        mainWin.write(table.concat(row))
-    end
+    engine.drawRoomView(mainWin, loc, player.gridX, player.gridY, {
+        { x = player.gridX, y = player.gridY, glyph = "@" },
+    })
 
     if message ~= "" then
-        mainWin.setCursorPos(1, loc.height + 3)
+        local _, winH = mainWin.getSize()
+        mainWin.setCursorPos(1, winH)
         mainWin.write(message)
     end
 
@@ -2304,45 +2354,50 @@ function engine.resetCombatLog()
     engine.drawCombatLog()
 end
 
--- Shows the room grid with every combatant in the scene on it, so position
--- (and thus range/spread) is something the player can actually see and
--- plan around. Drawn into its own top-left pane rather than sharing a
--- full-screen window with the action menu.
+-- Shows the same real room engine.drawMain does (walls, doors, items and
+-- all - see engine.drawRoomView) with every combatant in the scene
+-- overlaid on top, so position (and thus range/spread) is something the
+-- player can actually see and plan around. Drawn into its own top-left
+-- pane rather than sharing a full-screen window with the action menu.
+-- Stashes the camera origin it used on combatState so combatState.flash
+-- can translate a hit's grid coordinates into the same screen space.
 function engine.drawCombatField(loc, scene)
     combatMapWin.setVisible(false)
     combatMapWin.clear()
-    combatMapWin.setCursorPos(1, 1)
-    combatMapWin.write(loc.name)
-    for y = 1, loc.height do
-        local row = {}
-        for x = 1, loc.width do
-            row[x] = "."
-        end
-        for _, foe in ipairs(scene) do
-            if foe.gridX >= 1 and foe.gridX <= loc.width and foe.gridY == y then
-                row[foe.gridX] = "E"
-            end
-        end
-        if player.gridY == y then
-            row[player.gridX] = "@"
-        end
-        combatMapWin.setCursorPos(1, y + 1)
-        combatMapWin.write(table.concat(row))
+
+    local extraCells = { { x = player.gridX, y = player.gridY, glyph = "@" } }
+    for _, foe in ipairs(scene) do
+        table.insert(extraCells, { x = foe.gridX, y = foe.gridY, glyph = "E" })
     end
+
+    combatState.cameraX, combatState.cameraY = engine.drawRoomView(combatMapWin, loc, player.gridX, player.gridY, extraCells)
+
     combatMapWin.setVisible(true)
 end
 
 -- Briefly flips a single map cell to red, for a hit landing - the map's
 -- already sitting there visible from the last engine.drawCombatField, so this
 -- just paints straight over the one cell rather than redrawing the whole
--- pane, then paints it back once combatState.logDelay has passed.
+-- pane, then paints it back once combatState.logDelay has passed. Grid
+-- coordinates have to go through the same camera translation
+-- engine.drawRoomView used (see combatState.cameraX/Y, stashed by
+-- engine.drawCombatField) now that the map can scroll - a cell that's
+-- currently off-screen just doesn't flash at all rather than writing
+-- into an unrelated part of the window.
 function combatState.flash(x, y, symbol)
+    local camX, camY = combatState.cameraX or 1, combatState.cameraY or 1
+    local screenX, screenY = x - camX + 1, y - camY + 1
+    local winW, winH = combatMapWin.getSize()
+    if screenX < 1 or screenX > winW or screenY < 1 or screenY > winH - 2 then
+        return
+    end
+
     combatMapWin.setTextColor(colors.red)
-    combatMapWin.setCursorPos(x, y + 1)
+    combatMapWin.setCursorPos(screenX, screenY + 1)
     combatMapWin.write(symbol)
     sleep(combatState.logDelay)
     combatMapWin.setTextColor(colors.white)
-    combatMapWin.setCursorPos(x, y + 1)
+    combatMapWin.setCursorPos(screenX, screenY + 1)
     combatMapWin.write(symbol)
 end
 
@@ -3290,15 +3345,10 @@ function engine.runEncounter(triggeringObject)
     local selectedEnemyIndex = 1
     combatState.loc, combatState.scene, combatState.selectedIndex = loc, scene, selectedEnemyIndex
 
-    -- Enemy spawns somewhere else in the same room; retry a few times to
-    -- avoid landing right on the player, but don't sweat a tiny room.
-    for _ = 1, 20 do
-        enemy.gridX = math.random(loc.width)
-        enemy.gridY = math.random(loc.height)
-        if enemy.gridX ~= player.gridX or enemy.gridY ~= player.gridY then
-            break
-        end
-    end
+    -- Fights happen wherever the enemy actually is on the map, not
+    -- somewhere randomly reshuffled - real walls/doors only mean anything
+    -- if position carries over from the moment the fight actually starts.
+    enemy.gridX, enemy.gridY = triggeringObject.x, triggeringObject.y
 
     engine.resetCombatLog()
     engine.logActivity(engine.dialogue("{{name}} fought " .. engine.joinEnemyNames(scene) .. ".", player))
