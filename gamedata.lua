@@ -89,15 +89,6 @@ local organEntries = {
     -- shape rather than something you could organ-swap away.
     insectoid_features = { grantsGlobal = { "UNSIGHTLY" } },
 
-    -- A natural weapon granted as a generic organ rather than baked into a
-    -- part template - installed on the insectoid's abdomen (see
-    -- Luadventure.newInsectoidBody), it's what actually grants the sting
-    -- attack; the abdomen itself is just an inert chitin-covered limb
-    -- without it. `naturalWeapon` here works exactly like the same field
-    -- on a part template - whichever the attacking part carries, template
-    -- or installed organ, wins (see the engine's getAttackWeapon).
-    stinger = { naturalWeapon = "stinger_sting" },
-
     subdermal_plating = { -- generic organ, not tied to a hardcoded category
         requires = { "SKIN" },
         conflicts = { "SUBDERMAL", "CHITIN" },
@@ -132,15 +123,15 @@ local organEntries = {
 -- attaches to it comes from here.
 --
 -- `zone` is which apparel coverage zone this part draws its protection from
--- (see COVERAGE_AREAS/AREA_TO_ZONE below) - horns and antennae can't be
--- covered at all, so their templates just don't set one, which makes them
--- fall through to whatever zone their parent has instead.
+-- (see COVERAGE_AREAS/AREA_TO_ZONE below) - horns, antennae, and a stinger
+-- can't be covered at all, so their templates just don't set one, which
+-- makes them fall through to whatever zone their parent has instead.
 --
 -- `aimDifficulty` (default 1, omitted where it doesn't apply) divides both
 -- this part's hit chance (see the engine's getFinalHitChance) and its own
 -- health at creation by the same factor - a small or fast-moving part (a
--- hand, a head) is harder to land a hit on than aiming dead center, but
--- folds faster once it's actually hit.
+-- hand, a head, and more so a stinger) is harder to land a hit on than
+-- aiming dead center, but folds faster once it's actually hit.
 local partEntries = {
     human_head = {
         tags = { MORTAL = true },
@@ -218,15 +209,19 @@ local partEntries = {
     -- torso itself: a torso is what every creature has, so it's never
     -- relabeled or repurposed into a species' own anatomy. Not a literal
     -- tail, but it sits where one would and is structurally treated like
-    -- one. Chitin skin/bone same as the rest of the insectoid plan; the
-    -- sting itself is a generic organ installed on it (see
-    -- organEntries.stinger above), not a further attached part.
+    -- one. Chitin skin/bone same as the rest of the insectoid plan; its own
+    -- stinger subslot below is where the sting attaches (as a real part,
+    -- not folded into the abdomen itself) - future cybernetics that modify
+    -- the sting or its venom would be organs installed on *that* part, once
+    -- those exist.
     abdomen = {
         tags = {},
         health = 100,
         zone = "tail",
         organSlots = { skin = "chitin_skin", bone = "chitin_bone", muscle = "human_muscle" },
-        subSlots = {},
+        subSlots = {
+            stinger = { requires = {} },
+        },
     },
 
     -- An antenna can't be covered by apparel at all, same reasoning as horn
@@ -236,6 +231,22 @@ local partEntries = {
         health = 100,
         organSlots = { skin = "chitin_skin", bone = "chitin_bone", muscle = "human_muscle" },
         subSlots = {},
+    },
+
+    -- The stinger itself: a small, precise structure at the tip of the
+    -- abdomen rather than the abdomen's whole mass, hence the hefty
+    -- aimDifficulty - notably harder to land a hit on (and far more
+    -- fragile once it is) than the merely-small hand/head above. Can't be
+    -- covered by apparel, same reasoning as horn/antenna. naturalWeapon
+    -- marks it as its own unarmed attack, separate from (and not
+    -- requiring) MANIPULATE/equipped-gear - see the engine's pickAttack.
+    stinger = {
+        tags = {},
+        health = 100,
+        aimDifficulty = 2.5,
+        organSlots = { skin = "chitin_skin", bone = "chitin_bone", muscle = "human_muscle" },
+        subSlots = {},
+        naturalWeapon = "stinger_sting",
     },
 }
 
@@ -335,7 +346,7 @@ local weaponEntries = {
         itemId = "laser_pistol",
     },
 
-    -- A natural weapon (see organEntries.stinger), not equipment - barely
+    -- A natural weapon (see partEntries.stinger), not equipment - barely
     -- any direct damage, but onHit below stacks a hefty dose of poison on
     -- every landed hit.
     stinger_sting = { name = "Sting", damage = { min = 1, max = 1 }, type = "melee", range = 1, spread = 0, damageType = "piercing", handedness = "one-handed" },

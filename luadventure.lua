@@ -782,15 +782,17 @@ local function newHumanBody(globalTags)
 end
 
 -- Insectoid body plan: chitin skin/bone on the torso itself, which is what
--- unlocks the tail slot for a separate abdomen part (chitin-skinned too,
--- bearing the sting as a generic organ rather than a further attached part
--- - see gamedata.lua's partEntries.abdomen/organEntries.stinger) and the
--- wing slots (deliberately left empty - nothing attaches there yet). The
--- torso itself is never relabeled or otherwise repurposed - a torso is
--- what every creature has, so this species' own anatomy is expressed
--- entirely in what attaches to it. A head with its own antennae slot and
--- an inherent UNSIGHTLY global tag. Arms/legs/hands/feet are unchanged
--- from the human plan - nothing about this species is different there.
+-- unlocks the tail slot for a separate abdomen part (chitin-skinned too),
+-- itself carrying its own stinger sub-part (see gamedata.lua's
+-- partEntries.abdomen/partEntries.stinger - a small, precise structure at
+-- the abdomen's tip rather than the abdomen's whole mass, hence its own
+-- steep aimDifficulty), and the wing slots (deliberately left empty -
+-- nothing attaches there yet). The torso itself is never relabeled or
+-- otherwise repurposed - a torso is what every creature has, so this
+-- species' own anatomy is expressed entirely in what attaches to it. A
+-- head with its own antennae slot and an inherent UNSIGHTLY global tag.
+-- Arms/legs/hands/feet are unchanged from the human plan - nothing about
+-- this species is different there.
 local function newInsectoidBody(globalTags)
     globalTags = globalTags or {}
     local body = newTorso()
@@ -815,7 +817,7 @@ local function newInsectoidBody(globalTags)
     attachPart(body.subSlots.left_leg, "foot", "human_foot", unlockedTags)
     attachPart(body.subSlots.right_leg, "foot", "human_foot", unlockedTags)
     attachPart(body, "tail", "abdomen", unlockedTags)
-    installGenericOrgan(body.subSlots.tail, "stinger", unlockedTags)
+    attachPart(body.subSlots.tail, "stinger", "stinger", unlockedTags)
     attachPart(body.subSlots.head, "antennae", "antenna", unlockedTags)
     installGenericOrgan(body.subSlots.head, "insectoid_features", unlockedTags)
 
@@ -2229,28 +2231,17 @@ local function getWieldedWeapon(equipped, label)
 end
 
 -- Whatever a given limb would actually attack with: equipped gear (or a
--- bare Strike) for a MANIPULATE limb, or a fixed natural weapon otherwise -
--- either a part template's own `naturalWeapon` field, or one granted by a
--- generic organ installed in it (a stinger's sting, so far - see
--- gamedata.lua's organEntries.stinger). Natural weapons aren't equipment -
--- never read from `equipped`, so they can't be swapped, dropped, or
--- disarmed the way a held weapon can. Returns nil if this part has no way
--- to attack at all.
+-- bare Strike) for a MANIPULATE limb, or a fixed natural weapon for a part
+-- whose template declares one (a stinger's sting, so far). Natural weapons
+-- aren't equipment - never read from `equipped`, so they can't be swapped,
+-- dropped, or disarmed the way a held weapon can. Returns nil if this part
+-- has no way to attack at all.
 local function getAttackWeapon(entry, equipped)
     if getPartLocalTags(entry.part).MANIPULATE then
         return getWieldedWeapon(equipped, entry.label)
     end
     local template = partEntries[entry.part.template]
-    if template and template.naturalWeapon then
-        return weaponEntries[template.naturalWeapon]
-    end
-    for _, organId in ipairs(entry.part.genericOrgans) do
-        local organ = organEntries[organId]
-        if organ and organ.naturalWeapon then
-            return weaponEntries[organ.naturalWeapon]
-        end
-    end
-    return nil
+    return template and template.naturalWeapon and weaponEntries[template.naturalWeapon] or nil
 end
 
 -- Lists every limb the attacker can actually fight with as a weapon choice

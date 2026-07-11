@@ -193,8 +193,8 @@ Each part has:
   engine-only (never shown on player-facing UI).
 - **Zone** - which apparel coverage zone this part's protection comes from
   (see "Apparel & coverage"). Parts that can't be covered by clothing at all
-  (horns, antennae) just don't set one, and inherit whatever zone their
-  parent has instead (`getPartZone` walks up the tree).
+  (horns, antennae, a stinger) just don't set one, and inherit whatever zone
+  their parent has instead (`getPartZone` walks up the tree).
 
 Organs and slots can `requires`/`conflicts` tags, and organs can
 `grantsLocal`/`grantsGlobal` tags of their own - that's the whole
@@ -229,10 +229,14 @@ adding a `build` function and an entry in the table.
   treated as anything but a torso - a torso is what every creature has, so
   species-specific anatomy is expressed entirely in what attaches to it.
   The abdomen isn't a literal tail, just structurally treated like one
-  (same slot, same `TAILED` gating); the sting itself is a generic
-  `stinger` organ installed on the abdomen (see "Natural weapons"), not a
-  further attached part - destroying the abdomen takes the sting with it,
-  same as destroying any other organ-bearing limb would. The head
+  (same slot, same `TAILED` gating); the sting itself is a further
+  attached `stinger` part, its own `subSlots` entry on the abdomen (see
+  "Natural weapons") rather than folded into the abdomen's own mass -
+  small and precise enough to warrant a steeper `aimDifficulty` of its own
+  (see "Stats & combat"), and a future home for cybernetics that modify
+  the sting or its venom once those exist. Destroying the abdomen takes
+  the sting down with it, same as destroying any other limb's parent
+  would. The head
   (`insectoid_head`) has its own antennae slot, filled with a plain
   `antenna` part (does nothing on its own yet - body-part tuning is a later
   pass), and installs a generic `insectoid_features` organ that grants
@@ -271,11 +275,12 @@ anything yet.
   legs make you easier to hit. Once a specific target part is known (both
   the player's own attacks and an enemy's now always pick their target
   before rolling, not after), that part's `aimDifficulty` (default 1)
-  divides the chance again on top of spread - a hand or head (both 1.5) is
-  harder to land a hit on than aiming dead center, at the cost of the same
-  divisor taken off its own health (see "Body system"). Reused by nothing
-  else yet, but meant to be - a shared "small/fast target" factor rather
-  than a hit-chance-only special case.
+  divides the chance again on top of spread - a hand or head (both 1.5),
+  and more so a stinger (2.5, small and precise enough to warrant a
+  steeper one of its own), is harder to land a hit on than aiming dead
+  center, at the cost of the same divisor taken off its own health (see
+  "Body system"). Reused by nothing else yet, but meant to be - a shared
+  "small/fast target" factor rather than a hit-chance-only special case.
 - **Melee damage**: `stats.strength * getLimbStrength(attacker, the limb
   doing the hitting)`. Ranged weapons don't scale with strength at all.
 - **Damage types**: `bludgeoning`, `piercing`, `slashing`, `fire`, `frost`,
@@ -308,10 +313,10 @@ the uncovered `lower_body`/`pelvis` drag it back down. The `belt` area is
 excluded from this average entirely - reserved for future belt-slot-
 expanding items, unrelated to armor.
 
-Parts that can't be covered (horns, antennae) inherit whatever coverage
-their parent's zone provides, via the same `getPartZone` fallback used
-everywhere else. The insectoid's abdomen isn't one of these - it has a real
-zone of its own (`tail`), same as any other limb.
+Parts that can't be covered (horns, antennae, a stinger) inherit whatever
+coverage their parent's zone provides, via the same `getPartZone` fallback
+used everywhere else. The insectoid's abdomen isn't one of these - it has a
+real zone of its own (`tail`), same as any other limb.
 
 ### Status effects
 
@@ -422,18 +427,18 @@ normal attack with it is a quick or full action.
 
 Most attacks come from a MANIPULATE limb (a hand) using whatever's
 equipped there, or a bare Strike if nothing is. A **natural weapon** is the
-other case: a fixed `naturalWeapon` (a `weaponEntries` id) that a part
-attacks with unconditionally, unrelated to MANIPULATE/`equipped` - either
-set directly on the part's own template, or granted by a generic organ
-installed in it (`getAttackWeapon` checks both, template first) - the
-insectoid's sting is the latter, a `stinger` organ on its `abdomen` part
-rather than baked into a part template of its own (see "Species"), so a
-future creature could reuse the same organ on a differently-shaped part.
-`pickAttack` lists both kinds of attacker side by side. A natural weapon is
-never read from `equipped`, so unlike a held weapon it can't be swapped,
-dropped, or disarmed - the only way to take it away is destroying the part
-carrying it (see "Limb destruction & disarming", which every attacker -
-natural weapon or not - is already subject to).
+other case: a part template with its own fixed `naturalWeapon` (a
+`weaponEntries` id) that attacks with it unconditionally - the insectoid's
+sting, so far, its own `stinger` part attached to the abdomen (see
+"Species") rather than folded into the abdomen itself, precisely so it can
+carry its own steep `aimDifficulty` and, eventually, its own organ slots.
+`getAttackWeapon` picks between MANIPULATE/`equipped` and a template's
+`naturalWeapon` for any given part; `pickAttack` lists both kinds of
+attacker side by side. A natural weapon is never read from `equipped`, so
+unlike a held weapon it can't be swapped, dropped, or disarmed - the only
+way to take it away is destroying the part carrying it (see "Limb
+destruction & disarming", which every attacker - natural weapon or not -
+is already subject to).
 
 ### Limb destruction & disarming
 
@@ -442,9 +447,8 @@ down with it: `isLimbFunctional` walks a part's whole ancestor chain, and
 if *any* of them (including itself) is at 0 health, nothing there can
 attack - `pickAttack` and weapon-granted abilities (`collectAbilities`)
 both check it. A destroyed arm disables the hand hanging off it without
-touching what's equipped there; a destroyed abdomen just disables itself
-(and the organ-granted sting living on it) - it's a leaf part, nothing
-attaches below it.
+touching what's equipped there; a destroyed abdomen takes its stinger down
+with it the same way, and a destroyed stinger just disables itself.
 
 A destroyed **hand** specifically goes one step further: whatever it was
 holding is knocked loose (`dropEquippedItem`, called from the enemy-attack
