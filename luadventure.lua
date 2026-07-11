@@ -1004,8 +1004,13 @@ local npc = character:new()
 npc.new = character.new
 
 -- state = { self = this npc, player = player, distance = <cells apart> }.
--- Returns one of: {action="attack"}, {action="move", dx=, dy=}, {action="idle"}.
--- Base default just idles - every real NPC type overrides this.
+-- Returns one of: {action="attack", weapon=} (weapon optional, falls back
+-- to a bare Strike - see the endTurn block in engine.runEncounter),
+-- {action="move", dx=, dy=}, {action="idle"}. Base default just idles -
+-- every real NPC type overrides this, typically as a priority chain of
+-- reusable behaviors (engine.fleeDanger/engine.fleeMelee/
+-- engine.approachAndStrike, see those) rather than one bespoke function
+-- per type.
 function npc:decide(state)
     return { action = "idle" }
 end
@@ -2315,31 +2320,57 @@ function engine.gridDistance(ax, ay, bx, by)
     return math.max(math.abs(ax - bx), math.abs(ay - by))
 end
 
+-- A single cardinal step (dx/dy magnitude 0 or 1, never both nonzero)
+-- from (fromX, fromY) toward (towardX, towardY) - whichever axis has more
+-- ground left to cover, same "one axis per turn" rule the player's own
+-- arrow-key movement follows. Returns 0, 0 if already there. The building
+-- block behind any AI behavior that closes distance (see
+-- engine.approachAndStrike) - engine.stepAway is its mirror image.
+function engine.stepToward(fromX, fromY, towardX, towardY)
+    local dx, dy = towardX - fromX, towardY - fromY
+    if dx == 0 and dy == 0 then
+        return 0, 0
+    elseif math.abs(dx) >= math.abs(dy) then
+        return (dx > 0 and 1 or -1), 0
+    else
+        return 0, (dy > 0 and 1 or -1)
+    end
+end
+
+-- The mirror of engine.stepToward - a single cardinal step from (fromX,
+-- fromY) that increases distance from (dangerX, dangerY) instead of
+-- closing it. Standing exactly on top of the danger has no well-defined
+-- "away" direction - picks left arbitrarily but deterministically rather
+-- than freezing in place. The building block behind any AI behavior that
+-- retreats (see engine.fleeDanger/engine.fleeMelee).
+function engine.stepAway(fromX, fromY, dangerX, dangerY)
+    local dx, dy = fromX - dangerX, fromY - dangerY
+    if dx == 0 and dy == 0 then
+        return -1, 0
+    elseif math.abs(dx) >= math.abs(dy) then
+        return (dx > 0 and 1 or -1), 0
+    else
+        return 0, (dy > 0 and 1 or -1)
+    end
+end
+
 -- Super simple test enemy, built from the same swappable-limb system the
 -- player uses - torso and head are MORTAL the same way any torso is, so it
 -- can be crippled or killed exactly like the player can. It's melee-only and
 -- bare-fisted, so decide() paths straight toward the player (no pathfinding
 -- needed - the rooms are empty rectangles) until its fist is in range, then
--- throws a punch every turn after that. Behavior is hard-coded rather than
--- data-driven, same as any other non-player creature - this is the "type",
--- inherited stats and all, from which live instances are spawned.
+-- throws a punch every turn after that - except for the one thing worth
+-- running from at all: a grenade about to land on top of it
+-- (engine.fleeDanger), checked first every turn, ahead of its normal
+-- brawler behavior (engine.approachAndStrike). Behavior is hard-coded
+-- rather than data-driven, same as any other non-player creature - this is
+-- the "type", inherited stats and all, from which live instances are
+-- spawned.
 local testDummyType = npc:new()
 testDummyType.name = "test dummy"
 
 function testDummyType:decide(state)
-    if state.distance <= weaponEntries.strike.range then
-        return { action = "attack" }
-    end
-
-    -- Cardinal-only, same as the player's own arrow-key movement - one axis
-    -- per turn, whichever has more ground left to cover.
-    local dx = state.player.gridX - state.self.gridX
-    local dy = state.player.gridY - state.self.gridY
-    if math.abs(dx) >= math.abs(dy) then
-        return { action = "move", dx = (dx > 0 and 1 or -1), dy = 0 }
-    else
-        return { action = "move", dx = 0, dy = (dy > 0 and 1 or -1) }
-    end
+    return engine.fleeDanger(state) or engine.approachAndStrike(state, weaponEntries.strike)
 end
 
 function engine.spawnTestDummy()
@@ -2500,6 +2531,68 @@ end
 -- appears, and how long a flashed map cell stays red - one shared knob for
 -- both, tweak here to make combat resolve faster/slower.
 local combatState = { logDelay = 0.5 }
+
+-- Generic decide() building blocks, meant to be composed rather than each
+-- NPC type reimplementing "move toward"/"move away" from scratch (see
+-- npc:decide/testDummyType:decide below for the convention: a priority
+-- chain of `engine.fleeX(state, ...) or engine.fleeY(state, ...) or
+-- engine.someFallbackBehavior(state, ...)`, first non-nil wins). The
+-- "flee" ones are conditional checks - they return nil when the danger
+-- they're watching for isn't actually present right now, so a decide()
+-- can chain several and fall through to whatever it does normally; a
+-- fallback behavior like engine.approachAndStrike never returns nil,
+-- since something has to happen every turn.
+
+-- Steps away from wherever a thrown grenade is about to land (see
+-- engine.queuePendingGrenade/engine.resolvePendingGrenade) if `state.self`
+-- is currently within its blast radius - the one turn between a throw and
+-- its detonation is exactly the window an NPC gets to react in. Returns
+-- nil (no danger to flee, decide() should fall through to its normal
+-- behavior) if there's no pending grenade at all, or `state.self` isn't
+-- close enough to it to matter.
+function engine.fleeDanger(state)
+    local pending = combatState.pendingGrenade
+    if not pending then
+        return nil
+    end
+    if engine.gridDistance(state.self.gridX, state.self.gridY, pending.x, pending.y) > pending.radius then
+        return nil
+    end
+    local dx, dy = engine.stepAway(state.self.gridX, state.self.gridY, pending.x, pending.y)
+    return { action = "move", dx = dx, dy = dy }
+end
+
+-- Steps away from the player once they're within `keepDistance` tiles -
+-- for an NPC type better suited to fighting at range than getting swung
+-- at (nothing uses this yet, since the only enemy type so far is a
+-- melee brawler - see engine.approachAndStrike - but it's here for
+-- whichever ranged one shows up next). Returns nil (not close enough to
+-- bother retreating from) if `state.distance` is already beyond
+-- `keepDistance`.
+function engine.fleeMelee(state, keepDistance)
+    if state.distance > keepDistance then
+        return nil
+    end
+    local dx, dy = engine.stepAway(state.self.gridX, state.self.gridY, state.player.gridX, state.player.gridY)
+    return { action = "move", dx = dx, dy = dy }
+end
+
+-- The generic "melee brawler" fallback: attacks with `weapon` once in
+-- range, otherwise closes distance one cardinal step at a time
+-- (engine.stepToward) - no pathfinding, since there's nothing blocking a
+-- straight line in either room yet (see the design doc's "Known gaps" for
+-- why that's still true). `decision.weapon` carries the weapon through to
+-- the actual attack resolution (the endTurn block in engine.runEncounter),
+-- which falls back to `weaponEntries.strike` if a decide() didn't come
+-- through this function at all - every current NPC does, but nothing
+-- requires it to.
+function engine.approachAndStrike(state, weapon)
+    if state.distance <= weapon.range then
+        return { action = "attack", weapon = weapon }
+    end
+    local dx, dy = engine.stepToward(state.self.gridX, state.self.gridY, state.player.gridX, state.player.gridY)
+    return { action = "move", dx = dx, dy = dy }
+end
 
 -- Every wrapped line logged so far this encounter, oldest first - mirrors
 -- activityLog/engine.drawLog/engine.logActivity (see those), just scoped to a single
@@ -4105,18 +4198,37 @@ function engine.runEncounter(triggeringObject)
             -- was the killing one) doesn't get to act - the scene check at
             -- the top of the loop will end the encounter next turn.
             if not engine.sceneCleared(scene) then
+                local distanceBeforeTurn = engine.gridDistance(player.gridX, player.gridY, enemy.gridX, enemy.gridY)
                 local decision = enemy:decide({
                     self = enemy,
                     player = player,
-                    distance = engine.gridDistance(player.gridX, player.gridY, enemy.gridX, enemy.gridY),
+                    distance = distanceBeforeTurn,
                 })
 
                 if decision.action == "move" then
                     enemy.gridX = math.max(1, math.min(loc.width, enemy.gridX + decision.dx))
                     enemy.gridY = math.max(1, math.min(loc.height, enemy.gridY + decision.dy))
-                    engine.logCombat("The " .. enemy.name .. " closes in!")
+
+                    -- A "move" decision doesn't say *why* - engine.fleeDanger/
+                    -- engine.fleeMelee and engine.approachAndStrike all
+                    -- return the exact same shape, so this reads the actual
+                    -- result instead of assuming every move closes distance
+                    -- the way it always used to.
+                    local distanceAfterTurn = engine.gridDistance(player.gridX, player.gridY, enemy.gridX, enemy.gridY)
+                    if distanceAfterTurn < distanceBeforeTurn then
+                        engine.logCombat("The " .. enemy.name .. " closes in!")
+                    elseif distanceAfterTurn > distanceBeforeTurn then
+                        engine.logCombat("The " .. enemy.name .. " backs away!")
+                    else
+                        engine.logCombat("The " .. enemy.name .. " repositions!")
+                    end
                 elseif decision.action == "attack" then
-                    local weapon = weaponEntries.strike
+                    -- engine.approachAndStrike carries its own weapon
+                    -- through on the decision it returns - falls back to
+                    -- a bare Strike for a decide() that doesn't (nothing
+                    -- current doesn't, but nothing requires going through
+                    -- that function at all).
+                    local weapon = decision.weapon or weaponEntries.strike
                     local distance = engine.gridDistance(player.gridX, player.gridY, enemy.gridX, enemy.gridY)
                     -- Picked before the roll (not after landing a hit) so
                     -- its aimDifficulty, if any, actually factors into the

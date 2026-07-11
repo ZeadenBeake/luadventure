@@ -1055,12 +1055,44 @@ flat list into something readable.
 
 `npc` extends `character` with a `decide(state)` method each NPC type
 overrides - given `{self, player, distance}`, returns one action for its
-turn (`{action="attack"}`, `{action="move", dx=, dy=}`, or `{action=
-"idle"}`). The only real one so far is `testDummyType`: closes to melee
-range with cardinal-only movement (matching what the player can actually
-do) and throws a fist punch once there. The dummy itself lives behind a
-door in the grasslands specifically so it doesn't interrupt ordinary
-exploration, but is still there to spar with on demand.
+turn (`{action="attack", weapon=}` - `weapon` optional, falls back to a
+bare Strike; `{action="move", dx=, dy=}`; or `{action="idle"}`).
+
+Rather than each NPC type writing its own movement/targeting logic from
+scratch, `decide()` is meant to compose a small set of generic, reusable
+behaviors as a priority chain - `engine.fleeX(state, ...) or
+engine.fleeY(state, ...) or engine.someFallback(state, ...)`, first
+non-nil one wins:
+
+- **`engine.fleeDanger(state)`** - steps away from wherever a thrown
+  grenade is about to land (`combatState.pendingGrenade`) if `state.self`
+  is within its blast radius; `nil` otherwise. The one turn between a
+  grenade landing and it actually going off (see "Grenades") is exactly
+  the window this checks.
+- **`engine.fleeMelee(state, keepDistance)`** - steps away from the player
+  once they're within `keepDistance` tiles; `nil` otherwise. For an NPC
+  type better suited to fighting at range than getting swung at - nothing
+  uses it yet (the only enemy type so far is a melee brawler), but it's
+  ready for whichever ranged one shows up next.
+- **`engine.approachAndStrike(state, weapon)`** - the generic melee
+  brawler fallback (never returns `nil` - something has to happen every
+  turn): attacks with `weapon` once in range, otherwise closes distance
+  one cardinal step at a time.
+
+`engine.stepToward`/`engine.stepAway` are the shared single-cardinal-step
+building blocks underneath all of these (whichever axis has more ground
+left to cover, same "one axis per turn" rule the player's own arrow-key
+movement follows) - a mirror pair, not something a `decide()` would call
+directly.
+
+The only real NPC type so far is `testDummyType`:
+`engine.fleeDanger(state) or engine.approachAndStrike(state,
+weaponEntries.strike)` - flee a grenade first, brawl otherwise. The dummy
+itself lives behind a door in the grasslands specifically so it doesn't
+interrupt ordinary exploration, but is still there to spar with on
+demand. No pathfinding exists yet for any of this - see "Known gaps" for
+what that means once a room has more shape to it than an empty
+rectangle.
 
 Two purely-flavor "Villager" NPCs stand next to each other in the village
 sharing one dynamic gossip line about the player (see "Dialogue
