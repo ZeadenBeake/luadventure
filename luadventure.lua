@@ -2692,6 +2692,9 @@ function engine.promptAction(loc, scene, selectedIndex, restricted)
     end
     combatActionWin.setCursorPos(1, row)
     combatActionWin.write("Arrow keys to move (" .. moveTag .. ")")
+    row = row + 1
+    combatActionWin.setCursorPos(1, row)
+    combatActionWin.write("Space to interact (quick)")
     combatActionWin.setVisible(true)
 
     while true do
@@ -2699,6 +2702,8 @@ function engine.promptAction(loc, scene, selectedIndex, restricted)
         if key == keys.tab then
             selectedIndex = selectedIndex % #scene + 1
             engine.drawEnemyList(scene, selectedIndex)
+        elseif key == keys.space then
+            return "interact", nil, selectedIndex
         elseif debugConsole.enabled and debugConsole.openKeys[key] then
             debugConsole.run()
             combatState.redrawPanes()
@@ -3700,6 +3705,17 @@ function engine.resolvePendingGrenade(scene)
     return false
 end
 
+-- Object kinds the Interact action won't touch mid-combat (see
+-- engine.resolveInteract's `blockedKinds` and combat's own "interact"
+-- action just below) - a save point is the one that actually matters
+-- (letting the player save mid-fight would break the assumption the whole
+-- grenade-fuse/flee-and-reinsert system leans on: that a save can never
+-- happen while an encounter's still running), but this is a real set
+-- rather than one hardcoded check specifically so a later environmental
+-- interactable (a button, a lever) can just declare itself exempt-or-not
+-- here instead of needing its own bespoke gate.
+local COMBAT_BLOCKED_INTERACT_KINDS = { save_point = true }
+
 -- `triggeringObject` is whichever map object (an enemy-kind entry in the
 -- current location's objects) started this fight, if any - used purely so
 -- a win can remove it from the map afterward (see the victory branch
@@ -3880,6 +3896,30 @@ function engine.runEncounter(triggeringObject)
                 -- Stepping into a wall silently does nothing - same as
                 -- promptMove used to just ignore an out-of-bounds press
                 -- rather than spend a turn on it.
+            end
+        end
+
+        if action == "interact" then
+            -- Same dispatch the overworld's own interact key uses (see
+            -- engine.resolveInteract) - a closed door, an environmental
+            -- object down the road (a button, a lever) - just with
+            -- COMBAT_BLOCKED_INTERACT_KINDS keeping a save point (the one
+            -- thing that actually can't be allowed mid-fight - see its
+            -- own comment) out of reach. "blocked" and "nothing there"
+            -- both stay free to re-prompt, same as bumping a wall does -
+            -- only something that actually happened spends the turn.
+            local result, playerDied = engine.resolveInteract(loc, player.gridX, player.gridY, COMBAT_BLOCKED_INTERACT_KINDS)
+            if result == "blocked" then
+                engine.logCombat("You can't do that mid-fight.")
+            elseif result == "handled" then
+                speed = "quick"
+                combatState.redrawPanes()
+                if playerDied then
+                    returnUnclaimedDrops()
+                    return true
+                end
+            else
+                engine.logCombat("Nothing to interact with.")
             end
         end
 
@@ -4697,33 +4737,52 @@ function engine.tryMove(dir)
     return true, playerDied, false
 end
 
--- The dedicated interact key: checks each of the four cardinal-adjacent
--- tiles (never diagonals - keeps things precise if two interactables ever
--- end up right next to each other) for something to interact with, and
--- acts on the first one found (up, then down, left, right). Doors are the
--- main reason this exists at all - opening one is automatic on a bump (see
--- engine.tryMove), but there's no other way to *close* one again. Returns
--- (playerDied, quitRequested), same convention as engine.tryMove/
--- engine.interactWithObject, since anything reachable this way could end the game
--- the same way bumping into it would.
-function engine.tryInteract()
-    local loc = world[player.location]
+-- Checks each of the four cardinal-adjacent tiles (never diagonals - keeps
+-- things precise if two interactables ever end up right next to each
+-- other) for something to interact with, and acts on the first one found
+-- (up, then down, left, right). Shared by the overworld's own dedicated
+-- interact key (engine.tryInteract, `blockedKinds` nil - nothing's
+-- off-limits out there) and combat's own Interact action (see
+-- engine.runEncounter) - `blockedKinds`, when given, is a set of `obj.kind`
+-- strings this call refuses to touch at all (see
+-- COMBAT_BLOCKED_INTERACT_KINDS) rather than dispatching to
+-- engine.interactWithObject like everything else does. Returns (result,
+-- playerDied, quitRequested): result is "handled" (an item was picked up,
+-- a door toggled, or engine.interactWithObject ran), "blocked" (found
+-- something, but it's off-limits right now), or nil (nothing adjacent at
+-- all). playerDied/quitRequested follow engine.interactWithObject's own
+-- convention, and are only ever meaningful when result == "handled".
+function engine.resolveInteract(loc, x, y, blockedKinds)
     for _, dir in ipairs({ "up", "down", "left", "right" }) do
         local delta = dirDelta[dir]
-        local obj = engine.findObjectAt(loc, player.gridX + delta.dx, player.gridY + delta.dy)
+        local obj = engine.findObjectAt(loc, x + delta.dx, y + delta.dy)
         if obj then
-            if obj.kind == "item" then
+            if blockedKinds and blockedKinds[obj.kind] then
+                return "blocked", false, false
+            elseif obj.kind == "item" then
                 engine.collectItem(loc, obj)
-                return false, false
+                return "handled", false, false
             elseif obj.kind == "door" then
                 engine.toggleDoor(obj, not obj.open)
-                return engine.checkAwareness(), false
+                return "handled", engine.checkAwareness(), false
             else
-                return engine.interactWithObject(loc, obj)
+                local playerDied, quitRequested = engine.interactWithObject(loc, obj)
+                return "handled", playerDied, quitRequested
             end
         end
     end
-    return false, false
+    return nil, false, false
+end
+
+-- The dedicated interact key: doors are the main reason this exists at
+-- all - opening one is automatic on a bump (see engine.tryMove), but
+-- there's no other way to *close* one again. Returns (playerDied,
+-- quitRequested), same convention as engine.tryMove/engine.interactWithObject,
+-- since anything reachable this way could end the game the same way
+-- bumping into it would.
+function engine.tryInteract()
+    local _, playerDied, quitRequested = engine.resolveInteract(world[player.location], player.gridX, player.gridY, nil)
+    return playerDied, quitRequested
 end
 
 -- Reads a single line of free text at (x, y) in the given window - "char"

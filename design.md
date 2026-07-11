@@ -225,12 +225,17 @@ Two different ways to trigger a reaction from something on the map:
   which dispatches on `obj.kind` and returns `(playerDied, quitRequested)` -
   both bubble all the way up to the main loop, since either one ends the
   program.
-- **`Space`** (`tryInteract`) - checks each of the four cardinal-adjacent
-  tiles (never diagonals, so two interactables sitting right next to each
-  other don't create ambiguity) and acts on the first one found. This is
-  the only way to *close* a door again - bumping one only ever opens it -
-  but works generically on anything adjacent, routing to the same
-  `interactWithObject` for a person/save point/enemy.
+- **`Space`** (`tryInteract`, via the shared `resolveInteract(loc, x, y,
+  blockedKinds)`) - checks each of the four cardinal-adjacent tiles (never
+  diagonals, so two interactables sitting right next to each other don't
+  create ambiguity) and acts on the first one found. This is the only way
+  to *close* a door again - bumping one only ever opens it - but works
+  generically on anything adjacent, routing to the same
+  `interactWithObject` for a person/save point/enemy. Combat has its own
+  Interact action (see "Combat menu & movement") built on this same
+  function, `blockedKinds` set to keep a save point (and, later, anything
+  else added to `COMBAT_BLOCKED_INTERACT_KINDS`) out of reach mid-fight -
+  the overworld's own call passes `nil`, so nothing's off-limits out here.
 
 Items and doors got simplified on the theory that there's no harm in just
 doing the thing: standing on an item just picks it up (`collectItem` -
@@ -271,9 +276,14 @@ pulls the triggering object off `loc.objects` for the fight's duration (so
 it doesn't also sit there as a stale marker while the same enemy is
 walking around the battlefield as a live combatant), puts it back
 (wherever it actually ended up) if the player flees, and leaves it gone
-for good on a win. This is safe against a save happening mid-fight -
-that's structurally unreachable, since the main loop that reaches the save
-prompt is fully suspended for the whole encounter's duration.
+for good on a win. This is safe against a save happening mid-fight - the
+overworld's own main loop that reaches the save prompt is fully suspended
+for the whole encounter's duration, and combat's own Interact action (see
+"Combat menu & movement") deliberately keeps a save point out of reach
+too (`COMBAT_BLOCKED_INTERACT_KINDS`) even though it reaches the same
+`interactWithObject` dispatch a save point would otherwise go through -
+without that, a save point standing right next to a fight would have
+reopened exactly the case this was meant to rule out.
 
 ## Body system
 
@@ -520,6 +530,20 @@ hidden control. A successful step calls `combatState.redrawPanes()`
 immediately, before whatever comes next (ending the round, the enemy's own
 paced turn) - the step itself should read as instant, not wait behind the
 round it might trigger.
+
+Same idea for `Space` - not a menu entry either, a dedicated key
+(`promptAction`'s key loop returns `"interact"` straight away, same as
+`Tab` cycling the enemy selection does) with its own hint line under the
+move one. It's a flat quick action regardless of reflex (unlike Move),
+and shares `resolveInteract` with the overworld's own interact key (see
+"Environment objects & symbols") - a closed door, or later an
+environmental object like a button or lever, works exactly the same way
+mid-fight it does outside one, `blockedKinds` set to
+`COMBAT_BLOCKED_INTERACT_KINDS` so a save point stays unreachable while an
+encounter's running (see "Save & load" for why that specifically can't be
+allowed). Finding nothing adjacent, or finding something blocked, both
+stay free to re-prompt - only actually reaching something spends the
+turn.
 
 **Enemy selection**: the bottom-right pane (`drawEnemyList`) lists every foe
 in `scene`, health included, with whichever one's currently selected marked
