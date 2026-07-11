@@ -626,6 +626,40 @@ stacking on top of whatever the chosen species already adjusted). Confirm
 is locked until all 5 points are spent; a Reset option clears an
 in-progress allocation back to zero.
 
+## Debug console
+
+Gated behind `debugConsole.enabled`, set from a `--debug` argument on the
+command line (`luadventure --debug`) - args reach the top-level chunk via
+`...` like any CC program's, checked once at the very top of the file.
+Opened with tilde/backtick from the overworld or mid-fight (checked
+against `debugConsole.openKeys` rather than a single keycode - `keys.grave`
+is the real CC:Tweaked constant for this key, but CraftOS-PC's ncurses CLI
+renderer, what this project actually gets developed and tested against,
+instead passes the raw ASCII value through for it: 96 unshifted, 126
+shifted. Checking all three covers both). A slim scrollback + input line
+(`debugConsole.run`, reusing `combatWin`) - type a command, see the result
+appended below, keep going; `exit`/`close` returns control to whatever had
+it (the overworld's main loop calls `render()` after, combat's
+`promptAction` calls `combatState.redrawPanes()`), without costing a turn
+or touching the action economy at all.
+
+Commands (`debugConsole.commands`, name -> `function(args)`, `args` the
+line's remaining space-separated tokens) all target the player's own body
+only - no enemy-targeting syntax yet, nothing's needed it with only one
+enemy type to test against:
+
+- **`setHealth <limb> <health>`** - clamps to `[0, maxHealth]`.
+- **`give <itemId> [count]`** - straight into the inventory, no bulk check.
+- **`addStatus <limb> <status> [amount]`** - part-scoped statuses only
+  (`bleed`/`poison`/`fracture` - `adrenaline` is character-wide, not
+  reachable this way since every command here takes a limb); `amount`
+  overrides the status's own default duration/stack count.
+- **`clearStatus <limb> <status|all>`**
+
+A bad limb/item/status name is reported back as an ordinary result rather
+than raising - `debugConsole.runCommand` also wraps the actual call in
+`pcall`, so a bug in a command itself can't take the whole game down either.
+
 ## Dialogue templating
 
 `dialogue(str, who)` fills in `{{name}}`, `{{subject}}`, `{{object}}` (plus

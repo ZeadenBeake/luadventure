@@ -1,5 +1,23 @@
 -- Fuck it, why not? Sci-fi fantasy RPG game, in lua, designed for CraftOS.
 
+-- --debug unlocks the developer console (tilde - see debugConsole.run,
+-- defined much later alongside promptText): arbitrary health/item/status
+-- commands that bypass normal game rules entirely, so they're opt-in only
+-- rather than always reachable. Args reach this top-level chunk via `...`
+-- exactly like any other CC program's command-line arguments
+-- (`luadventure --debug`). Declared this early (rather than down where the
+-- rest of it lives) purely so `.enabled` can be set from the startup args
+-- here - everything else gets added to this same table as a field later,
+-- rather than costing more top-level locals of its own (see "A note on
+-- locals" in the design doc; this file is already close to Lua's 200-local
+-- ceiling on the main chunk).
+local debugConsole = { enabled = false }
+for _, arg in ipairs({ ... }) do
+    if arg == "--debug" then
+        debugConsole.enabled = true
+    end
+end
+
 local world = {} -- Gotta define this early...
 
 -- A single, uniquely-named global for if I need one.
@@ -2667,6 +2685,9 @@ local function promptAction(loc, scene, selectedIndex, restricted)
         if key == keys.tab then
             selectedIndex = selectedIndex % #scene + 1
             drawEnemyList(scene, selectedIndex)
+        elseif debugConsole.enabled and debugConsole.openKeys[key] then
+            debugConsole.run()
+            combatState.redrawPanes()
         else
             local dir = keyToDir[key]
             if dir then
@@ -3783,11 +3804,10 @@ local function interactWithPerson(obj)
     end
 end
 
-local SAVE_DIR = "saves"
-local SAVE_SLOT_COUNT = 5
+local SAVE = { dir = "saves", slotCount = 5 }
 
 local function getSaveSlotPath(slot)
-    return fs.combine(SAVE_DIR, "slot" .. slot .. ".sav")
+    return fs.combine(SAVE.dir, "slot" .. slot .. ".sav")
 end
 
 local function readSaveSlot(slot)
@@ -3802,8 +3822,8 @@ local function readSaveSlot(slot)
 end
 
 local function writeSaveSlot(slot, data)
-    if not fs.exists(SAVE_DIR) then
-        fs.makeDir(SAVE_DIR)
+    if not fs.exists(SAVE.dir) then
+        fs.makeDir(SAVE.dir)
     end
     local h = fs.open(getSaveSlotPath(slot), "w")
     -- allow_repetitions: nothing in save data should genuinely be a shared
@@ -4003,13 +4023,13 @@ end
 -- "Back" option to cancel out without picking a slot.
 local function pickSaveSlot(title)
     local options = {}
-    for slot = 1, SAVE_SLOT_COUNT do
+    for slot = 1, SAVE.slotCount do
         options[slot] = formatSaveSlotLabel(slot)
     end
-    options[SAVE_SLOT_COUNT + 1] = "Back"
+    options[SAVE.slotCount + 1] = "Back"
 
     local choice = showInteraction({ title }, options)
-    if choice == SAVE_SLOT_COUNT + 1 then
+    if choice == SAVE.slotCount + 1 then
         return nil
     end
     return choice
@@ -4235,6 +4255,195 @@ local function promptText(win, x, y, maxLen)
     end
 end
 
+-- The rest of the debug console (`debugConsole` itself, and `.enabled`,
+-- were declared way up near the top of the file - see the comment there).
+
+-- Which key opens it (see debugConsole.run) - keys.grave is the "real"
+-- CC:Tweaked keycode for backtick/tilde, but CraftOS-PC's ncurses CLI
+-- renderer (what this project is actually developed/tested against)
+-- instead passes the raw ASCII value through for this particular key - 96
+-- unshifted (`), 126 shifted (~) - neither of which matches keys.grave.
+-- Checking all three covers both that renderer and a real Minecraft
+-- client.
+debugConsole.openKeys = { [keys.grave] = true, [96] = true, [126] = true }
+
+-- Finds a labeled part on the player's own body by name - every debug
+-- command below targets the player only (no enemy-targeting syntax yet;
+-- nothing needs it while there's only one enemy type to test against).
+function debugConsole.findPart(label)
+    for _, entry in ipairs(collectLabeledParts(player.body)) do
+        if entry.label == label then
+            return entry.part
+        end
+    end
+    return nil
+end
+
+-- Every debug command name -> function(args) -> a result string. `args` is
+-- whatever space-separated tokens followed the command name. A bad limb/
+-- item/status name is reported back as a normal result rather than
+-- raising, so a typo doesn't need special-casing to avoid crashing the
+-- console - see debugConsole.runCommand for the one pcall that catches
+-- anything that slips through anyway.
+debugConsole.commands = {
+    -- setHealth <limb> <health> - clamps to [0, maxHealth], same range any
+    -- ordinary damage/heal would land in.
+    setHealth = function(args)
+        if not args[1] or not tonumber(args[2]) then
+            return "Usage: setHealth <limb> <health>"
+        end
+        local part = debugConsole.findPart(args[1])
+        if not part then
+            return "No such limb: " .. args[1]
+        end
+        part.health = math.max(0, math.min(part.maxHealth, tonumber(args[2])))
+        return args[1] .. " set to " .. part.health .. "/" .. part.maxHealth
+    end,
+
+    -- give <itemId> [count] - straight into the inventory, no bulk check -
+    -- debug commands are meant to bypass normal rules on purpose.
+    give = function(args)
+        if not args[1] or not itemEntries[args[1]] then
+            return "Usage: give <itemId> [count] - unknown item: " .. tostring(args[1])
+        end
+        local count = tonumber(args[2]) or 1
+        for _ = 1, count do
+            table.insert(player.inventory, args[1])
+        end
+        return "Gave " .. count .. "x " .. itemEntries[args[1]].name
+    end,
+
+    -- addStatus <limb> <status> [amount] - only part-scoped statuses
+    -- (bleed, poison, fracture) - character-wide ones (adrenaline) aren't
+    -- reachable this way, since every command here targets a limb.
+    -- `amount` overrides the status's own default duration/stack count,
+    -- same as applyPartStatus always allowed.
+    addStatus = function(args)
+        if not args[1] or not args[2] then
+            return "Usage: addStatus <limb> <status> [amount]"
+        end
+        local part = debugConsole.findPart(args[1])
+        if not part then
+            return "No such limb: " .. args[1]
+        end
+        local def = statusEntries[args[2]]
+        if not def or def.scope ~= "part" then
+            return "No such part status: " .. args[2]
+        end
+        applyPartStatus(part, args[2], tonumber(args[3]))
+        return "Applied " .. args[2] .. " to " .. args[1] .. " (" .. part.statuses[args[2]] .. ")"
+    end,
+
+    -- clearStatus <limb> <status|all>
+    clearStatus = function(args)
+        if not args[1] or not args[2] then
+            return "Usage: clearStatus <limb> <status|all>"
+        end
+        local part = debugConsole.findPart(args[1])
+        if not part then
+            return "No such limb: " .. args[1]
+        end
+        if args[2] == "all" then
+            part.statuses = {}
+            return "Cleared all statuses from " .. args[1]
+        end
+        part.statuses[args[2]] = nil
+        return "Cleared " .. args[2] .. " from " .. args[1]
+    end,
+
+    help = function()
+        return "setHealth <limb> <hp> | give <item> [n] | addStatus <limb> <status> [n] | clearStatus <limb> <status|all> | exit"
+    end,
+}
+
+-- Splits on whitespace - "setHealth left_hand 50" becomes {"setHealth",
+-- "left_hand", "50"}. No quoting support; nothing here needs it, since
+-- every limb/item/status id is already a single bare token.
+function debugConsole.splitLine(line)
+    local tokens = {}
+    for token in line:gmatch("%S+") do
+        table.insert(tokens, token)
+    end
+    return tokens
+end
+
+-- Runs one line, returns (resultLine, shouldClose). A totally unexpected
+-- error (a bug in a command itself, not just a bad argument) is caught
+-- here too, so a broken debug command can't take the whole game down.
+function debugConsole.runCommand(line)
+    local tokens = debugConsole.splitLine(line)
+    local name = tokens[1]
+    if not name then
+        return nil, false
+    end
+    if name == "exit" or name == "close" then
+        return nil, true
+    end
+
+    local fn = debugConsole.commands[name]
+    if not fn then
+        return "Unknown command: " .. name .. " (try 'help')", false
+    end
+
+    local args = {}
+    for i = 2, #tokens do
+        args[i - 1] = tokens[i]
+    end
+
+    local ok, result = pcall(fn, args)
+    if not ok then
+        return "Error: " .. tostring(result), false
+    end
+    return result, false
+end
+
+-- A slim scrollback + input line, fullscreen like every other one-off
+-- prompt (reuses combatWin) - gated behind DEBUG_MODE at both places this
+-- can be opened from (the overworld's main loop, combat's promptAction),
+-- so there's no path to it at all unless --debug was passed at startup.
+-- Opening/closing it doesn't cost a turn or otherwise touch the action
+-- economy - closing (via 'exit'/'close') just hands control back to
+-- whatever had it, same as it never happened.
+function debugConsole.run()
+    local transcript = { "Debug console - 'help' for commands, 'exit' to close." }
+
+    local function redraw()
+        combatWin.setVisible(false)
+        combatWin.clear()
+        local width, height = combatWin.getSize()
+        local inputRow = height
+        local visibleCount = inputRow - 1
+        local startIndex = math.max(1, #transcript - visibleCount + 1)
+        for i = startIndex, #transcript do
+            combatWin.setCursorPos(1, i - startIndex + 1)
+            combatWin.write(transcript[i])
+        end
+        combatWin.setCursorPos(1, inputRow)
+        combatWin.write("> ")
+        combatWin.setVisible(true)
+        return width, inputRow
+    end
+
+    while true do
+        local width, inputRow = redraw()
+        local line = promptText(combatWin, 3, inputRow, width - 3)
+
+        for _, wrapped in ipairs(wrapText("> " .. line, width)) do
+            table.insert(transcript, wrapped)
+        end
+
+        local result, shouldClose = debugConsole.runCommand(line)
+        if shouldClose then
+            return
+        end
+        if result then
+            for _, wrapped in ipairs(wrapText(result, width)) do
+                table.insert(transcript, wrapped)
+            end
+        end
+    end
+end
+
 -- Quick presets read as a gender identity; "Custom" instead asks for the two
 -- pronoun fields directly (subject - he/she/they - and object - him/her/
 -- them), for anyone the presets don't fit. Nothing in the game's text reads
@@ -4293,12 +4502,11 @@ end
 -- is stats.strength = 1 + 3*0.05 = 1.15). "Reset" clears all of them back to
 -- 0 rather than supporting per-point undo, which is enough for a one-time
 -- five-point spend. Confirm is locked out until every point is spent.
-local STAT_ALLOCATION_POINTS = 5
-local STAT_ALLOCATION_STEP = 0.05
+local STAT_ALLOCATION = { points = 5, step = 0.05 }
 
 local function runStatAllocation()
     local points = { strength = 0, reflex = 0, aim = 0 }
-    local remaining = STAT_ALLOCATION_POINTS
+    local remaining = STAT_ALLOCATION.points
 
     while true do
         combatWin.setVisible(false)
@@ -4329,7 +4537,7 @@ local function runStatAllocation()
             remaining = remaining - 1
         elseif key == keys.four then
             points = { strength = 0, reflex = 0, aim = 0 }
-            remaining = STAT_ALLOCATION_POINTS
+            remaining = STAT_ALLOCATION.points
         elseif key == keys.five and remaining == 0 then
             return points
         end
@@ -4366,9 +4574,9 @@ local function runCharacterCreation()
     end
 
     local points = runStatAllocation()
-    player.stats.strength = player.stats.strength + points.strength * STAT_ALLOCATION_STEP
-    player.stats.reflex = player.stats.reflex + points.reflex * STAT_ALLOCATION_STEP
-    player.stats.aim = player.stats.aim + points.aim * STAT_ALLOCATION_STEP
+    player.stats.strength = player.stats.strength + points.strength * STAT_ALLOCATION.step
+    player.stats.reflex = player.stats.reflex + points.reflex * STAT_ALLOCATION.step
+    player.stats.aim = player.stats.aim + points.aim * STAT_ALLOCATION.step
 end
 
 -- The title screen, shown once at startup before there's any character to
@@ -4419,7 +4627,10 @@ while true do
         break
     end
 
-    if topBarOpen then
+    if debugConsole.enabled and debugConsole.openKeys[key] then
+        debugConsole.run()
+        render()
+    elseif topBarOpen then
         if key == keys.tab then
             topBarOpen = false
             pageBarWin.setVisible(false)
