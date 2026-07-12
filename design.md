@@ -53,9 +53,9 @@ doesn't fit `engine`), check whether one of these already covers it.
 Four corners while exploring: stats (top-left), a portrait placeholder
 (top-right, nothing draws here yet), the walkable map (bottom-left, half the
 width it used to be), and the activity log (bottom-right - see "Activity
-log"). The inventory, Medical (see "Medical"), and any blurb/dialogue
-interaction take over the whole screen as their own modal window instead
-of sharing the four corners.
+log"). The inventory, Medical (see "Medical"), Apparel (see "Apparel"),
+and any blurb/dialogue interaction take over the whole screen as their
+own modal window instead of sharing the four corners.
 
 Combat gets its *own* four-corner layout rather than a single full-screen
 window - map (top-left), the action menu (bottom-left), a combat-scoped log
@@ -70,12 +70,13 @@ full-screen window the inventory and dialogue use.
 
 Controls: arrow keys move, `Space` interacts with whatever's cardinally
 adjacent (see "Environment objects & symbols"), `i` opens the inventory,
-`m` opens Medical (see "Medical"), `q` quits immediately. `Tab` opens a
-slim top-bar strip that jumps straight to either one (`Left`/`Right` to
-choose, `Enter` to open) without needing its own dedicated key - both
-exist mainly for that shortcut's own sake. Menus almost everywhere use
-digit keys `1`-`9`/`0` then `a`-`z` for lists longer than ten items (see
-"Digit/letter menus" below).
+`m` opens Medical (see "Medical"), `a` opens Apparel (see "Apparel"), `q`
+quits immediately. `Tab` opens a slim top-bar strip that jumps straight
+to any of the three (`Left`/`Right` to choose, `Enter` to open) without
+needing its own dedicated key - all three exist mainly for that
+shortcut's own sake. Menus almost everywhere use digit keys `1`-`9`/`0`
+then `a`-`z` for lists longer than ten items (see "Digit/letter menus"
+below).
 
 ### Activity log
 
@@ -479,7 +480,12 @@ item happens to cover any one area of it. A vest that only covers
 `upper_body` doesn't fully protect the torso; it raises the average while
 the uncovered `lower_body`/`pelvis` drag it back down. The `belt` area is
 excluded from this average entirely - reserved for future belt-slot-
-expanding items, unrelated to armor.
+expanding items, unrelated to armor. Both `getCoverage`/`getAreaCoverage`
+take an optional trailing `layer` ("inner"/"outer") to scope the same
+average to just one layer instead of both stacked together - the real
+damage-reduction math (`damagePart`) never passes one at all, since actual
+protection always stacks both layers; the Apparel screen (below) is what
+actually uses it, to show what each layer is contributing on its own.
 
 Parts that can't be covered (horns, antennae, a stinger) inherit whatever
 coverage their parent's zone provides, via the same `getPartZone` fallback
@@ -1089,6 +1095,49 @@ every other caller (combat's Ability menu, the inventory screen's own
 "use immediately") - the same function serves both flows, it just skips
 its own picker when the part's already chosen for it.
 
+## Apparel
+
+A third full-screen page (`engine.runApparelScreen`, `a` to open/close,
+reachable from the top bar too - see "Screen layout"), same two-pane
+layout and shared `inventoryWin` every other one here uses. Unlike
+Medical, this is a pure viewer - there's nothing to act on, since nothing
+in the game can actually equip or remove apparel through any UI yet (see
+"Known gaps" - `engine.canWearItem` exists, just isn't wired to a live
+action). Left half is the same per-part list `collectLabeledParts` always
+gives (see "Medical"); right half is full coverage detail on whichever
+part is currently selected.
+
+Two independent cursors, since they answer different questions and
+shouldn't have to share one: arrow keys (or a part's own digit straight
+away) move which part's detail shows on the right - what's actually
+protecting it - while `Tab` cycles through every currently-worn item in
+its own strip (row 2, same bracket convention `engine.drawTopBar`'s page
+tabs already use) and turns yellow whichever part rows fall within *that*
+item's own coverage (`engine.getItemCoveredZones`, mapping its `covers`
+areas up to zones, then checking every part's own `engine.getPartZone`
+against them) - what a single item actually protects, read straight off
+the list without cross-referencing zone names by hand. Neither cursor
+moves the other.
+
+The detail pane lists, separately, everything actually covering the
+selected part on each layer (`engine.getPartCoveringItems`, by name) and
+that layer's own per-damage-type coverage (`engine.formatPartCoverage`,
+one decimal place - the underlying average, per "Apparel & coverage", is
+rarely a whole number, and this is meant to be read at a glance rather
+than computed by hand), then the same breakdown combined across both
+layers - the real number `damagePart` actually reduces by, the two
+separate layer numbers above it are its own inner/outer components. A
+damage type with nothing covering it on either layer is left out
+entirely rather than shown as a bare "0" - most parts only have two or
+three types actually covered at once.
+
+Since nothing in the game can equip apparel through any real action yet,
+the debug console's own `wear`/`unwear <itemId>` (bypassing
+`engine.canWearItem`'s layer/area overlap check entirely, same as every
+other debug command bypasses whatever rule would normally apply) is
+currently the only way to actually populate `player.worn` for this
+screen to have anything to show.
+
 ## Quests
 
 `questEntries` - each has state-specific dialogue lines, an `isReady()`
@@ -1402,9 +1451,13 @@ NPC-to-NPC conversation system.
   it has nothing to drop - disarming (arm/hand destruction, a future disarm
   skill) is a player-only mechanic for now, same as the dropped-weapon
   system it's built on top of.
-- No apparel-equipping UI exists yet - worn items are still only ever set
-  directly in code (`spawnTestDummy`), never through anything the player
-  can reach. Only weapons got the "equip slot" treatment.
+- Apparel can be *viewed* (see "Apparel") but still not actually equipped
+  or removed through anything the player can reach - worn items are still
+  only ever set directly in code (`spawnTestDummy`) or the debug
+  console's own `wear`/`unwear`. `engine.canWearItem` (the layer/area
+  overlap rule a real "wear it" action would need to check) exists but
+  isn't called from anywhere live yet. Only weapons got the "equip slot"
+  treatment.
 - Quest/NPC dialogue still always shows a full prompt, even the purely
   flavor ones - only item pickup, doors, and outside-combat item use moved
   to the activity log so far.

@@ -770,15 +770,20 @@ end
 
 -- Total coverage protecting one specific area, for one damage type: every
 -- worn item that covers this exact area contributes its coverage (inner and
--- outer both - protection from both layers stacks).
-function engine.getAreaCoverage(combatant, area, damageType)
+-- outer both - protection from both layers stacks). `layer` is optional -
+-- given ("inner" or "outer"), only that layer's own items count, for the
+-- Apparel screen's own per-layer breakdown (see "Apparel"); omitted, this
+-- is the real combined total engine.damagePart actually reduces by.
+function engine.getAreaCoverage(combatant, area, damageType, layer)
     local total = 0
     for _, itemId in ipairs(combatant.worn) do
         local item = itemEntries[itemId]
-        for _, coveredArea in ipairs(item.covers or {}) do
-            if coveredArea == area then
-                total = total + (item.coverage and item.coverage[damageType] or 0)
-                break
+        if not layer or item.layer == layer then
+            for _, coveredArea in ipairs(item.covers or {}) do
+                if coveredArea == area then
+                    total = total + (item.coverage and item.coverage[damageType] or 0)
+                    break
+                end
             end
         end
     end
@@ -791,8 +796,9 @@ end
 -- protect the whole torso, it just raises the average, with the bare
 -- pelvis/lower body dragging it back down. "belt" is excluded from the
 -- torso average - that area is reserved for expanding combat belt slots,
--- not body armor.
-function engine.getCoverage(combatant, part, damageType)
+-- not body armor. `layer` is the same optional inner/outer filter
+-- engine.getAreaCoverage takes, passed straight through.
+function engine.getCoverage(combatant, part, damageType, layer)
     local zone = engine.getPartZone(part)
     if not zone then
         return 0
@@ -800,7 +806,7 @@ function engine.getCoverage(combatant, part, damageType)
     local total, count = 0, 0
     for _, area in ipairs(COVERAGE_AREAS[zone]) do
         if area ~= "belt" then
-            total = total + engine.getAreaCoverage(combatant, area, damageType)
+            total = total + engine.getAreaCoverage(combatant, area, damageType, layer)
             count = count + 1
         end
     end
@@ -808,6 +814,46 @@ function engine.getCoverage(combatant, part, damageType)
         return 0
     end
     return total / count
+end
+
+-- Every worn item, on `layer` specifically, that covers at least one area
+-- within `part`'s own zone - "what's doing the covering," for the Apparel
+-- screen's own detail pane (see engine.getCoverage/engine.getAreaCoverage
+-- for the actual damage-reduction math this is describing, not
+-- duplicating).
+function engine.getPartCoveringItems(combatant, part, layer)
+    local zone = engine.getPartZone(part)
+    local items = {}
+    if not zone then
+        return items
+    end
+    local areas = {}
+    for _, area in ipairs(COVERAGE_AREAS[zone]) do
+        areas[area] = true
+    end
+    for _, itemId in ipairs(combatant.worn) do
+        local item = itemEntries[itemId]
+        if item.layer == layer then
+            for _, coveredArea in ipairs(item.covers or {}) do
+                if areas[coveredArea] then
+                    table.insert(items, itemId)
+                    break
+                end
+            end
+        end
+    end
+    return items
+end
+
+-- Which zones a worn apparel item actually covers, derived from its own
+-- `covers` (areas) via AREA_TO_ZONE - what the Apparel screen highlights
+-- in yellow for whichever item is currently Tab-selected there.
+function engine.getItemCoveredZones(itemId)
+    local zones = {}
+    for _, area in ipairs(itemEntries[itemId].covers or {}) do
+        zones[AREA_TO_ZONE[area]] = true
+    end
+    return zones
 end
 
 -- Applies damage to a single part, adjusted by that part's own resistance to
@@ -950,9 +996,6 @@ local character = {
     equipped = {
         left_hand = "none",
         right_hand = "none",
-        armor = "none",
-        clothes = "basic_clothes", -- Default items don't take up inventory space and are always considered in the player's posession.
-        backpack = "none"
     }
 }
 
@@ -1535,13 +1578,14 @@ function engine.render()
 end
 
 -- A slim overlay strip - just the top two rows - for jumping straight to a
--- page (Inventory, Medical) from ordinary exploration, without first
--- opening its full screen via `i`/`m`. Its own window, separate from
--- statsWin/spriteWin, so it can be shown deliberately overwriting the top
--- of the main UI - because that's exactly what it's doing, loading in on
--- top of whatever's already there - rather than needing to coexist with it.
+-- page (Inventory, Medical, Apparel) from ordinary exploration, without
+-- first opening its full screen via `i`/`m`/`a`. Its own window, separate
+-- from statsWin/spriteWin, so it can be shown deliberately overwriting the
+-- top of the main UI - because that's exactly what it's doing, loading in
+-- on top of whatever's already there - rather than needing to coexist
+-- with it.
 local pageBarWin = window.create(term.current(), 1, 1, screenW, 2)
-local TOP_BAR_PAGES = { "Inventory", "Medical" }
+local TOP_BAR_PAGES = { "Inventory", "Medical", "Apparel" }
 local topBarPage = 1
 
 function engine.drawTopBar()
@@ -2705,6 +2749,182 @@ function engine.runMedicalScreen()
             local index = keyToNumber[key]
             if index and parts[index] then
                 treat(parts[index])
+                redraw()
+            end
+        end
+    end
+end
+
+-- "Bludgeoning 2, Piercing 1" - every damage type `layer` (or, if nil, both
+-- combined) actually covers `part` against right now, its own type name
+-- capitalized and its coverage value, comma-joined; "" if nothing on that
+-- layer covers it at all. Skips a damage type entirely rather than
+-- showing a bare "0" for it - most of the 8 damage types have nothing
+-- covering them on any given part, and listing all 8 anyway would bury
+-- the ones that matter.
+function engine.formatPartCoverage(combatant, part, layer)
+    local pieces = {}
+    for _, damageType in ipairs(damageTypes) do
+        local amount = engine.getCoverage(combatant, part, damageType, layer)
+        if amount > 0 then
+            -- The underlying average (see engine.getCoverage) is rarely a
+            -- whole number - one decimal place is plenty of precision for
+            -- what's meant to be read at a glance, not computed by hand.
+            table.insert(pieces, damageType:sub(1, 1):upper() .. damageType:sub(2) .. " " .. ("%.1f"):format(amount))
+        end
+    end
+    return table.concat(pieces, ", ")
+end
+
+local APPAREL_LIST_TOP = 4 -- row 1: title, row 2: worn-apparel strip, row 3: column headers
+
+-- Same two-pane layout Medical/Inventory both already use, reusing
+-- inventoryWin the same way every full-screen modal here does. Row 2 is
+-- the worn-apparel strip (Tab cycles which one's "current", same
+-- bracket convention engine.drawTopBar's own page tabs use) - a part row
+-- in the left-hand list turns yellow if the current item's own coverage
+-- reaches its zone (engine.getItemCoveredZones), independently of
+-- whichever part is arrow-selected for the right-hand detail pane.
+-- Nothing but the color actually changes on a covered row - the
+-- highlight is purely so scanning "what does this item actually protect"
+-- doesn't mean cross-referencing zone names by hand.
+function engine.drawApparelScreen(parts, selection, scrollOffset, wornSelection)
+    inventoryWin.setVisible(false)
+    inventoryWin.clear()
+
+    local leftW = math.floor(screenW / 2)
+    local rightX = leftW + 2
+
+    inventoryWin.setCursorPos(1, 1)
+    inventoryWin.write("Apparel")
+
+    inventoryWin.setCursorPos(1, 2)
+    if #player.worn == 0 then
+        inventoryWin.write("(nothing worn)")
+    else
+        local tabs = {}
+        for i, itemId in ipairs(player.worn) do
+            local name = itemEntries[itemId].name
+            table.insert(tabs, i == wornSelection and ("[" .. name .. "]") or (" " .. name .. " "))
+        end
+        engine.writeWrapped(inventoryWin, 1, 2, table.concat(tabs, " "))
+    end
+
+    inventoryWin.setCursorPos(1, 3)
+    inventoryWin.write("Part")
+
+    local coveredZones = (wornSelection and player.worn[wornSelection])
+        and engine.getItemCoveredZones(player.worn[wornSelection]) or {}
+
+    local visibleCount = screenH - 1 - APPAREL_LIST_TOP + 1
+    for i = 1, visibleCount do
+        local entry = parts[scrollOffset + i]
+        if entry then
+            local marker = (scrollOffset + i == selection) and ">" or " "
+            local indent = string.rep(" ", entry.depth * 2)
+            local labelText = (indent .. entry.label):sub(1, 18)
+            inventoryWin.setCursorPos(1, APPAREL_LIST_TOP + i - 1)
+            if coveredZones[engine.getPartZone(entry.part)] then
+                inventoryWin.setTextColor(colors.yellow)
+            end
+            inventoryWin.write(marker .. labelText)
+            inventoryWin.setTextColor(colors.white)
+        end
+    end
+
+    local selected = parts[selection]
+    if selected then
+        inventoryWin.setCursorPos(rightX, 2)
+        inventoryWin.write(selected.label)
+
+        local zone = engine.getPartZone(selected.part)
+        local row = 3
+        if not zone then
+            row = row + engine.writeWrapped(inventoryWin, rightX, row, "Can't be covered.")
+        else
+            row = row + engine.writeWrapped(inventoryWin, rightX, row, "Zone: " .. zone)
+
+            local innerItems = engine.getPartCoveringItems(player, selected.part, "inner")
+            local innerNames = {}
+            for _, itemId in ipairs(innerItems) do
+                table.insert(innerNames, itemEntries[itemId].name)
+            end
+            row = row + engine.writeWrapped(inventoryWin, rightX, row,
+                "Inner: " .. (next(innerNames) and table.concat(innerNames, ", ") or "None"))
+            local innerCoverage = engine.formatPartCoverage(player, selected.part, "inner")
+            if innerCoverage ~= "" then
+                row = row + engine.writeWrapped(inventoryWin, rightX, row, "  " .. innerCoverage)
+            end
+
+            local outerItems = engine.getPartCoveringItems(player, selected.part, "outer")
+            local outerNames = {}
+            for _, itemId in ipairs(outerItems) do
+                table.insert(outerNames, itemEntries[itemId].name)
+            end
+            row = row + engine.writeWrapped(inventoryWin, rightX, row,
+                "Outer: " .. (next(outerNames) and table.concat(outerNames, ", ") or "None"))
+            local outerCoverage = engine.formatPartCoverage(player, selected.part, "outer")
+            if outerCoverage ~= "" then
+                row = row + engine.writeWrapped(inventoryWin, rightX, row, "  " .. outerCoverage)
+            end
+
+            local combinedCoverage = engine.formatPartCoverage(player, selected.part)
+            row = row + 1
+            row = row + engine.writeWrapped(inventoryWin, rightX, row,
+                "Combined: " .. (combinedCoverage ~= "" and combinedCoverage or "None"))
+        end
+    end
+
+    inventoryWin.setCursorPos(1, screenH)
+    inventoryWin.write("[Tab] cycle worn  [A] close")
+
+    inventoryWin.setVisible(true)
+end
+
+-- Blocks until the player closes Apparel (A again), fully modal like
+-- Inventory/Medical. Two independent cursors: arrow keys (or a part's own
+-- digit straight away) move which part's full coverage detail shows on
+-- the right, `Tab` cycles which worn item's own coverage is highlighted
+-- yellow on the left - neither one touches the other. Pure viewer, same
+-- as Medical's own left-hand list is outside of actually treating
+-- something - there's nothing to change here, since nothing in the game
+-- can equip or remove apparel through any UI yet (see "Known gaps").
+function engine.runApparelScreen()
+    local parts = engine.collectLabeledParts(player.body)
+    local selection = 1
+    local scrollOffset = 0
+    local wornSelection = #player.worn > 0 and 1 or nil
+    local visibleCount = screenH - 1 - APPAREL_LIST_TOP + 1
+
+    local function redraw()
+        parts = engine.collectLabeledParts(player.body)
+        selection = math.min(selection, math.max(1, #parts))
+        scrollOffset = engine.clampInventoryScroll(selection, scrollOffset, #parts, visibleCount)
+        engine.drawApparelScreen(parts, selection, scrollOffset, wornSelection)
+    end
+
+    redraw()
+
+    while true do
+        local _, key = os.pullEvent("key")
+
+        if key == keys.a then
+            return
+        elseif key == keys.up then
+            selection = math.max(1, selection - 1)
+            redraw()
+        elseif key == keys.down then
+            selection = math.min(#parts, selection + 1)
+            redraw()
+        elseif key == keys.tab then
+            if #player.worn > 0 then
+                wornSelection = (wornSelection or 0) % #player.worn + 1
+                redraw()
+            end
+        else
+            local index = keyToNumber[key]
+            if index and parts[index] then
+                selection = index
                 redraw()
             end
         end
@@ -5701,6 +5921,35 @@ debugConsole.commands = {
         return "Gave " .. count .. "x " .. itemEntries[args[1]].name
     end,
 
+    -- wear <itemId> - straight onto player.worn, bypassing
+    -- engine.canWearItem's own layer/area overlap check entirely (nothing
+    -- in the game actually offers a "wear it" action yet - see the
+    -- Apparel screen's own doc comment - so this is currently the only
+    -- way to test it against anything but an empty coverage set).
+    wear = function(args)
+        if not args[1] or not itemEntries[args[1]] or not itemEntries[args[1]].layer then
+            return "Usage: wear <itemId> - unknown apparel: " .. tostring(args[1])
+        end
+        table.insert(player.worn, args[1])
+        return "Now wearing " .. itemEntries[args[1]].name
+    end,
+
+    -- unwear <itemId> - removes the first matching instance from
+    -- player.worn, mirroring engine.removeInventoryItems' own "remove
+    -- one" convention.
+    unwear = function(args)
+        if not args[1] then
+            return "Usage: unwear <itemId>"
+        end
+        for i, itemId in ipairs(player.worn) do
+            if itemId == args[1] then
+                table.remove(player.worn, i)
+                return "No longer wearing " .. itemEntries[itemId].name
+            end
+        end
+        return "Not wearing: " .. args[1]
+    end,
+
     -- addStatus <limb> <status> [amount] [@<target>] - only part-scoped
     -- statuses (bleed, poison, fracture) - character-wide ones
     -- (adrenaline) aren't reachable this way, since every command here
@@ -5763,7 +6012,7 @@ debugConsole.commands = {
     end,
 
     help = function()
-        return "setHealth <limb> <hp> [@t] | give <item> [n] | addStatus <limb> <status> [n] [@t] | clearStatus <limb> <status|all> [@t] | targets | exit"
+        return "setHealth <limb> <hp> [@t] | give <item> [n] | wear/unwear <item> | addStatus <limb> <status> [n] [@t] | clearStatus <limb> <status|all> [@t] | targets | exit"
     end,
 }
 
@@ -6067,8 +6316,10 @@ while true do
             pageBarWin.setVisible(false)
             if topBarPage == 1 then
                 engine.runInventoryScreen()
-            else
+            elseif topBarPage == 2 then
                 engine.runMedicalScreen()
+            else
+                engine.runApparelScreen()
             end
             engine.render()
         end
@@ -6081,6 +6332,9 @@ while true do
         engine.render()
     elseif key == keys.m then
         engine.runMedicalScreen()
+        engine.render()
+    elseif key == keys.a then
+        engine.runApparelScreen()
         engine.render()
     elseif key == keys.space then
         local playerDied, quitRequested = engine.tryInteract()
