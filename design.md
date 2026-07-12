@@ -87,6 +87,14 @@ buffer afterward rather than just reasserting visibility - toggling
 `setVisible(true)` alone is a no-op if it's already `true`, so that alone
 wouldn't actually restore anything a modal drew over it.
 
+`activityLog` (not `combatActivityLog` - a fight's own scrollback is
+scoped to that one encounter and reset the next, nothing worth
+remembering past it) is part of save data (see "Save & load") - restored
+as the same already-wrapped lines it held at save time, not replayed
+from some underlying event history (there isn't one), so a loaded game's
+scrollback picks up exactly where it left off rather than starting
+blank.
+
 `logActivity` is for things that happen **outside combat**: picking
 something up, a door opening or closing, using an item outside a fight (the
 salve, so far - see "Inventory & equipment"), changing region, and the
@@ -1039,23 +1047,37 @@ main menu rather than falling through to anything else.
 ## Save & load
 
 A `$` save point in the village (`village_terminal`) offers **Save**,
-**Load**, or **Quit Game**, flavored as inserting an ID card. Five slots,
-each shown with a summary (level, steps, which location's terminal made
-it) instead of a bare number; saving over an occupied slot asks to confirm.
+**Load**, **Manage Saves**, or **Quit Game**, flavored as inserting an ID
+card. Five slots, each shown with a summary (level, steps, which
+location's terminal made it, plus a custom nickname if one's been set -
+see below) instead of a bare number; saving over an occupied slot asks to
+confirm.
 
 What's saved is deliberately "everything about the player, nothing about
 position": full stats, inventory, equipped gear + ammo, worn apparel, belt,
-statuses, cooldowns, quest progress, kill log, name, pronouns, and the
-entire body tree (health/organs/statuses per part, rebuilt from templates
-on load rather than trusting a frozen shape snapshot - self-healing against
-future template tuning). Position itself isn't saved; only which save
-point made the save is, and loading finds that same terminal again and
-spawns you in an open cell beside it.
+statuses, cooldowns, quest progress, kill/spare log, the activity log's own
+scrollback (restored exactly as it read at save time, not replayed - see
+"Activity log"), name, pronouns, and the entire body tree
+(health/organs/statuses per part, rebuilt from templates on load rather
+than trusting a frozen shape snapshot - self-healing against future
+template tuning). Position itself isn't saved; only which save point made
+the save is, and loading finds that same terminal again and spawns you in
+an open cell beside it.
 
 **World state** (which items have been picked up, which doors are open,
 where each quest giver's dialogue cycle currently is) is saved too, as a
 straight snapshot of every location's `objects` list - loading replaces
 those lists wholesale rather than trying to reconcile individual entries.
+
+**Manage Saves** (`engine.doManageSaves`) is the one thing Save/Load
+themselves can't do: rename or delete a slot without touching what's
+actually saved there. Rename (`engine.renameSaveSlot`) just overwrites the
+slot's own `label` field and rewrites the file - a nickname a save
+already had survives a later overwrite too (`engine.doSave` reads the
+existing slot first specifically to carry it forward, rather than
+silently clearing it back to nothing). Delete (`engine.deleteSaveSlot`)
+removes the file outright, back to "Empty" in every slot listing - no
+undo, confirmed once before it happens.
 
 Files are plain `textutils.serialize` output under `saves/slotN.sav`, in
 the computer's own data directory - never inside the mounted project
@@ -1304,7 +1326,6 @@ NPC-to-NPC conversation system.
 - Only one non-human species exists. Adding another is just a `build`
   function plus a `speciesEntries` entry - nothing else references a
   species by name anywhere.
-- Save slots have no way to delete/rename, only overwrite.
 - Enemy movement (`approachAndStrike`) only clamps to room bounds -
   no wall/door awareness at all, so it can walk straight through one
   closing distance on the player. Deliberately left alone for now (the
@@ -1318,8 +1339,6 @@ NPC-to-NPC conversation system.
 - No apparel-equipping UI exists yet - worn items are still only ever set
   directly in code (`spawnTestDummy`), never through anything the player
   can reach. Only weapons got the "equip slot" treatment.
-- The activity log isn't part of save data - it's session-only scrollback,
-  cleared on restart same as the screen itself would be.
 - Quest/NPC dialogue still always shows a full prompt, even the purely
   flavor ones - only item pickup, doors, and outside-combat item use moved
   to the activity log so far.

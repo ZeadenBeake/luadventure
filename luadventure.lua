@@ -4713,8 +4713,12 @@ end
 -- just which save point made the save (see engine.findSavePointById/engine.applySaveData).
 -- Also captures the whole world's current object state (see
 -- engine.buildWorldSnapshot) - a save should remember what's changed out there,
--- not just the player's own stats.
-function engine.buildSaveData(saveId)
+-- not just the player's own stats. `label` is the slot's own custom
+-- nickname (see engine.renameSaveSlot) - not player data at all, but
+-- threaded through here (rather than patched onto the slot separately)
+-- so engine.doSave can carry an existing one forward across an overwrite
+-- without a second read/write of the file.
+function engine.buildSaveData(saveId, label)
     local stats = {}
     for k, v in pairs(player.stats) do stats[k] = v end
 
@@ -4750,8 +4754,12 @@ function engine.buildSaveData(saveId)
     local spareLog = {}
     for id, count in pairs(player.spareLog) do spareLog[id] = count end
 
+    local savedActivityLog = {}
+    for i, line in ipairs(activityLog) do savedActivityLog[i] = line end
+
     return {
         saveId = saveId,
+        label = label,
         steps = player.steps,
         name = player.name,
         pronouns = { subject = player.pronouns.subject, object = player.pronouns.object },
@@ -4768,6 +4776,7 @@ function engine.buildSaveData(saveId)
         quests = quests,
         killLog = killLog,
         spareLog = spareLog,
+        activityLog = savedActivityLog,
         body = engine.serializeBodyPart(player.body),
         world = engine.buildWorldSnapshot(),
     }
@@ -4823,6 +4832,16 @@ function engine.applySaveData(data)
     player.spareLog = {}
     for id, count in pairs(data.spareLog or {}) do player.spareLog[id] = count end
 
+    -- Same backward-compat convention for the activity log - restored
+    -- wholesale (already-wrapped lines, same as engine.logActivity always
+    -- appended) rather than replayed line by line, so it reads exactly as
+    -- it did the moment the save was made. Reassigning the enclosing
+    -- local rather than a player.* field, since the log was never scoped
+    -- to the player object to begin with (see its own declaration, well
+    -- above this point in the file).
+    activityLog = {}
+    for i, line in ipairs(data.activityLog or {}) do activityLog[i] = line end
+
     player.body = engine.deserializeBodyPart(data.body, true)
     player.globalTags = engine.recalcGlobalTags(player.body)
 
@@ -4859,7 +4878,11 @@ function engine.formatSaveSlotLabel(slot)
     end
     local locName = engine.findSavePointById(data.saveId)
     local place = (locName and world[locName].name) or "Unknown"
-    return "Slot " .. slot .. ": Lv" .. data.stats.level .. " - " .. data.steps .. " steps - " .. place
+    local summary = "Lv" .. data.stats.level .. " - " .. data.steps .. " steps - " .. place
+    if data.label then
+        return "Slot " .. slot .. ": " .. data.label .. " (" .. summary .. ")"
+    end
+    return "Slot " .. slot .. ": " .. summary
 end
 
 -- Same digit/letter-menu convention as everywhere else, plus a trailing
@@ -4883,13 +4906,18 @@ function engine.doSave(saveId)
     if not slot then
         return
     end
-    if engine.readSaveSlot(slot) then
+    -- Read once, both to ask about overwriting and to carry any existing
+    -- nickname (see engine.renameSaveSlot) forward - saving over a slot
+    -- called "Before the boss fight" shouldn't silently rename it back to
+    -- nothing.
+    local existing = engine.readSaveSlot(slot)
+    if existing then
         local choice = engine.showInteraction({ "Overwrite this slot?" }, { "Yes", "No" })
         if choice ~= 1 then
             return
         end
     end
-    engine.writeSaveSlot(slot, engine.buildSaveData(saveId))
+    engine.writeSaveSlot(slot, engine.buildSaveData(saveId, existing and existing.label))
     engine.showInteraction({ "Saved." }, { "Continue" })
 end
 
@@ -4907,21 +4935,85 @@ function engine.doLoad()
     engine.showInteraction({ "Loaded." }, { "Continue" })
 end
 
--- The save point itself: an ID-card terminal offering save/load/quit,
--- looping back to its own menu after save or load so one visit can do
--- several things. Returns (playerDied, quitRequested) - the second is new,
--- since this is the one interaction that can end the program outright.
+-- Overwrites just a slot's own nickname (see engine.buildSaveData's own
+-- `label`), leaving the rest of what's saved there untouched - a no-op if
+-- the slot is empty, since there's nothing to attach a label to.
+function engine.renameSaveSlot(slot, label)
+    local data = engine.readSaveSlot(slot)
+    if not data then
+        return false
+    end
+    data.label = label
+    engine.writeSaveSlot(slot, data)
+    return true
+end
+
+-- Removes a slot's file outright - back to "Empty" in engine.pickSaveSlot's
+-- own listing, same as if it had never been saved to at all. A no-op
+-- (not an error) if the slot was already empty.
+function engine.deleteSaveSlot(slot)
+    local path = engine.getSaveSlotPath(slot)
+    if fs.exists(path) then
+        fs.delete(path)
+    end
+end
+
+-- Rename/delete a slot without touching its contents otherwise - the one
+-- thing engine.doSave/engine.doLoad can't do, since both are built around
+-- actually loading or overwriting a slot's save data. Loops the same way
+-- engine.interactWithSavePoint does, so managing several slots in one
+-- visit doesn't mean re-opening this from the terminal's own menu each
+-- time.
+function engine.doManageSaves()
+    while true do
+        local slot = engine.pickSaveSlot("Manage which slot?")
+        if not slot then
+            return
+        end
+        if not engine.readSaveSlot(slot) then
+            engine.showInteraction({ "That slot is empty." }, { "Continue" })
+        else
+            local choice = engine.showInteraction({ "Slot " .. slot .. ":" }, { "Rename", "Delete", "Back" })
+            if choice == 1 then
+                combatWin.setVisible(false)
+                combatWin.clear()
+                combatWin.setCursorPos(1, 1)
+                combatWin.write("New label for this slot:")
+                combatWin.setVisible(true)
+                local label = engine.promptText(combatWin, 1, 2, 24)
+                engine.renameSaveSlot(slot, label)
+            elseif choice == 2 then
+                local confirm = engine.showInteraction(
+                    { "Delete Slot " .. slot .. "? This can't be undone." },
+                    { "Yes", "No" }
+                )
+                if confirm == 1 then
+                    engine.deleteSaveSlot(slot)
+                    engine.showInteraction({ "Deleted." }, { "Continue" })
+                end
+            end
+        end
+    end
+end
+
+-- The save point itself: an ID-card terminal offering save/load/manage/
+-- quit, looping back to its own menu after any of the first three so one
+-- visit can do several things. Returns (playerDied, quitRequested) - the
+-- second is new, since this is the one interaction that can end the
+-- program outright.
 function engine.interactWithSavePoint(obj)
     while true do
         local choice = engine.showInteraction(
             { "You insert your ID into the terminal.", "It hums to life." },
-            { "Save", "Load", "Quit Game", "Leave" }
+            { "Save", "Load", "Manage Saves", "Quit Game", "Leave" }
         )
         if choice == 1 then
             engine.doSave(obj.saveId)
         elseif choice == 2 then
             engine.doLoad()
         elseif choice == 3 then
+            engine.doManageSaves()
+        elseif choice == 4 then
             return false, true
         else
             return false, false
