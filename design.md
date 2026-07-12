@@ -1126,14 +1126,33 @@ Luadventure.someFallback(state, ...)`, first non-nil one wins):
   window this checks.
 - **`fleeMelee(state, keepDistance)`** - steps away from the player once
   they're within `keepDistance` tiles; `nil` otherwise. For an NPC type
-  better suited to fighting at range than getting swung at - nothing uses
-  it yet (both enemy types so far are melee brawlers), but it's ready for
-  whichever ranged one shows up next.
+  better suited to fighting at range than getting swung at - see
+  `banditType` below for the one that actually uses it.
 - **`checkSurrender(state, healthThreshold)`** - see "Surrender".
-- **`approachAndStrike(state, weapon)`** - the generic melee brawler
-  fallback (never returns `nil` - something has to happen every turn):
-  attacks with `weapon` once in range, otherwise closes distance one
-  cardinal step at a time.
+- **`approachAndStrike(state, weapon, slot)`** - the generic "close and
+  attack" fallback: attacks with `weapon` once in range, otherwise closes
+  distance one cardinal step at a time. Works the same for melee or
+  ranged - `slot` is optional and only matters for a weapon with
+  `ammoCapacity` (the equip slot it lives in, e.g. `"right_hand"`, same
+  key `state.self.ammo` already uses): passing it tracks and burns ammo
+  the same way the player's own Fight action does, and this returns `nil`
+  once it runs dry rather than ever attacking for free - the one case
+  this can return `nil` at all (without a `slot`, or for a weapon that
+  doesn't use ammo, something always has to happen every turn). A
+  decide() relying on that for its own fallback needs something after it
+  in the chain, same as `fleeDanger`/`checkSurrender` already expect.
+- **`hasAmmo(combatant, slot, weapon)`** - the same ammo check
+  `approachAndStrike` makes internally, exposed on its own for a
+  `decide()` that needs to pick a whole strategy around it rather than
+  just the one attack decision - see `banditType` below, which only
+  bothers keeping its distance (`fleeMelee`) while this is still true.
+  Checking ammo only at the attack step (kiting regardless) would fight
+  its own melee fallback into a permanent stalemate once the pistol's
+  dry: `fleeMelee` backing away the instant it's within
+  `BANDIT_KEEP_DISTANCE`, the bare-Strike fallback immediately closing
+  back in since `Strike`'s own range (1) is well inside that, forever,
+  without ever landing a punch - caught by actually playtesting a bandit
+  down to empty, not just reading the chain.
 
 `stepToward`/`stepAway` are the shared single-cardinal-step building
 blocks underneath all of these (whichever axis has more ground left to
@@ -1144,11 +1163,11 @@ follows) - a mirror pair, not something a `decide()` would call directly.
 `checkSurrender` and the player's own move-speed gating, exposed for
 anything even more custom.
 
-Two real NPC types exist so far. Which one `runEncounter` actually spawns
-is read straight off the triggering map object's own `enemyType` field
-(looked up in gamedata's `enemyEntries`, defaulting to `"test_dummy"` for
-any object that doesn't set one - every enemy object did, before this
-existed):
+Three real NPC types exist so far. Which one `runEncounter` actually
+spawns is read straight off the triggering map object's own `enemyType`
+field (looked up in gamedata's `enemyEntries`, defaulting to
+`"test_dummy"` for any object that doesn't set one - every enemy object
+did, before this existed):
 
 - **`testDummyType`**: `fleeDanger(state) or approachAndStrike(state,
   weaponEntries.strike)` - flee a grenade first, brawl bare-fisted
@@ -1166,6 +1185,33 @@ existed):
   in a location's `objects`, so putting the two enemy types anywhere
   near each other would let the dummy win that race every time and make
   the raider effectively unreachable.
+- **`banditType`**: `fleeDanger(state) or checkSurrender(state,
+  BANDIT_SURRENDER_HEALTH)`, then - only while `hasAmmo(state.self,
+  "right_hand", weaponEntries.laser_pistol)` - `fleeMelee(state,
+  BANDIT_KEEP_DISTANCE) or approachAndStrike(state,
+  weaponEntries.laser_pistol, "right_hand")`, otherwise
+  `approachAndStrike(state, weaponEntries.strike)`. The ranged
+  counterpart to the raider, specifically to exercise the ranged/ammo
+  side of enemy combat: keeps its distance and shoots rather than
+  closing in like a melee brawler, tracking real ammo the same way the
+  player's own sidearm does (`spawnBandit` starts it loaded off
+  `weaponEntries.laser_pistol.ammoCapacity`), and commits to a brawl
+  bare-fisted once it runs dry rather than ever firing for free.
+  Gating `fleeMelee` on `hasAmmo` (rather than just chaining it ahead of
+  both attack fallbacks) matters: kiting unconditionally would have it
+  backing away the instant the bare-Strike fallback closes back within
+  `BANDIT_KEEP_DISTANCE`, forever, once genuinely out of ammo - a real
+  stalemate caught by playtesting a fight all the way to empty, not just
+  reading the chain. Placed in the village too, opposite corner from the
+  raider (more than double the sight-awareness radius away - see
+  "Sight-triggered combat") for the same aggro-overlap reason.
+
+Enemy attacks only scale damage by `enemy.stats.strength` for a `"melee"`
+weapon, matching the player's own Fight action exactly (a flat multiplier
+on *every* weapon, ranged included, was a real bug here until the bandit
+above needed it fixed) - and, same as the player, burn one unit of ammo
+per shot for whichever weapon/slot `approachAndStrike` was given, whether
+the shot actually lands or not.
 
 No pathfinding exists yet for any of this - see "Known gaps" for what
 that means once a room has more shape to it than an empty rectangle.
@@ -1183,9 +1229,9 @@ NPC-to-NPC conversation system.
   unused.
 - No leveling system - `stats.level` exists and displays, nothing changes
   it.
-- Only two enemy types (test dummy, raider) and one quest exist; multi-
-  enemy scenes work mechanically (`scene` is already a list) but nothing
-  spawns more than one foe at a time yet.
+- Only three enemy types (test dummy, raider, bandit) and one quest
+  exist; multi-enemy scenes work mechanically (`scene` is already a
+  list) but nothing spawns more than one foe at a time yet.
 - Pronouns are consumed by name/`{{subject}}`/`{{object}}` templating;
   `UNSIGHTLY` by one hardcoded dialogue check. Neither affects anything
   beyond that yet - social mechanics (haggling, reactions) wait on NPCs and
@@ -1199,12 +1245,6 @@ NPC-to-NPC conversation system.
   closing distance on the player. Deliberately left alone for now (the
   dummy's AI is meant to stay simple for testing) - real pathfinding is a
   later pass.
-- The enemy-turn attack resolution (the `endTurn` block in
-  `engine.runEncounter`) always scales damage by `enemy.stats.strength`,
-  regardless of the weapon's own `type` - unlike the player's own Fight
-  action, which only does that for `"melee"` weapons. Harmless today (both
-  enemy types so far are melee-only), but whichever ranged enemy
-  `fleeMelee` is waiting for will need this fixed first.
 - The test dummy always attacks with a bare Strike and doesn't go through
   `equipped` at all, so limb destruction never disables *its* attacks and
   it has nothing to drop - disarming (arm/hand destruction, a future disarm

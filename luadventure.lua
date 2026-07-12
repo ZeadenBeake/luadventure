@@ -2564,21 +2564,57 @@ function engine.fleeMelee(state, keepDistance)
     return { action = "move", dx = dx, dy = dy }
 end
 
--- The generic "melee brawler" fallback: attacks with `weapon` once in
+-- The generic "close and attack" fallback: attacks with `weapon` once in
 -- range, otherwise closes distance one cardinal step at a time
 -- (engine.stepToward) - no pathfinding, since there's nothing blocking a
 -- straight line in either room yet (see the design doc's "Known gaps" for
--- why that's still true). `decision.weapon` carries the weapon through to
--- the actual attack resolution (the endTurn block in engine.runEncounter),
--- which falls back to `weaponEntries.strike` if a decide() didn't come
--- through this function at all - every current NPC does, but nothing
--- requires it to.
-function engine.approachAndStrike(state, weapon)
+-- why that's still true). Works the same for a melee brawler or a ranged
+-- attacker (it'll walk into a pistol's range just like a fist's) - pair it
+-- with engine.fleeMelee ahead of it in the priority chain for something
+-- that actually keeps its distance instead of closing all the way in.
+-- `decision.weapon`/`decision.slot` carry through to the actual attack
+-- resolution (the endTurn block in engine.runEncounter), which falls back
+-- to `weaponEntries.strike` if a decide() didn't come through this
+-- function at all - every current NPC does, but nothing requires it to.
+--
+-- `slot` is optional and only matters for a weapon with `ammoCapacity`
+-- (`state.self.ammo[slot]`, the same convention player.ammo already
+-- uses) - pass the equip slot the weapon actually lives in (e.g.
+-- "right_hand") so this can track and burn ammo same as the player does,
+-- and returns `nil` once it's run dry rather than ever attacking for
+-- free. That's the one case this can return `nil` at all - a weapon
+-- without `ammoCapacity` (or called without `slot`) never does, so a
+-- decide() relying on that for its own fallback (chaining a bare Strike
+-- after a limited one, say) only needs to worry about it for ammo-using
+-- weapons. See engine.hasAmmo for the same check on its own, for a
+-- decide() that needs to pick a whole strategy around it rather than
+-- just this one attack decision (engine.fleeMelee ahead of this in a
+-- chain, kiting to stay at range, needs to stop doing that once there's
+-- nothing left to shoot with - see gamedata.lua's own bandit for what
+-- goes wrong if it doesn't).
+function engine.approachAndStrike(state, weapon, slot)
+    if slot and not engine.hasAmmo(state.self, slot, weapon) then
+        return nil
+    end
     if state.distance <= weapon.range then
-        return { action = "attack", weapon = weapon }
+        return { action = "attack", weapon = weapon, slot = slot }
     end
     local dx, dy = engine.stepToward(state.self.gridX, state.self.gridY, state.player.gridX, state.player.gridY)
     return { action = "move", dx = dx, dy = dy }
+end
+
+-- Whether `combatant` currently has enough ammo loaded in `slot` to fire
+-- `weapon` at least once - always true for a weapon without ammoCapacity
+-- at all. The same check engine.approachAndStrike makes before
+-- committing to an attack, exposed on its own so a decide() can gate a
+-- whole strategy on it (kite-and-shoot vs. brawl), not just that single
+-- decision.
+function engine.hasAmmo(combatant, slot, weapon)
+    if not weapon.ammoCapacity then
+        return true
+    end
+    local ammo = combatant.ammo and combatant.ammo[slot] or 0
+    return ammo >= (weapon.ammoPerShot or 1)
 end
 
 -- True once nothing left on `combatant` can attack with more than a bare
@@ -3188,6 +3224,7 @@ Luadventure.stepAway = engine.stepAway
 Luadventure.fleeDanger = engine.fleeDanger
 Luadventure.fleeMelee = engine.fleeMelee
 Luadventure.approachAndStrike = engine.approachAndStrike
+Luadventure.hasAmmo = engine.hasAmmo
 Luadventure.isDisarmed = engine.isDisarmed
 Luadventure.checkSurrender = engine.checkSurrender
 
@@ -4278,12 +4315,24 @@ function engine.runEncounter(triggeringObject)
                         end
                     elseif decision.action == "attack" then
                         -- engine.approachAndStrike carries its own weapon
-                        -- through on the decision it returns - falls back to
-                        -- a bare Strike for a decide() that doesn't (nothing
-                        -- current doesn't, but nothing requires going through
-                        -- that function at all).
+                        -- (and, for an ammo-using one, which slot it's
+                        -- equipped in) through on the decision it returns -
+                        -- falls back to a bare Strike for a decide() that
+                        -- doesn't (nothing current doesn't, but nothing
+                        -- requires going through that function at all).
                         local weapon = decision.weapon or weaponEntries.strike
                         local distance = engine.gridDistance(player.gridX, player.gridY, enemy.gridX, enemy.gridY)
+
+                        -- Firing burns ammo whether it hits or not, same
+                        -- as the player's own Fight action - decision.slot
+                        -- is whatever engine.approachAndStrike was told the
+                        -- weapon lives in, so an enemy with no ammo-using
+                        -- weapon (or a decide() that skipped that
+                        -- bookkeeping entirely) just never touches this.
+                        if weapon.ammoCapacity and decision.slot then
+                            enemy.ammo[decision.slot] = (enemy.ammo[decision.slot] or 0) - (weapon.ammoPerShot or 1)
+                        end
+
                         -- Picked before the roll (not after landing a hit) so
                         -- its aimDifficulty, if any, actually factors into the
                         -- chance - same order the player's own Fight action
@@ -4298,8 +4347,19 @@ function engine.runEncounter(triggeringObject)
                         if math.random() > enemyHitChance then
                             engine.logCombat("It misses!")
                         else
+                            -- STRENGTH only scales a melee swing - matches
+                            -- the player's own Fight action (see its
+                            -- weapon.type == "melee" check) rather than the
+                            -- flat enemy.stats.strength multiplier every
+                            -- weapon used to get regardless of type, which
+                            -- would have over/under-scaled the first ranged
+                            -- enemy to actually use it.
+                            local strength = 1
+                            if weapon.type == "melee" then
+                                strength = enemy.stats.strength
+                            end
                             local roll = math.random(weapon.damage.min, weapon.damage.max)
-                            local raw = math.floor(roll * enemy.stats.strength + 0.5)
+                            local raw = math.floor(roll * strength + 0.5)
                             local dealt = engine.damagePart(player, pick.part, raw, weapon.damageType)
                             if weapon.onHit then
                                 weapon.onHit(pick.part)

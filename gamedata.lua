@@ -884,18 +884,31 @@ local speciesEntries = {
 --     about to land on top of state.self; nil if there's no danger to
 --     flee from right now.
 --   Luadventure.fleeMelee(state, keepDistance) - step away from the
---     player once they're within keepDistance tiles; nil otherwise -
---     for an NPC better suited to fighting at range (nothing here uses
---     it yet, both types below are melee brawlers).
+--     player once they're within keepDistance tiles; nil otherwise - for
+--     an NPC better suited to fighting at range (see banditType below).
 --   Luadventure.checkSurrender(state, healthThreshold) - {action=
 --     "surrender"} once state.self's own torso health drops to or below
 --     healthThreshold (a fraction of max), or it's effectively disarmed
 --     (Luadventure.isDisarmed); nil otherwise. See "Surrender" in the
 --     design doc for what actually happens once this fires.
---   Luadventure.approachAndStrike(state, weapon) - the generic melee
---     brawler fallback (never nil - something has to happen every
---     turn): attacks with weapon once in range, otherwise closes
---     distance one cardinal step at a time.
+--   Luadventure.approachAndStrike(state, weapon, slot) - the generic
+--     "close and attack" fallback: attacks with weapon once in range,
+--     otherwise closes distance one cardinal step at a time. `slot` is
+--     optional and only matters for a weapon with ammoCapacity (e.g.
+--     "right_hand", the same key state.self.ammo already uses) - pass
+--     it to have this track and burn ammo the same way the player's own
+--     Fight action does; without a slot (or for a weapon that doesn't
+--     use ammo at all) this never returns nil, since something has to
+--     happen every turn - with one and an empty magazine, it does, so a
+--     decide() relying on it for ammo needs a fallback after it (see
+--     banditType, which falls through to a bare Strike once its pistol
+--     runs dry).
+--   Luadventure.hasAmmo(combatant, slot, weapon) - the same ammo check
+--     approachAndStrike makes internally, exposed so a decide() can pick
+--     a whole strategy around it rather than just the one attack
+--     decision - see banditType, which only bothers keeping its distance
+--     (fleeMelee) while this is still true, to avoid fighting its own
+--     melee fallback into a permanent stalemate once it isn't.
 --   Luadventure.stepToward/.stepAway(fromX, fromY, x, y) - the single-
 --     cardinal-step primitives the above are built on, for anything
 --     more bespoke.
@@ -994,6 +1007,82 @@ local function spawnRaider()
     return enemy
 end
 
+-- Same surrender threshold as the raider (see RAIDER_SURRENDER_HEALTH) -
+-- a separate constant since nothing ties the two types' thresholds
+-- together, even though they happen to agree today.
+local BANDIT_SURRENDER_HEALTH = 0.25
+
+-- How close the player can get before a bandit backs off (see
+-- Luadventure.fleeMelee) rather than let them close to melee range -
+-- comfortably inside the laser pistol's own range (5) so it's still
+-- shooting while it retreats, not just running blind.
+local BANDIT_KEEP_DISTANCE = 3
+
+local banditType
+
+local function getBanditType()
+    if not banditType then
+        banditType = Luadventure.newNpcType("bandit")
+        function banditType:decide(state)
+            local flee = Luadventure.fleeDanger(state)
+            if flee then
+                return flee
+            end
+
+            local surrender = Luadventure.checkSurrender(state, BANDIT_SURRENDER_HEALTH)
+            if surrender then
+                return surrender
+            end
+
+            -- Only worth keeping its distance (Luadventure.fleeMelee)
+            -- while there's still something to shoot with - once the
+            -- pistol's dry, kiting forever right outside a bare Strike's
+            -- own range (1) would leave the two behaviors fighting each
+            -- other: close in for approachAndStrike's sake, then
+            -- immediately back off again the moment that's within
+            -- BANDIT_KEEP_DISTANCE, forever, without ever landing a
+            -- punch. Committing to a brawl once it's actually out avoids
+            -- that stalemate entirely.
+            if Luadventure.hasAmmo(state.self, "right_hand", weaponEntries.laser_pistol) then
+                return Luadventure.fleeMelee(state, BANDIT_KEEP_DISTANCE)
+                    or Luadventure.approachAndStrike(state, weaponEntries.laser_pistol, "right_hand")
+            end
+            return Luadventure.approachAndStrike(state, weaponEntries.strike)
+        end
+    end
+    return banditType
+end
+
+-- A ranged counterpart to the raider, specifically to exercise the
+-- ranged/ammo side of enemy combat (see engine.approachAndStrike's own
+-- `slot` param and the endTurn ammo-burn/strength-scaling it feeds) - a
+-- raider swings a chain sword and just walks the player down;
+-- Luadventure.fleeMelee lets a bandit instead keep its distance and keep
+-- shooting, falling all the way through to bare fists only once its
+-- laser pistol runs dry (see spawnBandit's starting ammo). Surrenders the
+-- same way a raider does - badly hurt, or (once truly out of options)
+-- disarmed - rather than fighting to the death.
+local function spawnBandit()
+    local enemy = getBanditType():new()
+    enemy.body = Luadventure.newHumanBody()
+    enemy.typeId = "bandit"
+    enemy.equipped.right_hand = "laser_pistol"
+
+    -- Starts loaded, same as the player's own sidearm (see player.ammo)
+    -- - no reload behavior on the AI side yet, so once this runs out
+    -- decide() falls back to bare fists for the rest of the fight (see
+    -- BANDIT_KEEP_DISTANCE's own comment for why that's still a losing
+    -- position to fight from, not just a free pass).
+    enemy.ammo.right_hand = weaponEntries.laser_pistol.ammoCapacity
+
+    -- What ends up in the player's bag on "Finish them off" - accepting
+    -- surrender instead means the bandit keeps all of it, same as a
+    -- raider.
+    enemy.loot = { "laser_pistol", "dermoregenesis_salve" }
+
+    return enemy
+end
+
 -- Never spawned - not registered in enemyEntries below, so
 -- `enemyType = "quick_example"` on a map object would just fall through
 -- to the engine's own default (the test dummy) rather than ever actually
@@ -1034,6 +1123,7 @@ end
 local enemyEntries = {
     test_dummy = { spawn = spawnTestDummy },
     raider = { spawn = spawnRaider },
+    bandit = { spawn = spawnBandit },
 }
 
 --[[
@@ -1093,6 +1183,13 @@ local world = {
             -- death, and offers the player a real choice - spare it, or
             -- finish it off for its gear.
             { kind = "enemy", x = 35, y = 5, enemyType = "raider" },
+
+            -- Off in the opposite corner from the raider - far enough
+            -- (more than double SIGHT_DISTANCE away) that the two enemies'
+            -- own awareness radii can never both cover the same player
+            -- position at once, same aggro-overlap concern the raider's
+            -- own placement comment above already explains.
+            { kind = "enemy", x = 2, y = 2, enemyType = "bandit" },
         },
     },
 
