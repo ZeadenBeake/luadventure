@@ -471,20 +471,29 @@ function engine.getLimbStrength(combatant, part)
     return strength
 end
 
--- The fraction of health remaining across EVERY part combined (torso,
+-- The raw health/maxHealth summed across EVERY part combined (torso,
 -- head, every limb down to the last finger) - not the torso's own
--- health/maxHealth alone, which is all engine.isDead's MORTAL check (and
--- the older per-part displays) ever look at directly. What
--- ATTRITION_DEATH_HEALTH/engine.checkSurrender actually watch: a body
--- riddled with badly-hurt-but-not-destroyed limbs should eventually go
--- down (or give up) the same as one felled by a single fatal blow to a
--- MORTAL part, even though no individual part ever actually hit 0.
-function engine.getBodyHealthFraction(torso)
+-- health/maxHealth alone. Shared by engine.getBodyHealthFraction (the
+-- attrition/surrender math below) and engine.drawStats (the corner HP
+-- readout), so both agree on what "the body's health" means.
+function engine.getBodyHealthTotals(torso)
     local health, maxHealth = 0, 0
     engine.walkBody(torso, function(part)
         health = health + part.health
         maxHealth = maxHealth + part.maxHealth
     end)
+    return health, maxHealth
+end
+
+-- The fraction of health remaining across EVERY part combined - not the
+-- torso's own health/maxHealth alone, which is all engine.isDead's MORTAL
+-- check (and the older per-part displays) ever look at directly. What
+-- ATTRITION_DEATH_HEALTH/engine.checkSurrender actually watch: a body
+-- riddled with badly-hurt-but-not-destroyed limbs should eventually go
+-- down (or give up) the same as one felled by a single fatal blow to a
+-- MORTAL part, even though no individual part ever actually hit 0.
+function engine.getBodyHealthFraction(torso)
+    local health, maxHealth = engine.getBodyHealthTotals(torso)
     if maxHealth <= 0 then
         return 0
     end
@@ -1220,7 +1229,8 @@ function engine.drawStats()
     statsWin.setCursorPos(1, 1)
     statsWin.write(player.name)
     statsWin.setCursorPos(1, 2)
-    statsWin.write("HP " .. player.stats.health .. "/" .. player.stats.max_health)
+    local health, maxHealth = engine.getBodyHealthTotals(player.body)
+    statsWin.write("HP " .. health .. "/" .. maxHealth)
     statsWin.setCursorPos(1, 3)
     statsWin.write("Lv " .. player.stats.level)
     statsWin.setCursorPos(1, 4)
