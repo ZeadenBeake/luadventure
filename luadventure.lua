@@ -966,8 +966,12 @@ player.pronouns = { subject = "they", object = "them" }
 -- Per-quest progress ("active", "done" - not-yet-taken is just absent), and
 -- a running tally of kills by typeId (see engine.showVictoryScreen) - quest
 -- completion conditions read these instead of a bespoke flag per encounter.
+-- spareLog is killLog's mirror image, for whoever surrendered and was let
+-- go instead (see the "surrender" branch in engine.runEncounter) - a quest
+-- that specifically wants a bloodless outcome checks this one instead.
 player.quests = {}
 player.killLog = {}
+player.spareLog = {}
 
 -- Body/globalTags are built once species is actually chosen (see
 -- engine.runCharacterCreation, run once at startup, right before the first
@@ -1006,11 +1010,13 @@ npc.new = character.new
 -- state = { self = this npc, player = player, distance = <cells apart> }.
 -- Returns one of: {action="attack", weapon=} (weapon optional, falls back
 -- to a bare Strike - see the endTurn block in engine.runEncounter),
--- {action="move", dx=, dy=}, {action="idle"}. Base default just idles -
+-- {action="move", dx=, dy=}, {action="idle"}, or {action="surrender"}
+-- (ends the encounter outright - see engine.checkSurrender and the
+-- "surrender" branch in engine.runEncounter). Base default just idles -
 -- every real NPC type overrides this, typically as a priority chain of
 -- reusable behaviors (engine.fleeDanger/engine.fleeMelee/
--- engine.approachAndStrike, see those) rather than one bespoke function
--- per type.
+-- engine.checkSurrender/engine.approachAndStrike, see those) rather than
+-- one bespoke function per type.
 function npc:decide(state)
     return { action = "idle" }
 end
@@ -2396,6 +2402,41 @@ function engine.spawnTestDummy()
     return enemy
 end
 
+-- The fraction of max (torso) health below which a raider gives up
+-- outright, regardless of what it's still holding - see
+-- engine.checkSurrender.
+local RAIDER_SURRENDER_HEALTH = 0.25
+
+-- A second enemy type, specifically to exercise non-lethal victory (see
+-- "Surrender" in the design doc) - unlike the test dummy (a pure,
+-- mindless sparring target with nothing at stake), a raider is written as
+-- someone who'd actually give up: badly hurt, or stripped of anything
+-- better than bare fists (engine.checkSurrender covers both), it
+-- surrenders instead of fighting to the death, ahead of its normal
+-- brawler behavior.
+local raiderType = npc:new()
+raiderType.name = "raider"
+
+function raiderType:decide(state)
+    return engine.fleeDanger(state)
+        or engine.checkSurrender(state, RAIDER_SURRENDER_HEALTH)
+        or engine.approachAndStrike(state, weaponEntries.chain_sword)
+end
+
+function engine.spawnRaider()
+    local enemy = raiderType:new()
+    enemy.body = engine.newHumanBody()
+    enemy.typeId = "raider"
+    enemy.equipped.right_hand = "chain_sword"
+
+    -- What ends up in the player's bag on "Finish them off" (see the
+    -- "surrender" branch in engine.runEncounter) - accepting surrender
+    -- instead means the raider keeps all of it.
+    enemy.loot = { "chain_sword", "dermoregenesis_salve" }
+
+    return enemy
+end
+
 -- To-hit math works off any {stats, body} pair, so it's the same function
 -- for the player and any hard-coded enemy. Injuries feed straight back in:
 -- a busted head throws off your aim, worn-down legs make you slow to dodge.
@@ -2592,6 +2633,41 @@ function engine.approachAndStrike(state, weapon)
     end
     local dx, dy = engine.stepToward(state.self.gridX, state.self.gridY, state.player.gridX, state.player.gridY)
     return { action = "move", dx = dx, dy = dy }
+end
+
+-- True once nothing left on `combatant` can attack with more than a bare
+-- Strike - every equipped weapon dropped or destroyed, every natural
+-- weapon (a stinger, say) destroyed too. A functional MANIPULATE hand
+-- with nothing (or nothing anymore) equipped still falls back to a
+-- bare-fisted Strike (see engine.getWieldedWeapon) - that alone doesn't
+-- count as "armed" for this check, just what's always available. The
+-- "disarmed" half of engine.checkSurrender.
+function engine.isDisarmed(combatant)
+    for _, entry in ipairs(engine.collectLabeledParts(combatant.body)) do
+        if engine.isLimbFunctional(entry.part) then
+            local weapon = engine.getAttackWeapon(entry, combatant.equipped)
+            if weapon and weapon ~= weaponEntries.strike then
+                return false
+            end
+        end
+    end
+    return true
+end
+
+-- Signals surrender ({action="surrender"}) once `state.self` is either
+-- badly hurt (its own torso health at or below `healthThreshold`, a
+-- fraction of max health) or effectively disarmed (engine.isDisarmed) -
+-- nil otherwise, so a decide() can chain it the same way
+-- engine.fleeDanger/engine.fleeMelee do. See the "surrender" branch in
+-- engine.runEncounter for what actually happens once this fires - not
+-- every NPC type has to use this at all (the test dummy doesn't; it has
+-- no real stake in the fight to begin with).
+function engine.checkSurrender(state, healthThreshold)
+    local body = state.self.body
+    if body.health / body.maxHealth <= healthThreshold or engine.isDisarmed(state.self) then
+        return { action = "surrender" }
+    end
+    return nil
 end
 
 -- Every wrapped line logged so far this encounter, oldest first - mirrors
@@ -3814,10 +3890,16 @@ local COMBAT_BLOCKED_INTERACT_KINDS = { save_point = true, person = true }
 -- `triggeringObject` is whichever map object (an enemy-kind entry in the
 -- current location's objects) started this fight, if any - used purely so
 -- a win can remove it from the map afterward (see the victory branch
--- below); nothing else about the encounter depends on it.
+-- below); its own `enemyType` (defaulting to the test dummy for any
+-- object that doesn't set one, same as before this existed at all) says
+-- which spawner actually builds the live combatant fighting it - built
+-- fresh on every call rather than as a top-level local specifically so it
+-- doesn't matter which order engine.spawnTestDummy/engine.spawnRaider
+-- happen to be defined in above this point.
 function engine.runEncounter(triggeringObject)
     local startX, startY = player.gridX, player.gridY
-    local enemy = engine.spawnTestDummy()
+    local spawners = { test_dummy = engine.spawnTestDummy, raider = engine.spawnRaider }
+    local enemy = (spawners[triggeringObject.enemyType] or engine.spawnTestDummy)()
     local scene = { enemy }
     local loc = world[player.location]
 
@@ -4277,6 +4359,34 @@ function engine.runEncounter(triggeringObject)
                             end
                         end
                     end
+                elseif decision.action == "surrender" then
+                    -- Ends the encounter right here, same as a win or a
+                    -- flee already do - not the normal victory path (see
+                    -- engine.showVictoryScreen), since the fight isn't
+                    -- actually over by anyone dying. triggeringObject
+                    -- stays gone either way (see the top of this
+                    -- function) - unlike fleeing, neither outcome leaves
+                    -- something to re-engage later.
+                    engine.logCombat("The " .. enemy.name .. " throws down its weapon and surrenders!")
+                    local choice = engine.showInteraction(
+                        { "The " .. enemy.name .. " has surrendered." },
+                        { "Accept surrender", "Finish them off" }
+                    )
+                    combatState.redrawPanes()
+
+                    player.gridX, player.gridY = startX, startY
+                    if choice == 1 then
+                        player.spareLog[enemy.typeId] = (player.spareLog[enemy.typeId] or 0) + 1
+                        engine.logActivity(engine.dialogue("{{name}} accepted the " .. enemy.name .. "'s surrender.", player))
+                    else
+                        for _, itemId in ipairs(enemy.loot or {}) do
+                            table.insert(player.inventory, itemId)
+                        end
+                        player.killLog[enemy.typeId] = (player.killLog[enemy.typeId] or 0) + 1
+                        engine.logActivity(engine.dialogue("{{name}} finished off the " .. enemy.name .. ".", player))
+                    end
+                    returnUnclaimedDrops()
+                    return false
                 end
                 -- decision.action == "idle": nothing happens.
             end
@@ -4500,6 +4610,9 @@ function engine.buildSaveData(saveId)
     local killLog = {}
     for id, count in pairs(player.killLog) do killLog[id] = count end
 
+    local spareLog = {}
+    for id, count in pairs(player.spareLog) do spareLog[id] = count end
+
     return {
         saveId = saveId,
         steps = player.steps,
@@ -4517,6 +4630,7 @@ function engine.buildSaveData(saveId)
         worn = worn,
         quests = quests,
         killLog = killLog,
+        spareLog = spareLog,
         body = engine.serializeBodyPart(player.body),
         world = engine.buildWorldSnapshot(),
     }
@@ -4566,6 +4680,11 @@ function engine.applySaveData(data)
 
     player.killLog = {}
     for id, count in pairs(data.killLog) do player.killLog[id] = count end
+
+    -- `or {}`: a save made before spareLog existed at all just has nothing
+    -- to load here, not a missing field to error on.
+    player.spareLog = {}
+    for id, count in pairs(data.spareLog or {}) do player.spareLog[id] = count end
 
     player.body = engine.deserializeBodyPart(data.body, true)
     player.globalTags = engine.recalcGlobalTags(player.body)

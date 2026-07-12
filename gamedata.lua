@@ -903,6 +903,21 @@ local world = {
             { kind = "wall", x1 = 36, y1 = 20, x2 = 36, y2 = 26 },
             { kind = "door", x = 30, y = 23, orientation = "vertical", open = false },
             { kind = "save_point", x = 33, y = 23, saveId = "village_terminal" },
+
+            -- Off in an open corner, well clear of everything else here
+            -- and (more importantly) clear of the grasslands dummy's own
+            -- sight radius entirely - a raider in the same room would
+            -- have made itself unreachable, since engine.checkAwareness
+            -- always picks whichever aware enemy comes first in
+            -- loc.objects, and the dummy would always win that race
+            -- while both stayed in range of each other. Unlike the
+            -- dummy, a raider is written to actually give up once it's
+            -- lost (see engine.checkSurrender/the raider's own
+            -- decide()): badly hurt, or stripped of anything better than
+            -- bare fists, it surrenders instead of fighting to the
+            -- death, and offers the player a real choice - spare it, or
+            -- finish it off for its gear.
+            { kind = "enemy", x = 35, y = 5, enemyType = "raider" },
         },
     },
 

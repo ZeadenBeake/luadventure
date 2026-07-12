@@ -213,7 +213,7 @@ Each location has an `objects` list. `findObjectAt` resolves collisions,
 | `!` | person (quest) | Quest not yet taken, or done and ready to hand in |
 | `?` | person (quest) | Quest active, not yet ready to turn in |
 | `0` | person | Flavor-only NPC, or a quest giver with nothing left to give |
-| `E` | enemy | Fight starts the moment it's aware of you (see "Sight-triggered combat") - walking into it directly still works too |
+| `E` | enemy | Fight starts the moment it's aware of you (see "Sight-triggered combat") - walking into it directly still works too. `enemyType` (defaulting to the test dummy) says which NPC type actually spawns - see "NPCs" |
 | `$` | save point | Save / Load / Quit Game (see "Save & load") |
 
 Two different ways to trigger a reaction from something on the map:
@@ -503,6 +503,39 @@ destroy quest for, say, three bandits is just `>= 3` against that same
 table, no bespoke flag per encounter needed. `scene` is already a list, so
 multi-enemy encounters fall out for free whenever something spawns more
 than one foe at once - nothing does yet.
+
+### Surrender
+
+Not every foe fights to the death - `{action="surrender"}` is a fourth
+`decide()` outcome (alongside attack/move/idle) that ends the encounter
+outright, checked via `engine.checkSurrender(state, healthThreshold)`:
+true once `state.self`'s own torso health drops to or below
+`healthThreshold` (a fraction of max health), *or* it's effectively
+disarmed (`engine.isDisarmed` - every equipped weapon dropped or
+destroyed, every natural weapon too; a functional hand alone doesn't
+count, since a bare-fisted Strike is always available and isn't "armed"
+for this purpose). Nothing requires an NPC type to use this at all - the
+test dummy doesn't, since it's a mindless sparring target with nothing
+really at stake.
+
+Once triggered, `runEncounter`'s own "surrender" branch stops the player
+with a real choice (`showInteraction`, same Yes/No-style prompt the
+overworld already uses) rather than the normal victory screen:
+
+- **Accept surrender** - the encounter ends peacefully, logged onto
+  `player.spareLog` (a count table shaped exactly like `killLog`, keyed
+  the same way by `typeId`) instead of `killLog` - a quest that
+  specifically wants a bloodless outcome checks this one instead. No
+  loot.
+- **Finish them off** - resolves like a kill (`killLog` increments, same
+  as an ordinary victory) and drops everything in the foe's own `loot`
+  (a list of item ids on the enemy instance) into the player's
+  inventory.
+
+Either way the encounter ends the same way a normal win does -
+`triggeringObject` stays off the map for good (see "Sight-triggered
+combat") rather than getting re-inserted the way a flee does, since
+neither outcome leaves anything to re-engage later.
 
 ### Combat menu & movement
 
@@ -1056,7 +1089,8 @@ flat list into something readable.
 `npc` extends `character` with a `decide(state)` method each NPC type
 overrides - given `{self, player, distance}`, returns one action for its
 turn (`{action="attack", weapon=}` - `weapon` optional, falls back to a
-bare Strike; `{action="move", dx=, dy=}`; or `{action="idle"}`).
+bare Strike; `{action="move", dx=, dy=}`; `{action="idle"}`; or
+`{action="surrender"}` - see "Surrender").
 
 Rather than each NPC type writing its own movement/targeting logic from
 scratch, `decide()` is meant to compose a small set of generic, reusable
@@ -1072,8 +1106,9 @@ non-nil one wins:
 - **`engine.fleeMelee(state, keepDistance)`** - steps away from the player
   once they're within `keepDistance` tiles; `nil` otherwise. For an NPC
   type better suited to fighting at range than getting swung at - nothing
-  uses it yet (the only enemy type so far is a melee brawler), but it's
+  uses it yet (both enemy types so far are melee brawlers), but it's
   ready for whichever ranged one shows up next.
+- **`engine.checkSurrender(state, healthThreshold)`** - see "Surrender".
 - **`engine.approachAndStrike(state, weapon)`** - the generic melee
   brawler fallback (never returns `nil` - something has to happen every
   turn): attacks with `weapon` once in range, otherwise closes distance
@@ -1085,14 +1120,30 @@ left to cover, same "one axis per turn" rule the player's own arrow-key
 movement follows) - a mirror pair, not something a `decide()` would call
 directly.
 
-The only real NPC type so far is `testDummyType`:
-`engine.fleeDanger(state) or engine.approachAndStrike(state,
-weaponEntries.strike)` - flee a grenade first, brawl otherwise. The dummy
-itself lives behind a door in the grasslands specifically so it doesn't
-interrupt ordinary exploration, but is still there to spar with on
-demand. No pathfinding exists yet for any of this - see "Known gaps" for
-what that means once a room has more shape to it than an empty
-rectangle.
+Two real NPC types exist so far, both spawned from `engine.runEncounter`
+itself rather than a top-level table (`local spawners = { test_dummy =
+engine.spawnTestDummy, raider = engine.spawnRaider }`, built fresh inside
+the function so it doesn't matter which order the two spawners happen to
+be defined in above it) - which one fires is read straight off the
+triggering map object's own `enemyType` field, defaulting to the test
+dummy for any object that doesn't set one (every enemy object did, before
+this existed):
+
+- **`testDummyType`**: `engine.fleeDanger(state) or
+  engine.approachAndStrike(state, weaponEntries.strike)` - flee a grenade
+  first, brawl bare-fisted otherwise. A mindless sparring target with
+  nothing really at stake, so it never surrenders. Lives behind a door in
+  the grasslands specifically so it doesn't interrupt ordinary
+  exploration, but is still there to spar with on demand.
+- **`raiderType`**: `engine.fleeDanger(state) or
+  engine.checkSurrender(state, RAIDER_SURRENDER_HEALTH) or
+  engine.approachAndStrike(state, weaponEntries.chain_sword)` - flees a
+  grenade, gives up once badly hurt or disarmed, otherwise fights with a
+  chain sword. Exists specifically to exercise surrender - out in the
+  open grassland, well clear of the dummy's arena.
+
+No pathfinding exists yet for any of this - see "Known gaps" for what
+that means once a room has more shape to it than an empty rectangle.
 
 Two purely-flavor "Villager" NPCs stand next to each other in the village
 sharing one dynamic gossip line about the player (see "Dialogue
@@ -1118,10 +1169,17 @@ NPC-to-NPC conversation system.
   function plus a `speciesEntries` entry - nothing else references a
   species by name anywhere.
 - Save slots have no way to delete/rename, only overwrite.
-- Enemy movement (`testDummyType:decide`) only clamps to room bounds - no
-  wall/door awareness at all, so it can walk straight through one closing
-  distance on the player. Deliberately left alone for now (the dummy's AI
-  is meant to stay simple for testing) - real pathfinding is a later pass.
+- Enemy movement (`engine.approachAndStrike`) only clamps to room bounds -
+  no wall/door awareness at all, so it can walk straight through one
+  closing distance on the player. Deliberately left alone for now (the
+  dummy's AI is meant to stay simple for testing) - real pathfinding is a
+  later pass.
+- The enemy-turn attack resolution (the `endTurn` block in
+  `engine.runEncounter`) always scales damage by `enemy.stats.strength`,
+  regardless of the weapon's own `type` - unlike the player's own Fight
+  action, which only does that for `"melee"` weapons. Harmless today (both
+  enemy types so far are melee-only), but whichever ranged enemy
+  `engine.fleeMelee` is waiting for will need this fixed first.
 - The test dummy always attacks with a bare Strike and doesn't go through
   `equipped` at all, so limb destruction never disables *its* attacks and
   it has nothing to drop - disarming (arm/hand destruction, a future disarm
