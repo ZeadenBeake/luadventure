@@ -1086,61 +1086,86 @@ flat list into something readable.
 
 ## NPCs
 
-`npc` extends `character` with a `decide(state)` method each NPC type
-overrides - given `{self, player, distance}`, returns one action for its
-turn (`{action="attack", weapon=}` - `weapon` optional, falls back to a
-bare Strike; `{action="move", dx=, dy=}`; `{action="idle"}`; or
-`{action="surrender"}` - see "Surrender").
+Every actual NPC opponent is content, defined entirely in gamedata.lua
+(see its own NPCs section) the same way weapons/items/species are - the
+engine only supplies the base class and a handful of reusable building
+blocks. `npc` extends `character` with a `decide(state)` method each NPC
+type overrides, given `{self, player, distance}`. A `decide()` returns
+either a single decision or a list of them (the endTurn block in
+`runEncounter` normalizes either shape into a list and executes each
+entry in order) - a decision is one of `{action="attack", weapon=}`
+(`weapon` optional, falls back to a bare Strike), `{action="move", dx=,
+dy=}`, `{action="idle"}`, or `{action="surrender"}` (see "Surrender" -
+stops the rest of the list from resolving, same as it would stop a later
+round from ever happening).
+
+**There's deliberately no dedicated "AI action economy" system** - no
+enemy-side equivalent of the player's own quickened/restricted bonus-turn
+tracking. A fixed framework would only constrain whatever a real one
+eventually needs; instead, an NPC type that wants to emulate a multi-
+action turn just returns more than one decision from a single `decide()`
+call. `gamedata.lua`'s unused `quickExampleType` (never registered in
+`enemyEntries`, so it can't actually be spawned) is a reference for this:
+checks its own reflex against `REFLEX_QUICK_THRESHOLD` (the exact
+constant the player's own move-speed gating uses), and if it qualifies,
+returns two decisions instead of one. Nothing enforces this is legal or
+sane - a `decide()` chaining two full-speed attacks in a row is just as
+"valid" as returning one, so restraint is entirely on whoever writes a
+real one.
 
 Rather than each NPC type writing its own movement/targeting logic from
 scratch, `decide()` is meant to compose a small set of generic, reusable
-behaviors as a priority chain - `engine.fleeX(state, ...) or
-engine.fleeY(state, ...) or engine.someFallback(state, ...)`, first
-non-nil one wins:
+behaviors exposed the same way body-construction primitives are
+(`Luadventure.fleeX(state, ...) or Luadventure.fleeY(state, ...) or
+Luadventure.someFallback(state, ...)`, first non-nil one wins):
 
-- **`engine.fleeDanger(state)`** - steps away from wherever a thrown
-  grenade is about to land (`combatState.pendingGrenade`) if `state.self`
-  is within its blast radius; `nil` otherwise. The one turn between a
-  grenade landing and it actually going off (see "Grenades") is exactly
-  the window this checks.
-- **`engine.fleeMelee(state, keepDistance)`** - steps away from the player
-  once they're within `keepDistance` tiles; `nil` otherwise. For an NPC
-  type better suited to fighting at range than getting swung at - nothing
-  uses it yet (both enemy types so far are melee brawlers), but it's
-  ready for whichever ranged one shows up next.
-- **`engine.checkSurrender(state, healthThreshold)`** - see "Surrender".
-- **`engine.approachAndStrike(state, weapon)`** - the generic melee
-  brawler fallback (never returns `nil` - something has to happen every
-  turn): attacks with `weapon` once in range, otherwise closes distance
-  one cardinal step at a time.
+- **`fleeDanger(state)`** - steps away from wherever a thrown grenade is
+  about to land (`combatState.pendingGrenade`) if `state.self` is within
+  its blast radius; `nil` otherwise. The one turn between a grenade
+  landing and it actually going off (see "Grenades") is exactly the
+  window this checks.
+- **`fleeMelee(state, keepDistance)`** - steps away from the player once
+  they're within `keepDistance` tiles; `nil` otherwise. For an NPC type
+  better suited to fighting at range than getting swung at - nothing uses
+  it yet (both enemy types so far are melee brawlers), but it's ready for
+  whichever ranged one shows up next.
+- **`checkSurrender(state, healthThreshold)`** - see "Surrender".
+- **`approachAndStrike(state, weapon)`** - the generic melee brawler
+  fallback (never returns `nil` - something has to happen every turn):
+  attacks with `weapon` once in range, otherwise closes distance one
+  cardinal step at a time.
 
-`engine.stepToward`/`engine.stepAway` are the shared single-cardinal-step
-building blocks underneath all of these (whichever axis has more ground
-left to cover, same "one axis per turn" rule the player's own arrow-key
-movement follows) - a mirror pair, not something a `decide()` would call
-directly.
+`stepToward`/`stepAway` are the shared single-cardinal-step building
+blocks underneath all of these (whichever axis has more ground left to
+cover, same "one axis per turn" rule the player's own arrow-key movement
+follows) - a mirror pair, not something a `decide()` would call directly.
+`isDisarmed`, `getEffectiveReflex`/`getEffectiveAim`, and
+`REFLEX_QUICK_THRESHOLD` are the raw building blocks behind
+`checkSurrender` and the player's own move-speed gating, exposed for
+anything even more custom.
 
-Two real NPC types exist so far, both spawned from `engine.runEncounter`
-itself rather than a top-level table (`local spawners = { test_dummy =
-engine.spawnTestDummy, raider = engine.spawnRaider }`, built fresh inside
-the function so it doesn't matter which order the two spawners happen to
-be defined in above it) - which one fires is read straight off the
-triggering map object's own `enemyType` field, defaulting to the test
-dummy for any object that doesn't set one (every enemy object did, before
-this existed):
+Two real NPC types exist so far. Which one `runEncounter` actually spawns
+is read straight off the triggering map object's own `enemyType` field
+(looked up in gamedata's `enemyEntries`, defaulting to `"test_dummy"` for
+any object that doesn't set one - every enemy object did, before this
+existed):
 
-- **`testDummyType`**: `engine.fleeDanger(state) or
-  engine.approachAndStrike(state, weaponEntries.strike)` - flee a grenade
-  first, brawl bare-fisted otherwise. A mindless sparring target with
-  nothing really at stake, so it never surrenders. Lives behind a door in
-  the grasslands specifically so it doesn't interrupt ordinary
-  exploration, but is still there to spar with on demand.
-- **`raiderType`**: `engine.fleeDanger(state) or
-  engine.checkSurrender(state, RAIDER_SURRENDER_HEALTH) or
-  engine.approachAndStrike(state, weaponEntries.chain_sword)` - flees a
-  grenade, gives up once badly hurt or disarmed, otherwise fights with a
-  chain sword. Exists specifically to exercise surrender - out in the
-  open grassland, well clear of the dummy's arena.
+- **`testDummyType`**: `fleeDanger(state) or approachAndStrike(state,
+  weaponEntries.strike)` - flee a grenade first, brawl bare-fisted
+  otherwise. A mindless sparring target with nothing really at stake, so
+  it never surrenders. Lives behind a door in the grasslands specifically
+  so it doesn't interrupt ordinary exploration, but is still there to
+  spar with on demand.
+- **`raiderType`**: `fleeDanger(state) or checkSurrender(state,
+  RAIDER_SURRENDER_HEALTH) or approachAndStrike(state,
+  weaponEntries.chain_sword)` - flees a grenade, gives up once badly hurt
+  or disarmed, otherwise fights with a chain sword. Exists specifically
+  to exercise surrender - placed in the village, deliberately far from
+  the test dummy's own sight radius (see "Sight-triggered combat"):
+  `checkAwareness` always resolves to whichever aware enemy comes first
+  in a location's `objects`, so putting the two enemy types anywhere
+  near each other would let the dummy win that race every time and make
+  the raider effectively unreachable.
 
 No pathfinding exists yet for any of this - see "Known gaps" for what
 that means once a room has more shape to it than an empty rectangle.
@@ -1158,9 +1183,9 @@ NPC-to-NPC conversation system.
   unused.
 - No leveling system - `stats.level` exists and displays, nothing changes
   it.
-- Only one enemy type (the test dummy) and one quest exist; multi-enemy
-  scenes work mechanically (`scene` is already a list) but nothing spawns
-  more than one foe at a time yet.
+- Only two enemy types (test dummy, raider) and one quest exist; multi-
+  enemy scenes work mechanically (`scene` is already a list) but nothing
+  spawns more than one foe at a time yet.
 - Pronouns are consumed by name/`{{subject}}`/`{{object}}` templating;
   `UNSIGHTLY` by one hardcoded dialogue check. Neither affects anything
   beyond that yet - social mechanics (haggling, reactions) wait on NPCs and
@@ -1169,7 +1194,7 @@ NPC-to-NPC conversation system.
   function plus a `speciesEntries` entry - nothing else references a
   species by name anywhere.
 - Save slots have no way to delete/rename, only overwrite.
-- Enemy movement (`engine.approachAndStrike`) only clamps to room bounds -
+- Enemy movement (`approachAndStrike`) only clamps to room bounds -
   no wall/door awareness at all, so it can walk straight through one
   closing distance on the player. Deliberately left alone for now (the
   dummy's AI is meant to stay simple for testing) - real pathfinding is a
@@ -1179,7 +1204,7 @@ NPC-to-NPC conversation system.
   regardless of the weapon's own `type` - unlike the player's own Fight
   action, which only does that for `"melee"` weapons. Harmless today (both
   enemy types so far are melee-only), but whichever ranged enemy
-  `engine.fleeMelee` is waiting for will need this fixed first.
+  `fleeMelee` is waiting for will need this fixed first.
 - The test dummy always attacks with a bare Strike and doesn't go through
   `equipped` at all, so limb destruction never disables *its* attacks and
   it has nothing to drop - disarming (arm/hand destruction, a future disarm

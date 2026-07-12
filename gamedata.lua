@@ -45,8 +45,13 @@
     see any ability effect below that calls `pickLimb` for why),
     `.newTorso`/`.attachPart`/`.installCategoryOrgan`/`.installGenericOrgan`/
     `.recalcGlobalTags`/`.newHumanBody`/`.newInsectoidBody` (body
-    construction, for a custom species' own `build` function) - is
-    documented in full, with signatures, in design.md under "Modding".
+    construction, for a custom species' own `build` function),
+    `.newNpcType` (a fresh NPC prototype - see the NPCs section below for
+    the whole custom-AI toolkit: `.fleeDanger`/`.fleeMelee`/
+    `.checkSurrender`/`.approachAndStrike`/`.stepToward`/`.stepAway`/
+    `.isDisarmed`/`.getEffectiveReflex`/`.getEffectiveAim`/
+    `.REFLEX_QUICK_THRESHOLD`) - is documented in full, with signatures,
+    in design.md under "Modding".
 
     A WORKED EXAMPLE: a custom ability that reads player data
 
@@ -861,6 +866,176 @@ local speciesEntries = {
     },
 }
 
+-- NPC opponents - real content now, the same way weapons/items/species
+-- are, rather than living in the engine. Luadventure.newNpcType(name)
+-- returns a fresh prototype (see the engine's own npc/character base
+-- classes) whose :decide(state) can be overridden same as any Lua
+-- method; state = {self=, player=, distance=}. decide() can return a
+-- single decision ({action=...}) or a list of them to take more than one
+-- action in the same round - see the unused "quick example" type at the
+-- end of this section for one way to use that; the engine doesn't police
+-- an NPC's own action economy at all, on purpose - a fixed framework
+-- would only get in the way of whatever a real fast/slow enemy
+-- eventually needs.
+--
+-- Reusable decide() building blocks, all exposed the same way body-
+-- construction primitives are:
+--   Luadventure.fleeDanger(state) - step away from a thrown grenade
+--     about to land on top of state.self; nil if there's no danger to
+--     flee from right now.
+--   Luadventure.fleeMelee(state, keepDistance) - step away from the
+--     player once they're within keepDistance tiles; nil otherwise -
+--     for an NPC better suited to fighting at range (nothing here uses
+--     it yet, both types below are melee brawlers).
+--   Luadventure.checkSurrender(state, healthThreshold) - {action=
+--     "surrender"} once state.self's own torso health drops to or below
+--     healthThreshold (a fraction of max), or it's effectively disarmed
+--     (Luadventure.isDisarmed); nil otherwise. See "Surrender" in the
+--     design doc for what actually happens once this fires.
+--   Luadventure.approachAndStrike(state, weapon) - the generic melee
+--     brawler fallback (never nil - something has to happen every
+--     turn): attacks with weapon once in range, otherwise closes
+--     distance one cardinal step at a time.
+--   Luadventure.stepToward/.stepAway(fromX, fromY, x, y) - the single-
+--     cardinal-step primitives the above are built on, for anything
+--     more bespoke.
+--   Luadventure.isDisarmed(combatant), Luadventure.getEffectiveReflex/
+--     .getEffectiveAim(combatant), Luadventure.REFLEX_QUICK_THRESHOLD -
+--     the raw building blocks behind checkSurrender and the player's
+--     own quick/full move gating, for anything even more custom.
+-- Luadventure.newNpcType (and everything else on the Luadventure bridge)
+-- isn't populated until well after gamedata.lua is require()'d, so type
+-- construction has to be deferred into a function and only actually run
+-- (and memoized) the first time something spawns - calling it at this
+-- file's top level would crash on load, same as calling any other
+-- Luadventure.* function here would.
+local testDummyType
+
+local function getTestDummyType()
+    if not testDummyType then
+        testDummyType = Luadventure.newNpcType("test dummy")
+        function testDummyType:decide(state)
+            return Luadventure.fleeDanger(state) or Luadventure.approachAndStrike(state, weaponEntries.strike)
+        end
+    end
+    return testDummyType
+end
+
+-- Super simple test enemy, built from the same swappable-limb system the
+-- player uses - torso and head are MORTAL the same way any torso is, so
+-- it can be crippled or killed exactly like the player can. It's melee-
+-- only and bare-fisted, so decide() paths straight toward the player (no
+-- pathfinding needed - the rooms are empty rectangles) until its fist is
+-- in range, then throws a punch every turn after that - except for the
+-- one thing worth running from at all: a grenade about to land on top of
+-- it, checked first every turn, ahead of its normal brawler behavior. A
+-- mindless sparring target with nothing at stake, so it never
+-- surrenders.
+local function spawnTestDummy()
+    local enemy = getTestDummyType():new()
+    enemy.body = Luadventure.newHumanBody()
+    enemy.typeId = "test_dummy"
+
+    -- Test case for damage types: a thick skull shrugs off blunt hits but is
+    -- an easier target for anything that punches through.
+    enemy.body.subSlots.head.resistances = { bludgeoning = 0.8, piercing = 1.2 }
+
+    -- Test case for coverage inheritance: no species actually has horns yet,
+    -- but attaching one anyway proves it protects exactly as well as the
+    -- head it's stuck to, despite having no coverage zone of its own.
+    Luadventure.attachPart(enemy.body.subSlots.head, "horns", "horn", {})
+
+    -- Test case for apparel: two layers on the torso (should stack) plus a
+    -- helmet on the head (which the horn above should inherit).
+    table.insert(enemy.worn, "padded_shirt")
+    table.insert(enemy.worn, "ballistic_vest")
+    table.insert(enemy.worn, "helmet")
+
+    return enemy
+end
+
+-- The fraction of max (torso) health below which a raider gives up
+-- outright, regardless of what it's still holding - see
+-- Luadventure.checkSurrender.
+local RAIDER_SURRENDER_HEALTH = 0.25
+
+local raiderType
+
+local function getRaiderType()
+    if not raiderType then
+        raiderType = Luadventure.newNpcType("raider")
+        function raiderType:decide(state)
+            return Luadventure.fleeDanger(state)
+                or Luadventure.checkSurrender(state, RAIDER_SURRENDER_HEALTH)
+                or Luadventure.approachAndStrike(state, weaponEntries.chain_sword)
+        end
+    end
+    return raiderType
+end
+
+-- A second enemy type, specifically to exercise non-lethal victory (see
+-- "Surrender" in the design doc) - unlike the test dummy (a pure,
+-- mindless sparring target with nothing at stake), a raider is written as
+-- someone who'd actually give up: badly hurt, or stripped of anything
+-- better than bare fists (Luadventure.checkSurrender covers both), it
+-- surrenders instead of fighting to the death, ahead of its normal
+-- brawler behavior.
+local function spawnRaider()
+    local enemy = getRaiderType():new()
+    enemy.body = Luadventure.newHumanBody()
+    enemy.typeId = "raider"
+    enemy.equipped.right_hand = "chain_sword"
+
+    -- What ends up in the player's bag on "Finish them off" (see the
+    -- "surrender" branch in the engine's own runEncounter) - accepting
+    -- surrender instead means the raider keeps all of it.
+    enemy.loot = { "chain_sword", "dermoregenesis_salve" }
+
+    return enemy
+end
+
+-- Never spawned - not registered in enemyEntries below, so
+-- `enemyType = "quick_example"` on a map object would just fall through
+-- to the engine's own default (the test dummy) rather than ever actually
+-- reaching this. Purely a reference for emulating the player's own
+-- quick-action bonus turn from a custom decide(): check reflex, and if
+-- it qualifies, return a list of two decisions instead of one - that's
+-- the entire trick, no dedicated engine machinery involved. Nothing
+-- stops a decide() from doing this every turn, or chaining two full-speed
+-- attacks in a row if it wanted to - restraint is on whoever writes a
+-- real one, the same way it would be for an actually fast enemy.
+-- Wrapped in a constructor that's never actually called, same reason
+-- spawnTestDummy/spawnRaider defer their own type construction - nothing
+-- here runs at require time, so leaving this uninvoked costs nothing.
+local function makeQuickExampleType()
+    local quickExampleType = Luadventure.newNpcType("quick example (unused)")
+
+    function quickExampleType:decide(state)
+        local flee = Luadventure.fleeDanger(state)
+        if flee then
+            return flee
+        end
+
+        local strike = Luadventure.approachAndStrike(state, weaponEntries.strike)
+        if strike.action == "attack" and Luadventure.getEffectiveReflex(state.self) >= Luadventure.REFLEX_QUICK_THRESHOLD then
+            -- Already in range and quick enough for a second swing this same
+            -- round, the same way a quick player action grants a bonus turn.
+            return { strike, strike }
+        end
+        return strike
+    end
+
+    return quickExampleType
+end
+
+-- Which spawn function `engine.runEncounter` calls for a given map
+-- object's `enemyType` (see the world data below) - the engine falls
+-- back to "test_dummy" for any object that doesn't set one at all.
+local enemyEntries = {
+    test_dummy = { spawn = spawnTestDummy },
+    raider = { spawn = spawnRaider },
+}
+
 --[[
     The world map. Each named location is a room: a walkable grid
     (width/height), which `objects` sit on it (items, walls, doors, people,
@@ -1009,6 +1184,7 @@ return {
     itemEntries = itemEntries,
     abilityEntries = abilityEntries,
     speciesEntries = speciesEntries,
+    enemyEntries = enemyEntries,
     world = world,
     questEntries = questEntries,
     dynamicGreetings = dynamicGreetings,

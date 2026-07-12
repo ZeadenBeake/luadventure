@@ -57,6 +57,7 @@ local weaponEntries = gamedata.weaponEntries
 local itemEntries = gamedata.itemEntries
 local abilityEntries = gamedata.abilityEntries
 local speciesEntries = gamedata.speciesEntries
+local enemyEntries = gamedata.enemyEntries
 local questEntries = gamedata.questEntries
 local dynamicGreetings = gamedata.dynamicGreetings
 world = gamedata.world
@@ -1008,17 +1009,38 @@ local npc = character:new()
 npc.new = character.new
 
 -- state = { self = this npc, player = player, distance = <cells apart> }.
--- Returns one of: {action="attack", weapon=} (weapon optional, falls back
--- to a bare Strike - see the endTurn block in engine.runEncounter),
--- {action="move", dx=, dy=}, {action="idle"}, or {action="surrender"}
--- (ends the encounter outright - see engine.checkSurrender and the
--- "surrender" branch in engine.runEncounter). Base default just idles -
--- every real NPC type overrides this, typically as a priority chain of
--- reusable behaviors (engine.fleeDanger/engine.fleeMelee/
--- engine.checkSurrender/engine.approachAndStrike, see those) rather than
--- one bespoke function per type.
+-- Returns a single decision, or a list of them to take more than one
+-- action in the same round (see engine.runEncounter's endTurn block,
+-- which normalizes either shape into a list and just executes each entry
+-- in order) - the engine doesn't police an NPC's own action economy at
+-- all, so whether (and how) to emulate the player's own quick/full
+-- system is entirely up to what a given type's decide() chooses to
+-- return; see gamedata.lua's own unused example NPC (real code, just
+-- never registered so it can't actually be spawned) for one way to do
+-- that. A decision is one of: {action="attack", weapon=} (weapon
+-- optional, falls back to a bare Strike), {action="move", dx=, dy=},
+-- {action="idle"}, or {action="surrender"} (ends the encounter outright -
+-- see engine.checkSurrender - stops the rest of the list from resolving,
+-- same as it would stop a later round from ever happening). Base default
+-- just idles - every real NPC type overrides this, typically as a
+-- priority chain of reusable behaviors (engine.fleeDanger/
+-- engine.fleeMelee/engine.checkSurrender/engine.approachAndStrike, see
+-- those - all exposed to gamedata.lua, where every actual NPC type now
+-- lives) rather than one bespoke function per type.
 function npc:decide(state)
     return { action = "idle" }
+end
+
+-- The one primitive gamedata.lua needs to define a whole new NPC type
+-- (see the file's own NPC section) without reaching into the engine's own
+-- class hierarchy directly - returns a fresh prototype (not a live
+-- instance - see character:new/npc:new for that) whose own :decide()
+-- gamedata.lua can then override same as any Lua method, exactly the way
+-- engine.spawnTestDummy/engine.spawnRaider used to before they moved.
+function engine.newNpcType(name)
+    local t = npc:new()
+    t.name = name
+    return t
 end
 
 
@@ -2360,82 +2382,6 @@ function engine.stepAway(fromX, fromY, dangerX, dangerY)
     end
 end
 
--- Super simple test enemy, built from the same swappable-limb system the
--- player uses - torso and head are MORTAL the same way any torso is, so it
--- can be crippled or killed exactly like the player can. It's melee-only and
--- bare-fisted, so decide() paths straight toward the player (no pathfinding
--- needed - the rooms are empty rectangles) until its fist is in range, then
--- throws a punch every turn after that - except for the one thing worth
--- running from at all: a grenade about to land on top of it
--- (engine.fleeDanger), checked first every turn, ahead of its normal
--- brawler behavior (engine.approachAndStrike). Behavior is hard-coded
--- rather than data-driven, same as any other non-player creature - this is
--- the "type", inherited stats and all, from which live instances are
--- spawned.
-local testDummyType = npc:new()
-testDummyType.name = "test dummy"
-
-function testDummyType:decide(state)
-    return engine.fleeDanger(state) or engine.approachAndStrike(state, weaponEntries.strike)
-end
-
-function engine.spawnTestDummy()
-    local enemy = testDummyType:new()
-    enemy.body = engine.newHumanBody()
-    enemy.typeId = "test_dummy"
-
-    -- Test case for damage types: a thick skull shrugs off blunt hits but is
-    -- an easier target for anything that punches through.
-    enemy.body.subSlots.head.resistances = { bludgeoning = 0.8, piercing = 1.2 }
-
-    -- Test case for coverage inheritance: no species actually has horns yet,
-    -- but attaching one anyway proves it protects exactly as well as the
-    -- head it's stuck to, despite having no coverage zone of its own.
-    engine.attachPart(enemy.body.subSlots.head, "horns", "horn", {})
-
-    -- Test case for apparel: two layers on the torso (should stack) plus a
-    -- helmet on the head (which the horn above should inherit).
-    table.insert(enemy.worn, "padded_shirt")
-    table.insert(enemy.worn, "ballistic_vest")
-    table.insert(enemy.worn, "helmet")
-
-    return enemy
-end
-
--- The fraction of max (torso) health below which a raider gives up
--- outright, regardless of what it's still holding - see
--- engine.checkSurrender.
-local RAIDER_SURRENDER_HEALTH = 0.25
-
--- A second enemy type, specifically to exercise non-lethal victory (see
--- "Surrender" in the design doc) - unlike the test dummy (a pure,
--- mindless sparring target with nothing at stake), a raider is written as
--- someone who'd actually give up: badly hurt, or stripped of anything
--- better than bare fists (engine.checkSurrender covers both), it
--- surrenders instead of fighting to the death, ahead of its normal
--- brawler behavior.
-local raiderType = npc:new()
-raiderType.name = "raider"
-
-function raiderType:decide(state)
-    return engine.fleeDanger(state)
-        or engine.checkSurrender(state, RAIDER_SURRENDER_HEALTH)
-        or engine.approachAndStrike(state, weaponEntries.chain_sword)
-end
-
-function engine.spawnRaider()
-    local enemy = raiderType:new()
-    enemy.body = engine.newHumanBody()
-    enemy.typeId = "raider"
-    enemy.equipped.right_hand = "chain_sword"
-
-    -- What ends up in the player's bag on "Finish them off" (see the
-    -- "surrender" branch in engine.runEncounter) - accepting surrender
-    -- instead means the raider keeps all of it.
-    enemy.loot = { "chain_sword", "dermoregenesis_salve" }
-
-    return enemy
-end
 
 -- To-hit math works off any {stats, body} pair, so it's the same function
 -- for the player and any hard-coded enemy. Injuries feed straight back in:
@@ -3233,6 +3179,17 @@ Luadventure.installGenericOrgan = engine.installGenericOrgan
 Luadventure.recalcGlobalTags = engine.recalcGlobalTags
 Luadventure.newHumanBody = engine.newHumanBody
 Luadventure.newInsectoidBody = engine.newInsectoidBody
+Luadventure.newNpcType = engine.newNpcType
+Luadventure.getEffectiveAim = engine.getEffectiveAim
+Luadventure.getEffectiveReflex = engine.getEffectiveReflex
+Luadventure.REFLEX_QUICK_THRESHOLD = REFLEX_QUICK_THRESHOLD
+Luadventure.stepToward = engine.stepToward
+Luadventure.stepAway = engine.stepAway
+Luadventure.fleeDanger = engine.fleeDanger
+Luadventure.fleeMelee = engine.fleeMelee
+Luadventure.approachAndStrike = engine.approachAndStrike
+Luadventure.isDisarmed = engine.isDisarmed
+Luadventure.checkSurrender = engine.checkSurrender
 
 -- A read-only version of engine.pickLimb's list, for the Look action - a size-up,
 -- not a targeting prompt, so it never asks the player to choose one, just
@@ -3890,16 +3847,14 @@ local COMBAT_BLOCKED_INTERACT_KINDS = { save_point = true, person = true }
 -- `triggeringObject` is whichever map object (an enemy-kind entry in the
 -- current location's objects) started this fight, if any - used purely so
 -- a win can remove it from the map afterward (see the victory branch
--- below); its own `enemyType` (defaulting to the test dummy for any
--- object that doesn't set one, same as before this existed at all) says
--- which spawner actually builds the live combatant fighting it - built
--- fresh on every call rather than as a top-level local specifically so it
--- doesn't matter which order engine.spawnTestDummy/engine.spawnRaider
--- happen to be defined in above this point.
+-- below); its own `enemyType` (defaulting to "test_dummy" for any object
+-- that doesn't set one, same as before enemyType existed at all) looks up
+-- which one to actually spawn in `enemyEntries` - real content, defined
+-- entirely in gamedata.lua (see its own NPCs section) the same way
+-- weapons/items/species are, not hardcoded here.
 function engine.runEncounter(triggeringObject)
     local startX, startY = player.gridX, player.gridY
-    local spawners = { test_dummy = engine.spawnTestDummy, raider = engine.spawnRaider }
-    local enemy = (spawners[triggeringObject.enemyType] or engine.spawnTestDummy)()
+    local enemy = enemyEntries[triggeringObject.enemyType or "test_dummy"].spawn()
     local scene = { enemy }
     local loc = world[player.location]
 
@@ -4280,115 +4235,133 @@ function engine.runEncounter(triggeringObject)
             -- was the killing one) doesn't get to act - the scene check at
             -- the top of the loop will end the encounter next turn.
             if not engine.sceneCleared(scene) then
-                local distanceBeforeTurn = engine.gridDistance(player.gridX, player.gridY, enemy.gridX, enemy.gridY)
-                local decision = enemy:decide({
+                local decisions = enemy:decide({
                     self = enemy,
                     player = player,
-                    distance = distanceBeforeTurn,
+                    distance = engine.gridDistance(player.gridX, player.gridY, enemy.gridX, enemy.gridY),
                 })
+                -- decide() can return one decision or a list of them (see
+                -- npc:decide's own doc) - normalized to a list here so
+                -- everything below only has to handle one shape. Nothing
+                -- polices how many an NPC type asks for or what they add
+                -- up to speed-wise - that's entirely up to what a given
+                -- decide() chooses to return.
+                if decisions.action then
+                    decisions = { decisions }
+                end
 
-                if decision.action == "move" then
-                    enemy.gridX = math.max(1, math.min(loc.width, enemy.gridX + decision.dx))
-                    enemy.gridY = math.max(1, math.min(loc.height, enemy.gridY + decision.dy))
+                for _, decision in ipairs(decisions) do
+                    if decision.action == "move" then
+                        -- Distance is read fresh right before and after
+                        -- this specific step, not once for the whole
+                        -- round - a second decision later in the same
+                        -- list (from an NPC emulating a multi-action
+                        -- turn) needs to see wherever this one actually
+                        -- left off, not stale values from before any of
+                        -- them ran.
+                        local distanceBeforeTurn = engine.gridDistance(player.gridX, player.gridY, enemy.gridX, enemy.gridY)
+                        enemy.gridX = math.max(1, math.min(loc.width, enemy.gridX + decision.dx))
+                        enemy.gridY = math.max(1, math.min(loc.height, enemy.gridY + decision.dy))
 
-                    -- A "move" decision doesn't say *why* - engine.fleeDanger/
-                    -- engine.fleeMelee and engine.approachAndStrike all
-                    -- return the exact same shape, so this reads the actual
-                    -- result instead of assuming every move closes distance
-                    -- the way it always used to.
-                    local distanceAfterTurn = engine.gridDistance(player.gridX, player.gridY, enemy.gridX, enemy.gridY)
-                    if distanceAfterTurn < distanceBeforeTurn then
-                        engine.logCombat("The " .. enemy.name .. " closes in!")
-                    elseif distanceAfterTurn > distanceBeforeTurn then
-                        engine.logCombat("The " .. enemy.name .. " backs away!")
-                    else
-                        engine.logCombat("The " .. enemy.name .. " repositions!")
-                    end
-                elseif decision.action == "attack" then
-                    -- engine.approachAndStrike carries its own weapon
-                    -- through on the decision it returns - falls back to
-                    -- a bare Strike for a decide() that doesn't (nothing
-                    -- current doesn't, but nothing requires going through
-                    -- that function at all).
-                    local weapon = decision.weapon or weaponEntries.strike
-                    local distance = engine.gridDistance(player.gridX, player.gridY, enemy.gridX, enemy.gridY)
-                    -- Picked before the roll (not after landing a hit) so
-                    -- its aimDifficulty, if any, actually factors into the
-                    -- chance - same order the player's own Fight action
-                    -- already uses (engine.pickLimb, then engine.getFinalHitChance).
-                    local parts = engine.collectLabeledParts(player.body)
-                    local pick = parts[math.random(#parts)]
-                    local enemyHitChance = engine.getFinalHitChance(enemy, player, weapon, distance, pick.part)
-                    local enemyHitPercent = math.floor(enemyHitChance * 100 + 0.5)
-
-                    engine.logCombat("The " .. enemy.name .. " attacks (" .. enemyHitPercent .. "% to hit)...")
-
-                    if math.random() > enemyHitChance then
-                        engine.logCombat("It misses!")
-                    else
-                        local roll = math.random(weapon.damage.min, weapon.damage.max)
-                        local raw = math.floor(roll * enemy.stats.strength + 0.5)
-                        local dealt = engine.damagePart(player, pick.part, raw, weapon.damageType)
-                        if weapon.onHit then
-                            weapon.onHit(pick.part)
+                        -- A "move" decision doesn't say *why* - engine.fleeDanger/
+                        -- engine.fleeMelee and engine.approachAndStrike all
+                        -- return the exact same shape, so this reads the actual
+                        -- result instead of assuming every move closes distance
+                        -- the way it always used to.
+                        local distanceAfterTurn = engine.gridDistance(player.gridX, player.gridY, enemy.gridX, enemy.gridY)
+                        if distanceAfterTurn < distanceBeforeTurn then
+                            engine.logCombat("The " .. enemy.name .. " closes in!")
+                        elseif distanceAfterTurn > distanceBeforeTurn then
+                            engine.logCombat("The " .. enemy.name .. " backs away!")
+                        else
+                            engine.logCombat("The " .. enemy.name .. " repositions!")
                         end
+                    elseif decision.action == "attack" then
+                        -- engine.approachAndStrike carries its own weapon
+                        -- through on the decision it returns - falls back to
+                        -- a bare Strike for a decide() that doesn't (nothing
+                        -- current doesn't, but nothing requires going through
+                        -- that function at all).
+                        local weapon = decision.weapon or weaponEntries.strike
+                        local distance = engine.gridDistance(player.gridX, player.gridY, enemy.gridX, enemy.gridY)
+                        -- Picked before the roll (not after landing a hit) so
+                        -- its aimDifficulty, if any, actually factors into the
+                        -- chance - same order the player's own Fight action
+                        -- already uses (engine.pickLimb, then engine.getFinalHitChance).
+                        local parts = engine.collectLabeledParts(player.body)
+                        local pick = parts[math.random(#parts)]
+                        local enemyHitChance = engine.getFinalHitChance(enemy, player, weapon, distance, pick.part)
+                        local enemyHitPercent = math.floor(enemyHitChance * 100 + 0.5)
 
-                        engine.logCombat("Hits your " .. pick.label .. " for " .. dealt .. "! (" .. pick.part.health .. "/" .. pick.part.maxHealth .. ")")
-                        combatState.flash(player.gridX, player.gridY, "@")
+                        engine.logCombat("The " .. enemy.name .. " attacks (" .. enemyHitPercent .. "% to hit)...")
 
-                        -- Death is the one AI-turn outcome that still stops
-                        -- the player in their tracks with a full screen,
-                        -- same as victory - everything else here is routine
-                        -- enough for the log.
-                        if engine.isDead(player.body) then
-                            engine.showCombatMessage({ "You died.", "", "Press any key." }, true)
-                            returnUnclaimedDrops()
-                            return true
-                        end
+                        if math.random() > enemyHitChance then
+                            engine.logCombat("It misses!")
+                        else
+                            local roll = math.random(weapon.damage.min, weapon.damage.max)
+                            local raw = math.floor(roll * enemy.stats.strength + 0.5)
+                            local dealt = engine.damagePart(player, pick.part, raw, weapon.damageType)
+                            if weapon.onHit then
+                                weapon.onHit(pick.part)
+                            end
 
-                        -- A destroyed hand can't hold onto anything - the
-                        -- weapon actually falls, rather than just sitting
-                        -- unusable in a slot attached to a ruined hand (an
-                        -- arm being destroyed instead just disables
-                        -- attacking - see engine.isLimbFunctional/engine.pickAttack -
-                        -- nothing gets dropped for that).
-                        if pick.part.health <= 0 then
-                            local droppedWeaponId = engine.dropEquippedItem(droppedItems, pick.label)
-                            if droppedWeaponId then
-                                engine.logCombat("Your " .. pick.label .. " goes limp - the " .. weaponEntries[droppedWeaponId].name .. " clatters to the ground!")
+                            engine.logCombat("Hits your " .. pick.label .. " for " .. dealt .. "! (" .. pick.part.health .. "/" .. pick.part.maxHealth .. ")")
+                            combatState.flash(player.gridX, player.gridY, "@")
+
+                            -- Death is the one AI-turn outcome that still stops
+                            -- the player in their tracks with a full screen,
+                            -- same as victory - everything else here is routine
+                            -- enough for the log.
+                            if engine.isDead(player.body) then
+                                engine.showCombatMessage({ "You died.", "", "Press any key." }, true)
+                                returnUnclaimedDrops()
+                                return true
+                            end
+
+                            -- A destroyed hand can't hold onto anything - the
+                            -- weapon actually falls, rather than just sitting
+                            -- unusable in a slot attached to a ruined hand (an
+                            -- arm being destroyed instead just disables
+                            -- attacking - see engine.isLimbFunctional/engine.pickAttack -
+                            -- nothing gets dropped for that).
+                            if pick.part.health <= 0 then
+                                local droppedWeaponId = engine.dropEquippedItem(droppedItems, pick.label)
+                                if droppedWeaponId then
+                                    engine.logCombat("Your " .. pick.label .. " goes limp - the " .. weaponEntries[droppedWeaponId].name .. " clatters to the ground!")
+                                end
                             end
                         end
-                    end
-                elseif decision.action == "surrender" then
-                    -- Ends the encounter right here, same as a win or a
-                    -- flee already do - not the normal victory path (see
-                    -- engine.showVictoryScreen), since the fight isn't
-                    -- actually over by anyone dying. triggeringObject
-                    -- stays gone either way (see the top of this
-                    -- function) - unlike fleeing, neither outcome leaves
-                    -- something to re-engage later.
-                    engine.logCombat("The " .. enemy.name .. " throws down its weapon and surrenders!")
-                    local choice = engine.showInteraction(
-                        { "The " .. enemy.name .. " has surrendered." },
-                        { "Accept surrender", "Finish them off" }
-                    )
-                    combatState.redrawPanes()
+                    elseif decision.action == "surrender" then
+                        -- Ends the encounter right here, same as a win or a
+                        -- flee already do - not the normal victory path (see
+                        -- engine.showVictoryScreen), since the fight isn't
+                        -- actually over by anyone dying. triggeringObject
+                        -- stays gone either way (see the top of this
+                        -- function) - unlike fleeing, neither outcome leaves
+                        -- something to re-engage later.
+                        engine.logCombat("The " .. enemy.name .. " throws down its weapon and surrenders!")
+                        local choice = engine.showInteraction(
+                            { "The " .. enemy.name .. " has surrendered." },
+                            { "Accept surrender", "Finish them off" }
+                        )
+                        combatState.redrawPanes()
 
-                    player.gridX, player.gridY = startX, startY
-                    if choice == 1 then
-                        player.spareLog[enemy.typeId] = (player.spareLog[enemy.typeId] or 0) + 1
-                        engine.logActivity(engine.dialogue("{{name}} accepted the " .. enemy.name .. "'s surrender.", player))
-                    else
-                        for _, itemId in ipairs(enemy.loot or {}) do
-                            table.insert(player.inventory, itemId)
+                        player.gridX, player.gridY = startX, startY
+                        if choice == 1 then
+                            player.spareLog[enemy.typeId] = (player.spareLog[enemy.typeId] or 0) + 1
+                            engine.logActivity(engine.dialogue("{{name}} accepted the " .. enemy.name .. "'s surrender.", player))
+                        else
+                            for _, itemId in ipairs(enemy.loot or {}) do
+                                table.insert(player.inventory, itemId)
+                            end
+                            player.killLog[enemy.typeId] = (player.killLog[enemy.typeId] or 0) + 1
+                            engine.logActivity(engine.dialogue("{{name}} finished off the " .. enemy.name .. ".", player))
                         end
-                        player.killLog[enemy.typeId] = (player.killLog[enemy.typeId] or 0) + 1
-                        engine.logActivity(engine.dialogue("{{name}} finished off the " .. enemy.name .. ".", player))
+                        returnUnclaimedDrops()
+                        return false
                     end
-                    returnUnclaimedDrops()
-                    return false
+                    -- decision.action == "idle": nothing happens.
                 end
-                -- decision.action == "idle": nothing happens.
             end
 
             -- A full round has now actually elapsed - this is "the start of
