@@ -57,6 +57,13 @@ log"). The inventory, Medical (see "Medical"), Apparel (see "Apparel"),
 and any blurb/dialogue interaction take over the whole screen as their
 own modal window instead of sharing the four corners.
 
+The stats pane (`engine.drawStats`) shows name, an "HP" line, level, and
+step count. HP is health/maxHealth summed across the whole body
+(`engine.getBodyHealthTotals`), not `stats.health`/`max_health` - those
+are stat-block fields set once at creation and never updated (see "Stats
+& combat"), so they'd read a frozen 100/100 all game regardless of
+damage taken.
+
 Combat gets its *own* four-corner layout rather than a single full-screen
 window - map (top-left), the action menu (bottom-left), a combat-scoped log
 (top-right - see "Activity log"), and the enemies in the scene (bottom-right
@@ -429,6 +436,13 @@ either to react with.
 ## Stats & combat
 
 Character-level stats (`character.stats`): `strength`, `aim`, `reflex`,
+`level`, plus a few fields (`dr`, `defense`, `speed`, `weight`,
+`max_inventory`) that are declared but not wired into anything yet.
+`stats.health`/`max_health` are set once at creation and never read
+again - the corner HP readout (see "Screen layout") instead sums raw
+health/maxHealth across the whole body (`engine.getBodyHealthTotals`,
+shared with `getBodyHealthFraction` - see "Body system"), since that's
+what the game's actual health tracking is.
 plus `level`/`health`/`max_health`.
 
 - **Hit chance**: `aim * (1 - target's reflex / 2)`, then a flat
