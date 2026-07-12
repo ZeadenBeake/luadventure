@@ -5247,11 +5247,10 @@ end
 -- client.
 debugConsole.openKeys = { [keys.grave] = true, [96] = true, [126] = true }
 
--- Finds a labeled part on the player's own body by name - every debug
--- command below targets the player only (no enemy-targeting syntax yet;
--- nothing needs it while there's only one enemy type to test against).
-function debugConsole.findPart(label)
-    for _, entry in ipairs(engine.collectLabeledParts(player.body)) do
+-- Finds a labeled part on `body` (defaults to the player's own, same as
+-- every command here did before target selection existed) by name.
+function debugConsole.findPart(label, body)
+    for _, entry in ipairs(engine.collectLabeledParts(body or player.body)) do
         if entry.label == label then
             return entry.part
         end
@@ -5259,29 +5258,80 @@ function debugConsole.findPart(label)
     return nil
 end
 
+-- Which body a "@<target>" token resolves to - `nil` (no token at all)
+-- or the literal "player" means the player's own, same as every command
+-- here always meant before this existed; anything else is read as a
+-- 1-based index into the current fight's `combatState.scene` (the same
+-- order/numbering the Enemies pane's own list already uses), letting a
+-- debug command reach into an enemy mid-fight instead of only ever the
+-- player. Returns (body, nil) on success, (nil, errorMessage) otherwise.
+function debugConsole.resolveTarget(target)
+    if not target or target == "player" then
+        return player.body, nil
+    end
+    local index = tonumber(target)
+    if not index or index ~= math.floor(index) then
+        return nil, "No such target: @" .. target
+    end
+    if not combatState.scene or not combatState.scene[index] then
+        return nil, "No enemy at @" .. target .. " - not in a fight, or fewer than " .. index .. " foe(s) in this one"
+    end
+    return combatState.scene[index].body, nil
+end
+
+-- Pulls a "@<target>" token (see debugConsole.resolveTarget) out of
+-- `args`, wherever it happens to appear - unambiguous, since nothing
+-- else any command here takes ever starts with "@" - and resolves it.
+-- Returns (body, errorMessage, remainingArgs): remainingArgs is every
+-- other token, in its original order, reindexed from 1 so a command can
+-- keep reading args[1]/args[2]/... exactly the way it always did,
+-- whether or not a target token was present at all.
+function debugConsole.extractTarget(args)
+    local remaining = {}
+    local targetToken = nil
+    for _, arg in ipairs(args) do
+        if arg:sub(1, 1) == "@" then
+            targetToken = arg:sub(2)
+        else
+            table.insert(remaining, arg)
+        end
+    end
+    local body, err = debugConsole.resolveTarget(targetToken)
+    return body, err, remaining
+end
+
 -- Every debug command name -> function(args) -> a result string. `args` is
 -- whatever space-separated tokens followed the command name. A bad limb/
 -- item/status name is reported back as a normal result rather than
 -- raising, so a typo doesn't need special-casing to avoid crashing the
 -- console - see debugConsole.runCommand for the one pcall that catches
--- anything that slips through anyway.
+-- anything that slips through anyway. setHealth/addStatus/clearStatus all
+-- take an optional "@<target>" token (see debugConsole.extractTarget),
+-- anywhere among their other arguments, to reach an enemy mid-fight
+-- instead of only ever the player - see the `targets` command for what's
+-- actually reachable right now.
 debugConsole.commands = {
-    -- setHealth <limb> <health> - clamps to [0, maxHealth], same range any
-    -- ordinary damage/heal would land in.
+    -- setHealth <limb> <health> [@<target>] - clamps to [0, maxHealth],
+    -- same range any ordinary damage/heal would land in.
     setHealth = function(args)
-        if not args[1] or not tonumber(args[2]) then
-            return "Usage: setHealth <limb> <health>"
+        local body, err, rest = debugConsole.extractTarget(args)
+        if err then
+            return err
         end
-        local part = debugConsole.findPart(args[1])
+        if not rest[1] or not tonumber(rest[2]) then
+            return "Usage: setHealth <limb> <health> [@<target>]"
+        end
+        local part = debugConsole.findPart(rest[1], body)
         if not part then
-            return "No such limb: " .. args[1]
+            return "No such limb: " .. rest[1]
         end
-        part.health = math.max(0, math.min(part.maxHealth, tonumber(args[2])))
-        return args[1] .. " set to " .. part.health .. "/" .. part.maxHealth
+        part.health = math.max(0, math.min(part.maxHealth, tonumber(rest[2])))
+        return rest[1] .. " set to " .. part.health .. "/" .. part.maxHealth
     end,
 
     -- give <itemId> [count] - straight into the inventory, no bulk check -
-    -- debug commands are meant to bypass normal rules on purpose.
+    -- debug commands are meant to bypass normal rules on purpose. Always
+    -- the player's own inventory - an enemy doesn't have one to give into.
     give = function(args)
         if not args[1] or not itemEntries[args[1]] then
             return "Usage: give <itemId> [count] - unknown item: " .. tostring(args[1])
@@ -5293,46 +5343,69 @@ debugConsole.commands = {
         return "Gave " .. count .. "x " .. itemEntries[args[1]].name
     end,
 
-    -- addStatus <limb> <status> [amount] - only part-scoped statuses
-    -- (bleed, poison, fracture) - character-wide ones (adrenaline) aren't
-    -- reachable this way, since every command here targets a limb.
-    -- `amount` overrides the status's own default duration/stack count,
-    -- same as engine.applyPartStatus always allowed.
+    -- addStatus <limb> <status> [amount] [@<target>] - only part-scoped
+    -- statuses (bleed, poison, fracture) - character-wide ones
+    -- (adrenaline) aren't reachable this way, since every command here
+    -- targets a limb. `amount` overrides the status's own default
+    -- duration/stack count, same as engine.applyPartStatus always
+    -- allowed.
     addStatus = function(args)
-        if not args[1] or not args[2] then
-            return "Usage: addStatus <limb> <status> [amount]"
+        local body, err, rest = debugConsole.extractTarget(args)
+        if err then
+            return err
         end
-        local part = debugConsole.findPart(args[1])
+        if not rest[1] or not rest[2] then
+            return "Usage: addStatus <limb> <status> [amount] [@<target>]"
+        end
+        local part = debugConsole.findPart(rest[1], body)
         if not part then
-            return "No such limb: " .. args[1]
+            return "No such limb: " .. rest[1]
         end
-        local def = statusEntries[args[2]]
+        local def = statusEntries[rest[2]]
         if not def or def.scope ~= "part" then
-            return "No such part status: " .. args[2]
+            return "No such part status: " .. rest[2]
         end
-        engine.applyPartStatus(part, args[2], tonumber(args[3]))
-        return "Applied " .. args[2] .. " to " .. args[1] .. " (" .. part.statuses[args[2]] .. ")"
+        engine.applyPartStatus(part, rest[2], tonumber(rest[3]))
+        return "Applied " .. rest[2] .. " to " .. rest[1] .. " (" .. part.statuses[rest[2]] .. ")"
     end,
 
-    -- clearStatus <limb> <status|all>
+    -- clearStatus <limb> <status|all> [@<target>]
     clearStatus = function(args)
-        if not args[1] or not args[2] then
-            return "Usage: clearStatus <limb> <status|all>"
+        local body, err, rest = debugConsole.extractTarget(args)
+        if err then
+            return err
         end
-        local part = debugConsole.findPart(args[1])
+        if not rest[1] or not rest[2] then
+            return "Usage: clearStatus <limb> <status|all> [@<target>]"
+        end
+        local part = debugConsole.findPart(rest[1], body)
         if not part then
-            return "No such limb: " .. args[1]
+            return "No such limb: " .. rest[1]
         end
-        if args[2] == "all" then
+        if rest[2] == "all" then
             part.statuses = {}
-            return "Cleared all statuses from " .. args[1]
+            return "Cleared all statuses from " .. rest[1]
         end
-        part.statuses[args[2]] = nil
-        return "Cleared " .. args[2] .. " from " .. args[1]
+        part.statuses[rest[2]] = nil
+        return "Cleared " .. rest[2] .. " from " .. rest[1]
+    end,
+
+    -- targets - every valid "@<target>" right now: the player (the
+    -- default, no token needed at all), plus whoever's actually in the
+    -- current fight's scene, numbered the same way the Enemies pane's own
+    -- list is. Empty outside combat (or once one ends - combatState.scene
+    -- is left stale rather than cleared, but nothing else here reads it
+    -- unless a command's own @<target> asks for it).
+    targets = function()
+        local parts = { "player (default)" }
+        for i, foe in ipairs(combatState.scene or {}) do
+            table.insert(parts, "@" .. i .. "=" .. foe.name .. " (" .. foe.body.health .. "/" .. foe.body.maxHealth .. ")")
+        end
+        return table.concat(parts, " | ")
     end,
 
     help = function()
-        return "setHealth <limb> <hp> | give <item> [n] | addStatus <limb> <status> [n] | clearStatus <limb> <status|all> | exit"
+        return "setHealth <limb> <hp> [@t] | give <item> [n] | addStatus <limb> <status> [n] [@t] | clearStatus <limb> <status|all> [@t] | targets | exit"
     end,
 }
 

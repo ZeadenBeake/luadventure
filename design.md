@@ -1091,21 +1091,34 @@ it (the overworld's main loop calls `render()` after, combat's
 or touching the action economy at all.
 
 Commands (`debugConsole.commands`, name -> `function(args)`, `args` the
-line's remaining space-separated tokens) all target the player's own body
-only - no enemy-targeting syntax yet, nothing's needed it with only one
-enemy type to test against:
+line's remaining space-separated tokens) default to the player's own body,
+but `setHealth`/`addStatus`/`clearStatus` all accept an optional
+`@<target>` token - anywhere among their other arguments, since nothing
+else any command here takes ever starts with `@`
+(`debugConsole.extractTarget` pulls it out first and hands every other
+command its remaining args reindexed from 1, same as if the token was
+never there at all) - resolved (`debugConsole.resolveTarget`) to either
+the player (no token, or the literal `@player`) or a 1-based index into
+the current fight's `combatState.scene`, same numbering the Enemies pane's
+own list already uses. Reaches an enemy mid-fight, not just the player:
 
-- **`setHealth <limb> <health>`** - clamps to `[0, maxHealth]`.
-- **`give <itemId> [count]`** - straight into the inventory, no bulk check.
-- **`addStatus <limb> <status> [amount]`** - part-scoped statuses only
-  (`bleed`/`poison`/`fracture` - `adrenaline` is character-wide, not
-  reachable this way since every command here takes a limb); `amount`
-  overrides the status's own default duration/stack count.
-- **`clearStatus <limb> <status|all>`**
+- **`setHealth <limb> <health> [@target]`** - clamps to `[0, maxHealth]`.
+- **`give <itemId> [count]`** - straight into the player's own inventory,
+  no bulk check - an enemy has no inventory to give into, so this one
+  never takes a target at all.
+- **`addStatus <limb> <status> [amount] [@target]`** - part-scoped
+  statuses only (`bleed`/`poison`/`fracture` - `adrenaline` is
+  character-wide, not reachable this way since every command here takes a
+  limb); `amount` overrides the status's own default duration/stack count.
+- **`clearStatus <limb> <status|all> [@target]`**
+- **`targets`** - lists every currently valid `@target`: the player,
+  plus whoever's actually in `combatState.scene` right now (empty outside
+  a fight).
 
-A bad limb/item/status name is reported back as an ordinary result rather
-than raising - `debugConsole.runCommand` also wraps the actual call in
-`pcall`, so a bug in a command itself can't take the whole game down either.
+A bad limb/item/status/target is reported back as an ordinary result
+rather than raising - `debugConsole.runCommand` also wraps the actual call
+in `pcall`, so a bug in a command itself can't take the whole game down
+either.
 
 ## Dialogue templating
 
