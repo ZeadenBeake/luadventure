@@ -341,6 +341,14 @@ function engine.applyPartStatus(part, statusId, amount)
     part.statuses[statusId] = engine.combineDuration(part.statuses[statusId], amount or def.duration, def.stacks)
 end
 
+-- The reverse of engine.applyPartStatus - removes a status outright
+-- regardless of remaining duration, the only way a permanent (-1) one
+-- (fracture, so far) can ever actually end. A no-op if the part doesn't
+-- have it at all.
+function engine.clearPartStatus(part, statusId)
+    part.statuses[statusId] = nil
+end
+
 function engine.applyCharacterStatus(combatant, statusId, amount)
     local def = statusEntries[statusId]
     combatant.statuses[statusId] = engine.combineDuration(combatant.statuses[statusId], amount or def.duration, def.stacks)
@@ -667,6 +675,25 @@ function engine.removeInventoryItems(combatant, itemId, amount)
     return removed
 end
 
+-- Removes exactly one instance of `itemId` from wherever `source` says it
+-- actually came from - a belt slot, an equip slot holding it as a plain
+-- item, or the loose inventory (`source.kind` "belt"/"equip"/anything
+-- else, `source.index`/`source.slot` alongside - the exact shape
+-- engine.getInventoryRows' own rows already have, so one can just be
+-- passed straight through as the other). The generic "you just consumed
+-- a carried item" cleanup both the inventory screen's own "use
+-- immediately" and the Medical screen's own item application share,
+-- rather than duplicating the same three-way branch in both places.
+function engine.consumeCarriedItem(combatant, source, itemId)
+    if source.kind == "belt" then
+        combatant.belt[source.index] = nil
+    elseif source.kind == "equip" then
+        combatant.equipped[source.slot] = "none"
+    else
+        engine.removeInventoryItems(combatant, itemId, 1)
+    end
+end
+
 -- Which item id a weapon's ammo class actually consumes on a reload.
 function engine.getAmmoItemId(weapon)
     if weapon.ammoClass == "kinetic" then
@@ -915,11 +942,6 @@ local character = {
         level = 0,
         health = 100,
         max_health = 100, -- Modified by armor and possibly clothes
-        dr = 0, -- Modified by some armors.
-        defense = 5, -- Modified by armor.
-        speed = 10, -- Modified by armor, usually negatively.
-        weight = 0, -- How many things *currently* being held by the player.
-        max_inventory = 5, -- Maximum things the player can carry, modified by clothes + possibly backpack
         strength = 1, -- Base multiplier for melee damage; a limb's own bonuses stack on top of this.
         aim = 1, -- Chance to hit is aim * (1 - target's reflex / 2); a busted head penalizes this.
         reflex = 1, -- Chance to be missed rides on this; worn-down legs penalize it.
@@ -1513,13 +1535,13 @@ function engine.render()
 end
 
 -- A slim overlay strip - just the top two rows - for jumping straight to a
--- page (Inventory, so far) from ordinary exploration, without first
--- opening its full screen via `i`. Its own window, separate from
+-- page (Inventory, Medical) from ordinary exploration, without first
+-- opening its full screen via `i`/`m`. Its own window, separate from
 -- statsWin/spriteWin, so it can be shown deliberately overwriting the top
 -- of the main UI - because that's exactly what it's doing, loading in on
 -- top of whatever's already there - rather than needing to coexist with it.
 local pageBarWin = window.create(term.current(), 1, 1, screenW, 2)
-local TOP_BAR_PAGES = { "Inventory" }
+local TOP_BAR_PAGES = { "Inventory", "Medical" }
 local topBarPage = 1
 
 function engine.drawTopBar()
@@ -2344,13 +2366,7 @@ function engine.runInventoryScreen()
                     if ability and ability.effect then
                         local result = ability.effect(player)
                         if result ~= "noop" then
-                            if entry.kind == "belt" then
-                                player.belt[entry.index] = nil
-                            elseif entry.kind == "equip" then
-                                player.equipped[entry.slot] = "none"
-                            else
-                                engine.removeInventoryItems(player, entry.itemId, 1)
-                            end
+                            engine.consumeCarriedItem(player, entry, entry.itemId)
                         end
                     end
                 end
@@ -2506,6 +2522,192 @@ function engine.digitLabel(i)
         return "0"
     else
         return string.char(string.byte("a") + i - 11)
+    end
+end
+
+-- "Fractured, Bleeding (2)" - every active status on `part`, its own name
+-- (statusEntries) plus remaining duration unless it's permanent (-1),
+-- comma-joined; "" if nothing's active at all.
+function engine.formatPartStatuses(part)
+    local names = {}
+    for statusId, duration in pairs(part.statuses) do
+        local def = statusEntries[statusId]
+        if duration == -1 then
+            table.insert(names, def.name)
+        else
+            table.insert(names, def.name .. " (" .. duration .. ")")
+        end
+    end
+    return table.concat(names, ", ")
+end
+
+-- "Human Skin, Human Bone, Human Muscle" - every organ installed on
+-- `part`, category slots (part.organs) and generic ones
+-- (part.genericOrgans) alike, by their own display name (organEntries)
+-- rather than raw id - the Medical screen (below) is the only thing that
+-- ever shows this to the player at all.
+function engine.formatPartOrgans(part)
+    local names = {}
+    for _, organId in pairs(part.organs) do
+        table.insert(names, organEntries[organId].name)
+    end
+    for _, organId in ipairs(part.genericOrgans) do
+        table.insert(names, organEntries[organId].name)
+    end
+    return table.concat(names, ", ")
+end
+
+local MEDICAL_LIST_TOP = 3 -- row 1: title, row 2: column headers
+
+-- Left half is the scrollable body-part list (health, plus a `*` flag for
+-- anyone carrying an active status - full detail is the right half's
+-- job, there's no room to spell statuses out per row); right half is
+-- organs/status detail on whichever part is currently selected. Same
+-- two-pane layout engine.drawInventoryScreen already uses, reusing
+-- inventoryWin for the same reason every other full-screen modal here
+-- does - Medical and Inventory are never open at once.
+function engine.drawMedicalScreen(parts, selection, scrollOffset)
+    inventoryWin.setVisible(false)
+    inventoryWin.clear()
+
+    local leftW = math.floor(screenW / 2)
+    local rightX = leftW + 2
+
+    inventoryWin.setCursorPos(1, 1)
+    inventoryWin.write("Medical")
+
+    inventoryWin.setCursorPos(1, 2)
+    inventoryWin.write(("%-12s %s"):format("Part", "Health"))
+
+    local visibleCount = screenH - 1 - MEDICAL_LIST_TOP + 1
+    for i = 1, visibleCount do
+        local entry = parts[scrollOffset + i]
+        if entry then
+            local marker = (scrollOffset + i == selection) and ">" or " "
+            local indent = string.rep(" ", entry.depth * 2)
+            local labelText = (indent .. entry.label):sub(1, 12)
+            local healthText = entry.part.health .. "/" .. entry.part.maxHealth
+            local statusFlag = next(entry.part.statuses) and " *" or ""
+            inventoryWin.setCursorPos(1, MEDICAL_LIST_TOP + i - 1)
+            inventoryWin.write(marker .. ("%-12s %-7s%s"):format(labelText, healthText, statusFlag))
+        end
+    end
+
+    local selected = parts[selection]
+    if selected then
+        inventoryWin.setCursorPos(rightX, 2)
+        inventoryWin.write(selected.label)
+
+        local detail = {}
+        table.insert(detail, "Health: " .. selected.part.health .. "/" .. selected.part.maxHealth)
+        local statusText = engine.formatPartStatuses(selected.part)
+        table.insert(detail, "Status: " .. (statusText ~= "" and statusText or "None"))
+        local organText = engine.formatPartOrgans(selected.part)
+        table.insert(detail, "Organs: " .. (organText ~= "" and organText or "None"))
+
+        local row = 3
+        for _, line in ipairs(detail) do
+            row = row + engine.writeWrapped(inventoryWin, rightX, row, line)
+        end
+    end
+
+    inventoryWin.setCursorPos(1, screenH)
+    inventoryWin.write("[Enter] treat  [M] close")
+
+    inventoryWin.setVisible(true)
+end
+
+-- Blocks until the player closes Medical (M again), fully modal like the
+-- inventory screen. Selecting a part (arrow keys + Enter, or its own
+-- digit straight away - both land on the same engine.collectLabeledParts
+-- index, so either path works identically) opens a second, smaller
+-- picker over whichever items are actually relevant to it right now
+-- (engine.collectMedicalOptions) - picking one applies it immediately
+-- (the same ability effects the inventory screen's own "use immediately"
+-- and combat's Ability menu both already share, just handed this part as
+-- a preset target instead of picking one themselves - see abilityEntries'
+-- own comment) and consumes it the same way engine.consumeCarriedItem
+-- always does. Re-collects the part list after every action, since
+-- healing/curing something changes exactly what's shown.
+function engine.runMedicalScreen()
+    local parts = engine.collectLabeledParts(player.body)
+    local selection = 1
+    local scrollOffset = 0
+    local visibleCount = screenH - 1 - MEDICAL_LIST_TOP + 1
+
+    local function redraw()
+        parts = engine.collectLabeledParts(player.body)
+        selection = math.min(selection, math.max(1, #parts))
+        scrollOffset = engine.clampInventoryScroll(selection, scrollOffset, #parts, visibleCount)
+        engine.drawMedicalScreen(parts, selection, scrollOffset)
+    end
+
+    local function treat(entry)
+        local options = engine.collectMedicalOptions(player, entry.part)
+
+        inventoryWin.setVisible(false)
+        inventoryWin.clear()
+        inventoryWin.setCursorPos(1, 1)
+        inventoryWin.write("Treat the " .. entry.label .. ":")
+        local row = 3
+        if #options == 0 then
+            inventoryWin.setCursorPos(1, row)
+            inventoryWin.write("Nothing to use here.")
+            row = row + 2
+        else
+            for i, option in ipairs(options) do
+                local countTag = option.count > 1 and (" x" .. option.count) or ""
+                row = row + engine.writeWrapped(inventoryWin, 1, row, ("[%s] %s%s"):format(
+                    engine.digitLabel(i), itemEntries[option.itemId].name, countTag
+                ))
+            end
+        end
+        local backIndex = #options + 1
+        engine.writeWrapped(inventoryWin, 1, row, "[" .. engine.digitLabel(backIndex) .. "] Back")
+        inventoryWin.setVisible(true)
+
+        while true do
+            local _, key = os.pullEvent("key")
+            local index = keyToNumber[key]
+            if index == backIndex then
+                return
+            elseif index and options[index] then
+                local option = options[index]
+                local result = option.ability.effect(player, nil, nil, nil, entry.part, entry.label)
+                if result ~= "noop" then
+                    engine.consumeCarriedItem(player, option.source, option.itemId)
+                end
+                return
+            end
+        end
+    end
+
+    redraw()
+
+    while true do
+        local _, key = os.pullEvent("key")
+
+        if key == keys.m then
+            return
+        elseif key == keys.up then
+            selection = math.max(1, selection - 1)
+            redraw()
+        elseif key == keys.down then
+            selection = math.min(#parts, selection + 1)
+            redraw()
+        elseif key == ACTIVATE_KEY then
+            local entry = parts[selection]
+            if entry then
+                treat(entry)
+            end
+            redraw()
+        else
+            local index = keyToNumber[key]
+            if index and parts[index] then
+                treat(parts[index])
+                redraw()
+            end
+        end
     end
 end
 
@@ -3232,6 +3434,7 @@ Luadventure.removeInventoryItems = engine.removeInventoryItems
 Luadventure.damagePart = engine.damagePart
 Luadventure.healPart = engine.healPart
 Luadventure.applyPartStatus = engine.applyPartStatus
+Luadventure.clearPartStatus = engine.clearPartStatus
 Luadventure.applyCharacterStatus = engine.applyCharacterStatus
 Luadventure.isDead = engine.isDead
 Luadventure.isLimbFunctional = engine.isLimbFunctional
@@ -3356,6 +3559,69 @@ function engine.collectAbilities(combatant)
     end
 
     return abilities
+end
+
+-- Which carried items are actually relevant to treat `part` right now -
+-- an item counts if its own granted ability's `treats` field (see
+-- abilityEntries' own comment) is "health" and the part isn't already at
+-- full, or matches one of the part's own currently active statuses
+-- (regardless of remaining duration - even a permanent one, like
+-- fracture, still counts). Unlike engine.collectAbilities (combat's own
+-- "Ability" menu - belt/equip only, skips anything on cooldown), this
+-- also reaches into loose inventory: the Medical screen isn't gated by
+-- turn economy at all, so there's no reason to require pre-belting
+-- first. Duplicate copies of the same item (three salves in the bag, say)
+-- collapse into one entry with a `count`, same convention
+-- engine.getInventoryRows already uses for its own inventory rows - only
+-- the first source found is what actually gets consumed (see
+-- engine.consumeCarriedItem), which is fine, since it doesn't matter
+-- which physical copy that is.
+function engine.collectMedicalOptions(combatant, part)
+    local options = {}
+    local seen = {}
+
+    local function isRelevant(ability)
+        if not ability or not ability.treats then
+            return false
+        end
+        if ability.treats == "health" then
+            return part.health < part.maxHealth
+        end
+        return part.statuses[ability.treats] ~= nil
+    end
+
+    local function tryAdd(itemId, source)
+        if seen[itemId] then
+            seen[itemId].count = seen[itemId].count + 1
+            return
+        end
+        for _, abilityId in ipairs(itemEntries[itemId].abilities or {}) do
+            local ability = abilityEntries[abilityId]
+            if isRelevant(ability) then
+                local option = { itemId = itemId, abilityId = abilityId, ability = ability, source = source, count = 1 }
+                seen[itemId] = option
+                table.insert(options, option)
+                break
+            end
+        end
+    end
+
+    for i = 1, combatant.beltSize do
+        local itemId = combatant.belt[i]
+        if itemId then
+            tryAdd(itemId, { kind = "belt", index = i })
+        end
+    end
+    for slot, occupant in pairs(combatant.equipped) do
+        if occupant and occupant ~= "none" and itemEntries[occupant] then
+            tryAdd(occupant, { kind = "equip", slot = slot })
+        end
+    end
+    for _, itemId in ipairs(combatant.inventory) do
+        tryAdd(itemId, { kind = "inventory" })
+    end
+
+    return options
 end
 
 -- Returns nil if the combatant has nothing usable, same convention as
@@ -5799,7 +6065,11 @@ while true do
         elseif key == ACTIVATE_KEY then
             topBarOpen = false
             pageBarWin.setVisible(false)
-            engine.runInventoryScreen() -- the only page so far
+            if topBarPage == 1 then
+                engine.runInventoryScreen()
+            else
+                engine.runMedicalScreen()
+            end
             engine.render()
         end
     elseif key == keys.tab then
@@ -5808,6 +6078,9 @@ while true do
         engine.drawTopBar()
     elseif key == keys.i then
         engine.runInventoryScreen()
+        engine.render()
+    elseif key == keys.m then
+        engine.runMedicalScreen()
         engine.render()
     elseif key == keys.space then
         local playerDied, quitRequested = engine.tryInteract()

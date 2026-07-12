@@ -53,8 +53,9 @@ doesn't fit `engine`), check whether one of these already covers it.
 Four corners while exploring: stats (top-left), a portrait placeholder
 (top-right, nothing draws here yet), the walkable map (bottom-left, half the
 width it used to be), and the activity log (bottom-right - see "Activity
-log"). The inventory and any blurb/dialogue interaction take over the whole
-screen as their own modal window instead of sharing the four corners.
+log"). The inventory, Medical (see "Medical"), and any blurb/dialogue
+interaction take over the whole screen as their own modal window instead
+of sharing the four corners.
 
 Combat gets its *own* four-corner layout rather than a single full-screen
 window - map (top-left), the action menu (bottom-left), a combat-scoped log
@@ -69,9 +70,12 @@ full-screen window the inventory and dialogue use.
 
 Controls: arrow keys move, `Space` interacts with whatever's cardinally
 adjacent (see "Environment objects & symbols"), `i` opens the inventory,
-`q` quits immediately. Menus almost everywhere use digit keys `1`-`9`/`0`
-then `a`-`z` for lists longer than ten items (see "Digit/letter menus"
-below).
+`m` opens Medical (see "Medical"), `q` quits immediately. `Tab` opens a
+slim top-bar strip that jumps straight to either one (`Left`/`Right` to
+choose, `Enter` to open) without needing its own dedicated key - both
+exist mainly for that shortcut's own sake. Menus almost everywhere use
+digit keys `1`-`9`/`0` then `a`-`z` for lists longer than ten items (see
+"Digit/letter menus" below).
 
 ### Activity log
 
@@ -96,17 +100,18 @@ scrollback picks up exactly where it left off rather than starting
 blank.
 
 `logActivity` is for things that happen **outside combat**: picking
-something up, a door opening or closing, using an item outside a fight (the
-salve, so far - see "Inventory & equipment"), changing region, and the
-moment a fight actually starts, wins, or is fled from (not what happens
-*during* one - that's `logCombat`, in its own pane, visible for the whole
-fight rather than only once it's over). `logCombat` is for everything
-routine that happens mid-fight - a swing landing or missing, a status tick,
-an enemy closing in - so only the small handful of moments that actually
-warrant the player's full attention (`showCombatMessage` - victory, death)
-still interrupt. `joinEnemyNames` turns `scene` into "the test dummy" for
-one foe, an Oxford-comma list for more - a real group, not just a
-one-at-a-time convention (see "Victory" and "Sight-triggered combat").
+something up, a door opening or closing, using an item outside a fight
+(the salve, the splint - see "Inventory & equipment"/"Medical"), changing
+region, and the moment a fight actually starts, wins, or is fled from
+(not what happens *during* one - that's `logCombat`, in its own pane,
+visible for the whole fight rather than only once it's over). `logCombat`
+is for everything routine that happens mid-fight - a swing landing or
+missing, a status tick, an enemy closing in - so only the small handful
+of moments that actually warrant the player's full attention
+(`showCombatMessage` - victory, death) still interrupt. `joinEnemyNames`
+turns `scene` into "the test dummy" for one foe, an Oxford-comma list for
+more - a real group, not just a one-at-a-time convention (see "Victory"
+and "Sight-triggered combat").
 
 **Pacing**: `logCombat` pauses for `combatState.logDelay` (0.5s, the one
 knob for all of this) after drawing each line, so a turn's events reveal
@@ -423,9 +428,7 @@ either to react with.
 ## Stats & combat
 
 Character-level stats (`character.stats`): `strength`, `aim`, `reflex`,
-plus `level`/`health`/`max_health` and a few fields (`dr`, `defense`,
-`speed`, `weight`, `max_inventory`) that are declared but not wired into
-anything yet.
+plus `level`/`health`/`max_health`.
 
 - **Hit chance**: `aim * (1 - target's reflex / 2)`, then a flat
   per-tile-of-distance penalty from the weapon's `spread` stat
@@ -487,19 +490,27 @@ real zone of its own (`tail`), same as any other limb.
 
 Applied to a single part (`applyPartStatus`, an injury) or the whole
 character (`applyCharacterStatus`, a condition). `duration` ticks down by
-one every full round (`decrementStatuses`); `-1` is permanent. Applying the
-same status again combines with whatever's already active
-(`combineDuration`): a stacking status (`stacks = true`, like bleed) adds
-the two durations together, a non-stacking one just takes the higher.
-`damagePerStack` deals a hit of that damage type equal to the current
-duration, once per round, right before it decrements - that's the entirety
-of how bleed works, there's no separate damage-over-time system.
+one every full round (`decrementStatuses`); `-1` is permanent, needing
+explicit removal instead (`clearPartStatus` - a plain, no-questions-asked
+delete regardless of remaining duration; the Medical screen's own Splint
+is the first thing that actually calls it, curing a fracture - see
+"Medical"). Applying the same status again combines with whatever's
+already active (`combineDuration`): a stacking status (`stacks = true`,
+like bleed) adds the two durations together, a non-stacking one just
+takes the higher. `damagePerStack` deals a hit of that damage type equal
+to the current duration, once per round, right before it decrements -
+that's the entirety of how bleed works, there's no separate
+damage-over-time system. `name` is display-only, for the Medical screen's
+own status listing - nothing else ever shows one by anything but its raw
+id.
 
-Currently defined: `fracture` (permanent, halves limb strength),
-`adrenaline` (character-wide, ignores condition penalties for its
-duration), `bleed` (stacking, untyped damage-per-stack), `poison` (stacking,
-toxic damage-per-stack - mechanically identical to bleed, just its own
-damage type and its own tick message, via `DOT_VERBS`).
+Currently defined: `fracture` (permanent, halves limb strength - nothing
+inflicts one yet outside the debug console, so the Splint curing it is
+presently only exercised that way too), `adrenaline` (character-wide,
+ignores condition penalties for its duration), `bleed` (stacking, untyped
+damage-per-stack), `poison` (stacking, toxic damage-per-stack -
+mechanically identical to bleed, just its own damage type and its own
+tick message, via `DOT_VERBS`).
 
 ### Abilities & action economy
 
@@ -523,15 +534,18 @@ landed). Nothing needs to signal a kill; see "Victory" below.
 Currently defined: **Adrenal Auto-Injector** (instant, pops adrenaline),
 **Rev it up!** (chain sword only, full action, one hit roll covering five
 5-10 damage sub-hits, refunds its cooldown on that single roll missing),
-**Use Dermoregenesis Salve** (quick, heals 25 to a chosen part, consumed
-from the belt), **Charge Shot** (laser pistol only, always a full action
-even one-handed, no cooldown, double damage for 3 ammo instead of 1),
-**Spray** (rifle only, full action, cooldown 3, three separate shots at
-one target - each its own hit roll at a flat accuracy penalty, unlike Rev
-it up!'s single roll covering every sub-hit - burning 3 ammo regardless of
-how many land; always resolves at full cooldown once it starts firing,
-since there's no single roll to gate a refund on the way Charge Shot and
-Rev it up! each have).
+**Use Dermoregenesis Salve** (quick, `treats = "health"`, heals 25 to a
+chosen part, consumed from the belt), **Use Splint** (quick, `treats =
+"fracture"`, cures a fracture outright rather than dealing with health at
+all - see "Status effects"), **Charge Shot** (laser pistol only, always a
+full action even one-handed, no cooldown, double damage for 3 ammo
+instead of 1), **Spray** (rifle only, full action, cooldown 3, three
+separate shots at one target - each its own hit roll at a flat accuracy
+penalty, unlike Rev it up!'s single roll covering every sub-hit - burning
+3 ammo regardless of how many land; always resolves at full cooldown once
+it starts firing, since there's no single roll to gate a refund on the
+way Charge Shot and Rev it up! each have). `treats` is only ever set on
+these two self-targeting ones - see "Medical" for what actually reads it.
 
 ### Victory
 
@@ -922,7 +936,7 @@ Two keys do the work, split by what they mean rather than what they touch:
 - **`Enter`** - use immediately. Reload for an ammo row (bypassing the
   in-combat reload action entirely - nothing special happens on reload, so
   there's no reason to make the player go through combat for it); whatever
-  ability a belt/inventory entry grants otherwise (the salve, so far -
+  ability a belt/inventory entry grants otherwise (the salve, the splint -
   `ability.effect` is called directly, works outside combat since nothing
   it does is combat-specific, and a cancelled limb-pick correctly doesn't
   consume it, same `"noop"` convention combat abilities already use). An
@@ -1020,6 +1034,60 @@ itself leaves out a two-handed weapon's secondary hand entirely when
 properly gripped (its canonical hand's row already represents the whole
 thing) - gripped improperly, in just the one hand, there's no secondary
 to leave out in the first place.
+
+## Medical
+
+A second full-screen page (`engine.runMedicalScreen`, `m` to open/close,
+reachable from the top bar too - see "Screen layout") alongside Inventory,
+reusing the same `inventoryWin` the same way every full-screen modal here
+does, since the two are never open at once. Same two-pane layout as
+Inventory: left half is every labeled body part (`engine.collectLabeledParts`,
+same depth-indented list `pickLimb`/`viewLimbs` already use), health and a
+`*` flag for anyone currently carrying an active status; right half is
+full detail on whichever part is selected - health, every active status
+by name and remaining duration (`engine.formatPartStatuses`, blank for a
+permanent one - "Fractured" rather than "Fractured (-1)"), and every organ
+installed (`engine.formatPartOrgans`, category slots and generic organs
+alike, by name rather than raw id - organEntries/statusEntries both grew
+a `name` field purely so this screen has something readable to show,
+since nothing else in the game ever displayed either by anything but its
+own id before this existed).
+
+Selecting a part (arrow keys + Enter, or its own digit straight away - both
+land on the same list index, so either works identically) opens a second,
+smaller picker: whichever carried items are actually relevant to *that*
+part right now (`engine.collectMedicalOptions`) - relevance test:
+
+- `treats == "health"` (see below) and the part isn't already at full, or
+- `treats` names a status the part currently has active (permanent ones
+  included).
+
+Duplicate copies of the same item collapse into one entry with a count
+(`Dermoregenesis Salve x2`), same convention `engine.getInventoryRows`
+already uses for its own inventory rows. Unlike combat's own Ability menu
+(`engine.collectAbilities` - belt/equip only, skips anything on cooldown),
+this also reaches into loose inventory - Medical isn't gated by turn
+economy at all, so there's no reason to require pre-belting an item
+first. Picking one applies it immediately and consumes it
+(`engine.consumeCarriedItem`, shared with the inventory screen's own "use
+immediately" - see "Inventory & equipment"), reporting the outcome to the
+activity log exactly the way using an item outside combat always has,
+since Medical is overworld-only (never reachable mid-fight, same as
+Inventory).
+
+`treats` (on the *ability* entry, not the item - an organ or weapon could
+in principle grant the same ability someday) is what an ability actually
+addresses: `"health"` for the Dermoregenesis Salve, or a statusId for
+anything that cures one - the Splint (`use_splint`) is the first, curing
+a fracture outright, the one thing its own permanent (-1) duration
+otherwise has no way to end (see "Status effects"). Both effects accept
+an optional `presetTarget`/`presetLabel` pair (on top of the usual
+`user, enemy, sourcePart, sourceSlot` every ability effect already takes)
+- when Medical calls one, it passes the part it already picked instead of
+letting the effect call `Luadventure.pickLimb` itself the way it does for
+every other caller (combat's Ability menu, the inventory screen's own
+"use immediately") - the same function serves both flows, it just skips
+its own picker when the part's already chosen for it.
 
 ## Quests
 
@@ -1312,8 +1380,6 @@ NPC-to-NPC conversation system.
 ## Known gaps / likely next steps
 
 - Portrait pane is still a placeholder - nothing draws there.
-- `dr`/`defense`/`speed`/`weight`/`max_inventory` stats are declared but
-  unused.
 - No leveling system - `stats.level` exists and displays, nothing changes
   it.
 - Only three enemy types (test dummy, raider, bandit) and one quest

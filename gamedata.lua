@@ -73,14 +73,19 @@
 -- Organs can't be damaged directly; they add abilities/modifiers to the part
 -- they're installed in (or, for global grants, to the whole character), and
 -- can require/forbid tags the same way slots can.
+-- `name` is display-only (the "Medical" screen's own organ listing - see
+-- engine.runMedicalScreen - is the only thing that ever shows it; nothing
+-- else references an organ by anything but its raw id) - every entry gets
+-- one purely so that screen doesn't have to fall back to a raw snake_case
+-- id for something the player's actually looking at.
 local organEntries = {
     -- Baseline human organs. No grants, no requires, no conflicts - every
     -- other organ in the game is defined relative to these doing nothing.
-    human_skin = { category = "skin", grantsLocal = { "SKIN" } },
-    human_bone = { category = "bone" },
-    human_muscle = { category = "muscle" },
-    human_vitals = { category = "vitals" },
-    human_auxiliary = { category = "auxiliary" },
+    human_skin = { name = "Human Skin", category = "skin", grantsLocal = { "SKIN" } },
+    human_bone = { name = "Human Bone", category = "bone" },
+    human_muscle = { name = "Human Muscle", category = "muscle" },
+    human_vitals = { name = "Human Vitals", category = "vitals" },
+    human_auxiliary = { name = "Human Auxiliary", category = "auxiliary" },
 
     -- Insectoid's skin/bone: chitin instead of the human baseline. The
     -- exoskeleton is what actually supports a tail or wings at all, hence
@@ -90,41 +95,44 @@ local organEntries = {
     -- isn't modeled as an organ modifier - there's no live system that
     -- consumes a per-part reflex modifier yet, so it's just a flat
     -- character-stat adjustment applied once at creation instead.
-    chitin_skin = { category = "skin", grantsLocal = { "SKIN" } },
-    chitin_bone = { category = "bone", grantsLocal = { "CHITIN" }, grantsGlobal = { "TAILED", "WINGED" } },
+    chitin_skin = { name = "Chitin Skin", category = "skin", grantsLocal = { "SKIN" } },
+    chitin_bone = { name = "Chitin Bone", category = "bone", grantsLocal = { "CHITIN" }, grantsGlobal = { "TAILED", "WINGED" } },
 
     -- Compound eyes, mandibles, the general look - a generic organ (not a
     -- swappable category slot) since it's about the head's fundamental
     -- shape rather than something you could organ-swap away.
-    insectoid_features = { grantsGlobal = { "UNSIGHTLY" } },
+    insectoid_features = { name = "Insectoid Features", grantsGlobal = { "UNSIGHTLY" } },
 
     subdermal_plating = { -- generic organ, not tied to a hardcoded category
+        name = "Subdermal Plating",
         requires = { "SKIN" },
         conflicts = { "SUBDERMAL", "CHITIN" },
         grantsLocal = { "SUBDERMAL" },
-        modifiers = { defense = 2 }, -- data only for now, nothing consumes this yet
     },
 
     -- Test organ for the strength system: a muscle-slot swap that boosts
     -- STRENGTH for whatever's attached below it (a hand punching with a
     -- reinforced arm behind it hits harder).
-    reinforced_muscle = { category = "muscle", modifiers = { strength = 1.5 } },
+    reinforced_muscle = { name = "Reinforced Muscle", category = "muscle", modifiers = { strength = 1.5 } },
 
     spinal_graft = { -- meant for the torso itself; unlocks the extra-arm slots
+        name = "Spinal Graft",
         grantsLocal = { "MULTI_LIMBED" },
     },
 
     cybernetic_eye = { -- grants a tag body-wide, not just to its own limb
+        name = "Cybernetic Eye",
         grantsGlobal = { "OCULAR_IMPLANT" },
     },
     neural_targeting_suite = { -- needs an eye installed *somewhere* on the body
+        name = "Neural Targeting Suite",
         requires = { "OCULAR_IMPLANT" },
         abilities = { "called_shot" }, -- data only for now, nothing consumes this yet
     },
 
     -- Generic chest implant granting the adrenaline_shot ability (see
     -- abilityEntries below).
-    adrenal_auto_injector = { abilities = { "adrenaline_shot" } },
+    adrenal_auto_injector = { name = "Adrenal Auto-Injector", abilities = { "adrenaline_shot" } },
 }
 
 -- Library of every swappable bodypart template in the game. The torso itself
@@ -294,20 +302,25 @@ end
 -- Status effects can be applied to a single part (an injury like a fracture)
 -- or to the whole character (a body-wide condition like adrenaline).
 --
--- duration counts down by one every full round; -1 means permanent (needs
--- explicit removal instead, which nothing does yet). `stacks` controls what
--- happens when the same status gets applied again on top of an existing
--- one: true duration (stacks unset/false) takes the higher of the two,
--- while a stacking status (like bleed) adds them together instead.
+-- duration counts down by one every full round; -1 means permanent, needing
+-- explicit removal instead (see engine.clearPartStatus - the "Medical"
+-- screen's own splint is the first thing that actually does this, curing
+-- a fracture). `stacks` controls what happens when the same status gets
+-- applied again on top of an existing one: true duration (stacks
+-- unset/false) takes the higher of the two, while a stacking status (like
+-- bleed) adds them together instead.
 --
 -- damagePerStack names a damage type dealt equal to the current duration,
 -- once per round, right before it decrements - that's how bleed works: each
 -- "stack" is really just a turn of duration that hurts on its way out.
+--
+-- `name` is display-only, for the Medical screen's own status listing -
+-- nothing else ever shows a status by anything but its raw id.
 local statusEntries = {
-    fracture = { scope = "part", modifiers = { strength = 0.5 }, duration = -1 },
-    adrenaline = { scope = "character", ignoresCondition = true, duration = 1 },
-    bleed = { scope = "part", duration = 1, stacks = true, damagePerStack = "untyped" },
-    poison = { scope = "part", duration = 1, stacks = true, damagePerStack = "toxic" },
+    fracture = { name = "Fractured", scope = "part", modifiers = { strength = 0.5 }, duration = -1 },
+    adrenaline = { name = "Adrenaline", scope = "character", ignoresCondition = true, duration = 1 },
+    bleed = { name = "Bleeding", scope = "part", duration = 1, stacks = true, damagePerStack = "untyped" },
+    poison = { name = "Poisoned", scope = "part", duration = 1, stacks = true, damagePerStack = "toxic" },
 }
 
 -- Verb for reporting a damagePerStack tick - keyed by statusId since
@@ -439,6 +452,16 @@ local itemEntries = {
         abilities = { "use_dermoregenesis_salve" },
     },
 
+    -- Cures a fracture outright - the one thing a fracture's own permanent
+    -- (-1) duration otherwise has no way to end (see statusEntries' own
+    -- comment). Doesn't touch health at all, so a badly hurt *and*
+    -- fractured limb needs both this and the salve.
+    splint = {
+        name = "Splint",
+        bulk = 1,
+        abilities = { "use_splint" },
+    },
+
     -- A belt item, same as the salve above - never equipped, just thrown
     -- straight from the belt via Throw Grenade. `range` is how far it can
     -- be lobbed (see engine.pickThrowTarget), `radius` how far its blast
@@ -541,13 +564,31 @@ local itemEntries = {
 -- turn), "quick" (half a turn), or "instant" (doesn't cost anything).
 -- `cooldown` is turns before it can be used again, tracked per-combatant -
 -- item-granted abilities ignore this and get consumed instead. `effect` is
--- given (user, opponent, sourcePart, sourceSlot) and can return "noop"
--- (didn't actually do anything, e.g. out of range - don't spend the turn)
--- or "miss" (attack rolled, but didn't land - spend the turn, but refund
--- the cooldown); anything else resolves normally at whatever speed this
--- ability is. Killing the opponent needs no special signal - the engine
--- checks the scene for survivors at the start of every turn regardless of
--- what killed them.
+-- given (user, opponent, sourcePart, sourceSlot, presetTarget, presetLabel)
+-- and can return "noop" (didn't actually do anything, e.g. out of range -
+-- don't spend the turn) or "miss" (attack rolled, but didn't land - spend
+-- the turn, but refund the cooldown); anything else resolves normally at
+-- whatever speed this ability is. Killing the opponent needs no special
+-- signal - the engine checks the scene for survivors at the start of every
+-- turn regardless of what killed them.
+--
+-- `presetTarget`/`presetLabel` are only ever set by the Medical screen
+-- (engine.runMedicalScreen) - a self-targeting ability that would
+-- otherwise call Luadventure.pickLimb itself (use_dermoregenesis_salve,
+-- use_splint) uses these instead when they're given, since Medical
+-- already picked the part before the item was ever chosen; every other
+-- caller (combat's own Ability menu, the inventory screen's "use
+-- immediately") just never passes them, so those two effects fall back to
+-- picking a limb themselves exactly as they always did.
+--
+-- `treats` is what the Medical screen actually filters on to decide
+-- whether an item's worth showing for a given part at all - `"health"` if
+-- the part isn't at full, or a statusId if the part currently has that
+-- status active (regardless of remaining duration - even a permanent one,
+-- like fracture, still counts). Only ever set on the handful of abilities
+-- Medical is meant to expose; an attack ability (Rev it up!, Charge Shot,
+-- ...) has nothing to do with treating your own body, so it's just left
+-- unset there.
 local abilityEntries = {
     adrenaline_shot = {
         name = "Adrenal Auto-Injector",
@@ -562,6 +603,12 @@ local abilityEntries = {
     use_dermoregenesis_salve = {
         name = "Use Dermoregenesis Salve",
         speed = "quick", -- most item interactions are
+        treats = "health",
+    },
+    use_splint = {
+        name = "Use Splint",
+        speed = "quick",
+        treats = "fracture",
     },
     charge_shot = {
         name = "Charge Shot",
@@ -647,9 +694,14 @@ end
 -- `enemy` is only ever real when this is called mid-fight (the inventory
 -- screen's own "use immediately" doesn't have one at all) - used here
 -- purely to decide how to report the result, not for anything about the
--- heal itself.
-abilityEntries.use_dermoregenesis_salve.effect = function(user, enemy)
-    local target, label = Luadventure.pickLimb("Target your own:", user.body)
+-- heal itself. `presetTarget`/`presetLabel` (see abilityEntries' own
+-- comment) skip the picker entirely when the Medical screen already
+-- chose the part.
+abilityEntries.use_dermoregenesis_salve.effect = function(user, enemy, sourcePart, sourceSlot, presetTarget, presetLabel)
+    local target, label = presetTarget, presetLabel
+    if not target then
+        target, label = Luadventure.pickLimb("Target your own:", user.body)
+    end
     if not target then
         return "noop"
     end
@@ -663,6 +715,30 @@ abilityEntries.use_dermoregenesis_salve.effect = function(user, enemy)
         Luadventure.logActivity(Luadventure.dialogue("{{name}} used the Dermoregenesis Salve on {{him}}self.", user))
         Luadventure.logActivity(Luadventure.dialogue("{{name}} healed for " .. healed .. ".", user))
     end
+end
+
+-- Cures a fracture outright - nothing else ever clears one (its own
+-- duration is permanent - see statusEntries.fracture). Doesn't touch
+-- health, an enemy, or combat at all; the splint isn't an attack or even
+-- really a combat item, just a treatment, so this only ever runs through
+-- the Medical screen in practice (a preset target is all it ever gets -
+-- see abilityEntries' own comment) even though nothing stops it from
+-- being used through the ordinary inventory "use immediately" path too,
+-- same as the salve can be.
+abilityEntries.use_splint.effect = function(user, enemy, sourcePart, sourceSlot, presetTarget, presetLabel)
+    local target, label = presetTarget, presetLabel
+    if not target then
+        target, label = Luadventure.pickLimb("Splint your own:", user.body)
+    end
+    if not target then
+        return "noop"
+    end
+    if not target.statuses.fracture then
+        Luadventure.logActivity(Luadventure.dialogue("{{name}}'s " .. label .. " isn't fractured.", user))
+        return "noop"
+    end
+    Luadventure.clearPartStatus(target, "fracture")
+    Luadventure.logActivity(Luadventure.dialogue("{{name}} splinted the " .. label .. ".", user))
 end
 
 -- A single heavy shot: double a normal shot's damage, three shots of ammo,
