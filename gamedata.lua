@@ -1169,27 +1169,30 @@ local world = {
             { kind = "door", x = 30, y = 23, orientation = "vertical", open = false },
             { kind = "save_point", x = 33, y = 23, saveId = "village_terminal" },
 
-            -- Off in an open corner, well clear of everything else here
-            -- and (more importantly) clear of the grasslands dummy's own
-            -- sight radius entirely - a raider in the same room would
-            -- have made itself unreachable, since engine.checkAwareness
-            -- always picks whichever aware enemy comes first in
-            -- loc.objects, and the dummy would always win that race
-            -- while both stayed in range of each other. Unlike the
-            -- dummy, a raider is written to actually give up once it's
-            -- lost (see engine.checkSurrender/the raider's own
+            -- Unlike the grasslands dummy (a pure sparring target with
+            -- nothing at stake), a raider is written to actually give up
+            -- once it's lost (see engine.checkSurrender/the raider's own
             -- decide()): badly hurt, or stripped of anything better than
             -- bare fists, it surrenders instead of fighting to the
             -- death, and offers the player a real choice - spare it, or
             -- finish it off for its gear.
             { kind = "enemy", x = 35, y = 5, enemyType = "raider" },
 
-            -- Off in the opposite corner from the raider - far enough
-            -- (more than double SIGHT_DISTANCE away) that the two enemies'
-            -- own awareness radii can never both cover the same player
-            -- position at once, same aggro-overlap concern the raider's
-            -- own placement comment above already explains.
-            { kind = "enemy", x = 2, y = 2, enemyType = "bandit" },
+            -- Deliberately within SIGHT_DISTANCE (15) of the raider above
+            -- rather than clear of it - two enemies aware of the player
+            -- at once now join as a single fight (engine.checkAwareness/
+            -- engine.findAwareEnemies), and one merely aware of *another*
+            -- aware enemy joins too, one hop at a time
+            -- (engine.propagateAwareness) - a friend noticing a friend's
+            -- fight starting, even from beyond the player's own sight
+            -- distance. Placed 13 tiles west of the raider specifically
+            -- to exercise that: approaching from the open west side of
+            -- the village, the player enters the bandit's own 15-tile
+            -- radius well before ever entering the raider's - at which
+            -- point the raider joins anyway, purely because it's within
+            -- 15 of the now-aware bandit, not because the player is
+            -- anywhere near it yet.
+            { kind = "enemy", x = 22, y = 5, enemyType = "bandit" },
         },
     },
 

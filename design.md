@@ -97,8 +97,8 @@ routine that happens mid-fight - a swing landing or missing, a status tick,
 an enemy closing in - so only the small handful of moments that actually
 warrant the player's full attention (`showCombatMessage` - victory, death)
 still interrupt. `joinEnemyNames` turns `scene` into "the test dummy" for
-one foe, an Oxford-comma list for more - nothing spawns more than one yet,
-but `scene` is already a list (see "Victory").
+one foe, an Oxford-comma list for more - a real group, not just a
+one-at-a-time convention (see "Victory" and "Sight-triggered combat").
 
 **Pacing**: `logCombat` pauses for `combatState.logDelay` (0.5s, the one
 knob for all of this) after drawing each line, so a turn's events reveal
@@ -259,31 +259,60 @@ them away wouldn't make sense.
 
 A fight starts the instant a hostile becomes *aware* of the player - no
 bump required - using the same rule the zone/visibility system above
-already tracks: `checkAwareness` (called after every player action that
-could reveal something or close distance - a step, a door toggling either
-way, combat's own move action) scans for any `enemy` object whose own zone
-is in `loc.visibleZones` and within `SIGHT_DISTANCE` (15 tiles, a flat cap
-independent of however far a zone/glass chain might otherwise let you see -
-checked against real weapon ranges so a big sealed room can't start a fight
-with something too far away to reasonably close distance on) of the
-player, and calls `runEncounter` on the first one it finds. The direct-bump
-path (`interactWithObject`'s `enemy` branch) still exists underneath this
-as a fallback, but in practice sight triggers a fight well before the
-player ever gets close enough to bump it.
+already tracks: `findAwareEnemies` (called from `checkAwareness`, itself
+called after every player action that could reveal something or close
+distance - a step, a door toggling either way, combat's own move action)
+collects *every* `enemy` object whose own zone is in `loc.visibleZones`
+and within `SIGHT_DISTANCE` (15 tiles, a flat cap independent of however
+far a zone/glass chain might otherwise let you see - checked against real
+weapon ranges so a big sealed room can't start a fight with something too
+far away to reasonably close distance on) of the player - not just the
+first one found, so two enemies aware of the player at the same time join
+as a single fight rather than only ever whichever one the game happens to
+notice first.
+
+That direct set is then expanded by `propagateAwareness`: anyone else
+within `SIGHT_DISTANCE` of an *already-aware* enemy joins too, repeating
+until a full pass adds nothing new - a distant enemy that couldn't itself
+see or reach the player yet still joins once whoever's between them
+noticed first, one hop at a time (a friend noticing a friend's fight
+starting). This is breadth-first over however many enemies a location
+actually has, not over tiles or distance, so it stays cheap regardless of
+room size - trivial at the handful of enemies any real room has today,
+and still just `O(n^2)` worst case for a much larger `n`. The direct-bump
+path (`interactWithObject`'s `enemy` branch) runs the exact same
+propagation, seeded with just the bumped object (which always joins,
+bypassing the usual sight/zone check outright, since walking onto its
+tile makes awareness a foregone conclusion) - a group can start a fight
+either by being seen or by having one of their own bumped into.
 
 Fights happen on the real map now, not a separate arena - `runEncounter`
-pulls the triggering object off `loc.objects` for the fight's duration (so
-it doesn't also sit there as a stale marker while the same enemy is
-walking around the battlefield as a live combatant), puts it back
-(wherever it actually ended up) if the player flees, and leaves it gone
-for good on a win. This is safe against a save happening mid-fight - the
-overworld's own main loop that reaches the save prompt is fully suspended
-for the whole encounter's duration, and combat's own Interact action (see
-"Combat menu & movement") deliberately keeps a save point out of reach
-too (`COMBAT_BLOCKED_INTERACT_KINDS`) even though it reaches the same
-`interactWithObject` dispatch a save point would otherwise go through -
-without that, a save point standing right next to a fight would have
-reopened exactly the case this was meant to rule out.
+takes a list of triggering objects (not just one) and spawns one live
+combatant per object into `scene`, tagging each with `enemy.spawnObject`
+to keep the two linked. Every triggering object is pulled off `loc.objects`
+for the fight's duration (so none of them also sit there as a stale marker
+while their own live combatant is walking around the battlefield), and put
+back (wherever it actually ended up) for anyone who survives if the player
+flees; gone for good on a win. This is safe against a save happening
+mid-fight - the overworld's own main loop that reaches the save prompt is
+fully suspended for the whole encounter's duration, and combat's own
+Interact action (see "Combat menu & movement") deliberately keeps a save
+point out of reach too (`COMBAT_BLOCKED_INTERACT_KINDS`) even though it
+reaches the same `interactWithObject` dispatch a save point would
+otherwise go through - without that, a save point standing right next to a
+fight would have reopened exactly the case this was meant to rule out.
+
+Every living member of `scene` gets its own `decide()`-driven turn each
+round (Tab already cycles Fight/Look/an ability's targeting across all of
+them - see "Combat menu & movement"), not just a single hardcoded enemy -
+a dead one just sits out the rest of the fight, same as
+`engine.sceneCleared` already expects. Surrendering (see "Surrender")
+removes only that one combatant from `scene` rather than ending the whole
+encounter outright, so anyone else in the fight keeps going; only ending
+up with nobody left in `scene` at all (everyone spared or already
+surrendered, nobody actually dying) counts as the fight itself being over
+that way - dying still ends things the usual route, `engine.sceneCleared`
+at the top of the loop.
 
 ## Body system
 
@@ -500,9 +529,12 @@ scene is down, `showVictoryScreen` logs each kill by `typeId` onto
 `player.killLog` (a count table) and shows a summary - `killLog` is what
 quests read (`(player.killLog.test_dummy or 0) > 0`), so a search-and-
 destroy quest for, say, three bandits is just `>= 3` against that same
-table, no bespoke flag per encounter needed. `scene` is already a list, so
-multi-enemy encounters fall out for free whenever something spawns more
-than one foe at once - nothing does yet.
+table, no bespoke flag per encounter needed. `scene` really can hold more
+than one foe now (see "Sight-triggered combat" for how a group ends up in
+it together) - a mixed outcome (one foe dies, another surrenders, see
+"Surrender") logs correctly onto both `killLog`/`spareLog` and still ends
+in this same victory screen once the last living member of `scene`
+actually dies, rather than needing its own separate ending.
 
 ### Surrender
 
@@ -520,22 +552,30 @@ really at stake.
 
 Once triggered, `runEncounter`'s own "surrender" branch stops the player
 with a real choice (`showInteraction`, same Yes/No-style prompt the
-overworld already uses) rather than the normal victory screen:
+overworld already uses) - not the normal victory screen, and (now that a
+fight can hold more than one foe - see "Sight-triggered combat") not the
+end of the whole encounter either, unless this happens to be the last one
+left standing in `scene`:
 
-- **Accept surrender** - the encounter ends peacefully, logged onto
-  `player.spareLog` (a count table shaped exactly like `killLog`, keyed
-  the same way by `typeId`) instead of `killLog` - a quest that
-  specifically wants a bloodless outcome checks this one instead. No
-  loot.
+- **Accept surrender** - logged onto `player.spareLog` (a count table
+  shaped exactly like `killLog`, keyed the same way by `typeId`) instead
+  of `killLog` - a quest that specifically wants a bloodless outcome
+  checks this one instead. No loot.
 - **Finish them off** - resolves like a kill (`killLog` increments, same
   as an ordinary victory) and drops everything in the foe's own `loot`
   (a list of item ids on the enemy instance) into the player's
   inventory.
 
-Either way the encounter ends the same way a normal win does -
-`triggeringObject` stays off the map for good (see "Sight-triggered
-combat") rather than getting re-inserted the way a flee does, since
-neither outcome leaves anything to re-engage later.
+Either way, this one combatant is removed from `scene` outright rather
+than just marked dead - its own `spawnObject` stays off the map for good
+(see "Sight-triggered combat") rather than getting re-inserted the way a
+flee does, since neither outcome leaves anything to re-engage later. If
+anyone else in `scene` is still alive, the fight just continues against
+them with no further ceremony; only once `scene` ends up completely empty
+this way (everyone spared or already surrendered, nobody actually dying)
+does the encounter end on its own - same "back to the tile you started
+on" reset a normal win gives, since sceneCleared/showVictoryScreen only
+ever fire from someone actually dying, not from this.
 
 ### Combat menu & movement
 
@@ -586,12 +626,11 @@ in `scene`, health included, with whichever one's currently selected marked
 (doesn't cost a turn or count as an action). **Fight** and **Look**, and
 whatever enemy an ability's own effect targets, all act on this selection
 rather than a hardcoded single opponent - `runEncounter` reads it back out
-as `foe` (`scene[selectedEnemyIndex]`) once `promptAction` returns. Only one
-enemy exists yet, so this never actually has anywhere to cycle *to*, but
-every part of the plumbing (the selection index itself, the list drawing,
-targeting reading off it instead of a bespoke variable) already treats
-`scene` as a real list rather than assuming exactly one - the next enemy
-type just has to show up in it.
+as `foe` (`scene[selectedEnemyIndex]`) once `promptAction` returns. A group
+fight (see "Sight-triggered combat") is exactly where this actually matters
+- `selectedEnemyIndex` gets clamped back down if a Tab-selected foe
+surrenders out of `scene` mid-round, same as it would if the last entry in
+a shrinking list disappeared out from under it.
 
 **Look** is an instant action (`viewLimbs`, a read-only version of
 `pickLimb` that shows the selected foe's whole limb list - health included
@@ -1179,12 +1218,7 @@ did, before this existed):
   RAIDER_SURRENDER_HEALTH) or approachAndStrike(state,
   weaponEntries.chain_sword)` - flees a grenade, gives up once badly hurt
   or disarmed, otherwise fights with a chain sword. Exists specifically
-  to exercise surrender - placed in the village, deliberately far from
-  the test dummy's own sight radius (see "Sight-triggered combat"):
-  `checkAwareness` always resolves to whichever aware enemy comes first
-  in a location's `objects`, so putting the two enemy types anywhere
-  near each other would let the dummy win that race every time and make
-  the raider effectively unreachable.
+  to exercise surrender.
 - **`banditType`**: `fleeDanger(state) or checkSurrender(state,
   BANDIT_SURRENDER_HEALTH)`, then - only while `hasAmmo(state.self,
   "right_hand", weaponEntries.laser_pistol)` - `fleeMelee(state,
@@ -1202,9 +1236,12 @@ did, before this existed):
   backing away the instant the bare-Strike fallback closes back within
   `BANDIT_KEEP_DISTANCE`, forever, once genuinely out of ammo - a real
   stalemate caught by playtesting a fight all the way to empty, not just
-  reading the chain. Placed in the village too, opposite corner from the
-  raider (more than double the sight-awareness radius away - see
-  "Sight-triggered combat") for the same aggro-overlap reason.
+  reading the chain. Placed 13 tiles from the raider - deliberately
+  *within* `SIGHT_DISTANCE`, not clear of it, to exercise group/chain
+  awareness (see "Sight-triggered combat"): approaching from the open
+  west side of the village, the player enters the bandit's own radius
+  well before the raider's, and the raider joins anyway purely because
+  it's within range of the now-aware bandit.
 
 Enemy attacks only scale damage by `enemy.stats.strength` for a `"melee"`
 weapon, matching the player's own Fight action exactly (a flat multiplier
@@ -1230,8 +1267,8 @@ NPC-to-NPC conversation system.
 - No leveling system - `stats.level` exists and displays, nothing changes
   it.
 - Only three enemy types (test dummy, raider, bandit) and one quest
-  exist; multi-enemy scenes work mechanically (`scene` is already a
-  list) but nothing spawns more than one foe at a time yet.
+  exist - real group fights do happen now (see "Sight-triggered combat"),
+  just only ever among these three.
 - Pronouns are consumed by name/`{{subject}}`/`{{object}}` templating;
   `UNSIGHTLY` by one hardcoded dialogue check. Neither affects anything
   beyond that yet - social mechanics (haggling, reactions) wait on NPCs and
