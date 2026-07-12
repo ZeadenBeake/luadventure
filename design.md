@@ -327,10 +327,15 @@ nothing grants `MULTI_LIMBED` yet, but the insectoid species grants
 
 Each part has:
 
-- **Health/max health** - damaged independently; death is torso health
-  reaching 0 (`isDead`), not a global HP pool. A template's `aimDifficulty`
-  (default 1, most omit it) divides its starting health at creation - see
-  "Stats & combat" for the other half of what it does.
+- **Health/max health** - damaged independently, not a global HP pool.
+  Death (`isDead`) is either any MORTAL-tagged part (torso, head - see
+  "Tags" below) reaching 0, *or* cumulative health across every part
+  combined dropping to `ATTRITION_DEATH_HEALTH` (25%, i.e. 75% taken -
+  see `getBodyHealthFraction`) - a fighter covered in serious
+  wounds doesn't need one of them to be individually fatal to actually
+  die. A template's `aimDifficulty` (default 1, most omit it) divides its
+  starting health at creation - see "Stats & combat" for the other half
+  of what it does.
 - **Organ slots** - hardcoded categories (`skin`, `bone`, `muscle`, plus
   torso-only `vitals`/`auxiliary`) that can be swapped (`installCategoryOrgan`),
   and a generic list for anything else installable (`installGenericOrgan`,
@@ -541,14 +546,20 @@ actually dies, rather than needing its own separate ending.
 Not every foe fights to the death - `{action="surrender"}` is a fourth
 `decide()` outcome (alongside attack/move/idle) that ends the encounter
 outright, checked via `engine.checkSurrender(state, healthThreshold)`:
-true once `state.self`'s own torso health drops to or below
-`healthThreshold` (a fraction of max health), *or* it's effectively
-disarmed (`engine.isDisarmed` - every equipped weapon dropped or
-destroyed, every natural weapon too; a functional hand alone doesn't
-count, since a bare-fisted Strike is always available and isn't "armed"
-for this purpose). Nothing requires an NPC type to use this at all - the
-test dummy doesn't, since it's a mindless sparring target with nothing
-really at stake.
+true once cumulative health across `state.self`'s WHOLE body (every part
+combined, not just the torso - `engine.getBodyHealthFraction`, same
+attrition reasoning `ATTRITION_DEATH_HEALTH` uses for death, see "Body
+system") drops to or below `healthThreshold` (a fraction of total
+health), *or* it's effectively disarmed (`engine.isDisarmed` - every
+equipped weapon dropped or destroyed, every natural weapon too; a
+functional hand alone doesn't count, since a bare-fisted Strike is always
+available and isn't "armed" for this purpose). Both the raider and the
+bandit use `0.5` - badly hurt overall (not necessarily near dead from a
+single wound) is already enough to give up, matching the same "a body
+riddled with damage eventually gives out" reasoning `ATTRITION_DEATH_HEALTH`
+(0.25, i.e. death) uses for the more severe end of the same scale.
+Nothing requires an NPC type to use this at all - the test dummy doesn't,
+since it's a mindless sparring target with nothing really at stake.
 
 Once triggered, `runEncounter`'s own "surrender" branch stops the player
 with a real choice (`showInteraction`, same Yes/No-style prompt the
@@ -621,8 +632,12 @@ re-prompt - only actually reaching something spends the
 turn.
 
 **Enemy selection**: the bottom-right pane (`drawEnemyList`) lists every foe
-in `scene`, health included, with whichever one's currently selected marked
-- `Tab` cycles it, handled right inside `promptAction`'s own key loop
+in `scene`, health included (`foe.body.health/maxHealth` - the torso's own
+two fields specifically, same as it's always shown; death/surrender's own
+cumulative-across-every-part math, see "Body system"/"Surrender", is a
+separate figure this list was never updated to reflect), with whichever
+one's currently selected marked - `Tab` cycles it, handled right inside
+`promptAction`'s own key loop
 (doesn't cost a turn or count as an action). **Fight** and **Look**, and
 whatever enemy an ability's own effect targets, all act on this selection
 rather than a hardcoded single opponent - `runEncounter` reads it back out

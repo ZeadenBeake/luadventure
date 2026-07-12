@@ -49,9 +49,9 @@
     `.newNpcType` (a fresh NPC prototype - see the NPCs section below for
     the whole custom-AI toolkit: `.fleeDanger`/`.fleeMelee`/
     `.checkSurrender`/`.approachAndStrike`/`.stepToward`/`.stepAway`/
-    `.isDisarmed`/`.getEffectiveReflex`/`.getEffectiveAim`/
-    `.REFLEX_QUICK_THRESHOLD`) - is documented in full, with signatures,
-    in design.md under "Modding".
+    `.isDisarmed`/`.hasAmmo`/`.getBodyHealthFraction`/`.getEffectiveReflex`/
+    `.getEffectiveAim`/`.REFLEX_QUICK_THRESHOLD`) - is documented in full,
+    with signatures, in design.md under "Modding".
 
     A WORKED EXAMPLE: a custom ability that reads player data
 
@@ -887,10 +887,12 @@ local speciesEntries = {
 --     player once they're within keepDistance tiles; nil otherwise - for
 --     an NPC better suited to fighting at range (see banditType below).
 --   Luadventure.checkSurrender(state, healthThreshold) - {action=
---     "surrender"} once state.self's own torso health drops to or below
---     healthThreshold (a fraction of max), or it's effectively disarmed
---     (Luadventure.isDisarmed); nil otherwise. See "Surrender" in the
---     design doc for what actually happens once this fires.
+--     "surrender"} once state.self's cumulative health across its WHOLE
+--     body (Luadventure.getBodyHealthFraction, not just the torso) drops
+--     to or below healthThreshold (a fraction of total health), or it's
+--     effectively disarmed (Luadventure.isDisarmed); nil otherwise. See
+--     "Surrender" in the design doc for what actually happens once this
+--     fires.
 --   Luadventure.approachAndStrike(state, weapon, slot) - the generic
 --     "close and attack" fallback: attacks with weapon once in range,
 --     otherwise closes distance one cardinal step at a time. `slot` is
@@ -967,10 +969,11 @@ local function spawnTestDummy()
     return enemy
 end
 
--- The fraction of max (torso) health below which a raider gives up
--- outright, regardless of what it's still holding - see
--- Luadventure.checkSurrender.
-local RAIDER_SURRENDER_HEALTH = 0.25
+-- The fraction of total health (across the whole body, not just the
+-- torso - see Luadventure.checkSurrender/Luadventure.getBodyHealthFraction)
+-- below which a raider gives up outright, regardless of what it's still
+-- holding.
+local RAIDER_SURRENDER_HEALTH = 0.5
 
 local raiderType
 
@@ -1010,7 +1013,7 @@ end
 -- Same surrender threshold as the raider (see RAIDER_SURRENDER_HEALTH) -
 -- a separate constant since nothing ties the two types' thresholds
 -- together, even though they happen to agree today.
-local BANDIT_SURRENDER_HEALTH = 0.25
+local BANDIT_SURRENDER_HEALTH = 0.5
 
 -- How close the player can get before a bandit backs off (see
 -- Luadventure.fleeMelee) rather than let them close to melee range -

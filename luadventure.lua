@@ -471,7 +471,37 @@ function engine.getLimbStrength(combatant, part)
     return strength
 end
 
--- True once any MORTAL-tagged part (torso, head, ...) has hit 0 health.
+-- The fraction of health remaining across EVERY part combined (torso,
+-- head, every limb down to the last finger) - not the torso's own
+-- health/maxHealth alone, which is all engine.isDead's MORTAL check (and
+-- the older per-part displays) ever look at directly. What
+-- ATTRITION_DEATH_HEALTH/engine.checkSurrender actually watch: a body
+-- riddled with badly-hurt-but-not-destroyed limbs should eventually go
+-- down (or give up) the same as one felled by a single fatal blow to a
+-- MORTAL part, even though no individual part ever actually hit 0.
+function engine.getBodyHealthFraction(torso)
+    local health, maxHealth = 0, 0
+    engine.walkBody(torso, function(part)
+        health = health + part.health
+        maxHealth = maxHealth + part.maxHealth
+    end)
+    if maxHealth <= 0 then
+        return 0
+    end
+    return health / maxHealth
+end
+
+-- Below this much health remaining across the whole body (25%, i.e. 75%
+-- taken), death is inevitable from sheer cumulative attrition - see
+-- engine.isDead below - regardless of whether any single part actually
+-- hit 0.
+local ATTRITION_DEATH_HEALTH = 0.25
+
+-- True once any MORTAL-tagged part (torso, head, ...) has hit 0 health,
+-- OR the body as a whole has taken enough cumulative damage across every
+-- part combined (see ATTRITION_DEATH_HEALTH/engine.getBodyHealthFraction)
+-- that it gives out regardless - a fighter covered in serious wounds
+-- doesn't need one of them to be individually fatal to actually die.
 function engine.isDead(torso)
     local dead = false
     engine.walkBody(torso, function(part)
@@ -479,6 +509,9 @@ function engine.isDead(torso)
             dead = true
         end
     end)
+    if not dead and engine.getBodyHealthFraction(torso) <= ATTRITION_DEATH_HEALTH then
+        dead = true
+    end
     return dead
 end
 
@@ -2637,16 +2670,17 @@ function engine.isDisarmed(combatant)
 end
 
 -- Signals surrender ({action="surrender"}) once `state.self` is either
--- badly hurt (its own torso health at or below `healthThreshold`, a
--- fraction of max health) or effectively disarmed (engine.isDisarmed) -
+-- badly hurt (cumulative health across its WHOLE body - see
+-- engine.getBodyHealthFraction, same attrition reasoning
+-- ATTRITION_DEATH_HEALTH uses for death - at or below `healthThreshold`,
+-- a fraction of total health) or effectively disarmed (engine.isDisarmed) -
 -- nil otherwise, so a decide() can chain it the same way
 -- engine.fleeDanger/engine.fleeMelee do. See the "surrender" branch in
 -- engine.runEncounter for what actually happens once this fires - not
 -- every NPC type has to use this at all (the test dummy doesn't; it has
 -- no real stake in the fight to begin with).
 function engine.checkSurrender(state, healthThreshold)
-    local body = state.self.body
-    if body.health / body.maxHealth <= healthThreshold or engine.isDisarmed(state.self) then
+    if engine.getBodyHealthFraction(state.self.body) <= healthThreshold or engine.isDisarmed(state.self) then
         return { action = "surrender" }
     end
     return nil
@@ -3227,6 +3261,7 @@ Luadventure.approachAndStrike = engine.approachAndStrike
 Luadventure.hasAmmo = engine.hasAmmo
 Luadventure.isDisarmed = engine.isDisarmed
 Luadventure.checkSurrender = engine.checkSurrender
+Luadventure.getBodyHealthFraction = engine.getBodyHealthFraction
 
 -- A read-only version of engine.pickLimb's list, for the Look action - a size-up,
 -- not a targeting prompt, so it never asks the player to choose one, just
