@@ -693,6 +693,11 @@ local abilityEntries = {
         name = "Throw Grenade",
         speed = "quick", -- the throw itself is quick; the blast is delayed, not the action
     },
+    flurry = {
+        name = "Flurry",
+        speed = "full",
+        cooldown = 3, -- unlike rev_it_up, never refunded on a total miss - see the effect below
+    },
 }
 
 abilityEntries.adrenaline_shot.effect = function(user)
@@ -981,6 +986,116 @@ abilityEntries.throw_grenade.effect = function(user, enemy, sourcePart, sourceSl
     Luadventure.logCombat("You lob the grenade toward (" .. tx .. ", " .. ty .. "). It'll go off after this round.")
 end
 
+-- Three independent one-handed melee swings in one full action - granted
+-- by the Flurry talent (see talentEntries below), not tied to one
+-- specific weapon the way rev_it_up is to the chain sword, so it picks
+-- whichever equipped one-handed melee weapon/hand qualifies itself
+-- (Luadventure.pickOneHandedMeleeSlot - silent if only one qualifies,
+-- prompts if more than one, nil if none do, same "no message on cancel"
+-- convention as every other picker-backed effect here). Each strike
+-- rolls its own hit chance separately, unlike rev_it_up's single roll
+-- gating a fixed five-hit combo: Flurry is the fighter's own talent, not
+-- one weapon's bonus move, so "three strikes" reads as three real swings
+-- rather than one connect-or-whiff burst - and per abilityEntries.flurry's
+-- own comment, a total miss still costs the cooldown (unlike rev_it_up's
+-- refund), since all three swings genuinely happened whether or not any
+-- connected.
+abilityEntries.flurry.effect = function(user, enemy)
+    local chosen = Luadventure.pickOneHandedMeleeSlot(user, "Flurry with which hand?")
+    if not chosen then
+        return "noop"
+    end
+
+    local weapon = weaponEntries[chosen.weaponId]
+    local distance = Luadventure.gridDistance(user.gridX, user.gridY, enemy.gridX, enemy.gridY)
+    if distance > weapon.range then
+        Luadventure.logCombat("Nothing is in range.")
+        return "noop"
+    end
+
+    local target, label = Luadventure.pickLimb("Target the " .. enemy.name .. "'s:", enemy.body)
+    if not target then
+        return "noop"
+    end
+    Luadventure.combatState.redrawPanes()
+
+    local strength = user.stats.strength * Luadventure.getLimbStrength(user, chosen.part)
+    local totalDealt = 0
+    local connected = 0
+    for i = 1, 3 do
+        if Luadventure.isDead(enemy.body) then
+            break
+        end
+        local hitChance = Luadventure.getFinalHitChance(user, enemy, weapon, distance, target)
+        if math.random() <= hitChance then
+            connected = connected + 1
+            local roll = math.random(weapon.damage.min, weapon.damage.max)
+            local raw = math.floor(roll * strength + 0.5)
+            local dealt = Luadventure.damagePart(enemy, target, raw, weapon.damageType)
+            if weapon.onHit then
+                weapon.onHit(target)
+            end
+            totalDealt = totalDealt + dealt
+            Luadventure.logCombat("Strike " .. i .. " connects for " .. dealt .. "!")
+            Luadventure.combatState.flash(enemy.gridX, enemy.gridY, "E")
+        else
+            Luadventure.logCombat("Strike " .. i .. " misses!")
+        end
+    end
+
+    if connected > 0 then
+        Luadventure.logCombat("Flurry deals " .. totalDealt .. " total damage to the " .. enemy.name .. "'s " .. label .. "!")
+    end
+end
+
+-- A talent's own definition: display name, `description`, and `parent` -
+-- the talent that must already be taken before this one is offerable
+-- (see engine.canTakeTalent) - forming a real tree rooted at `root`
+-- (granted free to every combatant at construction, see character:new -
+-- it does nothing itself, purely the branch point everything else hangs
+-- off). A `passive` talent has no mechanical field of its own here - it's
+-- checked live, by id, at whichever specific call site cares (Quick
+-- Draw's own comment shows the one example so far: engine.
+-- runEquipmentAction's draw sub-action). `statBonus` (a flat, one-time
+-- stat bump, same non-compounding convention as character creation's own
+-- STAT_ALLOCATION) and `grantsAbility` (folded into engine.
+-- collectAbilities once taken) are the two other mechanical shapes a
+-- talent can have - a talent could in principle combine more than one of
+-- these, though nothing here does yet.
+local talentEntries = {
+    root = {
+        name = "Root",
+        parent = nil,
+        description = "The foundation your training branches from.",
+    },
+    quick_draw = {
+        name = "Quick Draw",
+        parent = "root",
+        passive = true,
+        description = "Drawing a ranged weapon from the belt is a quick action.",
+    },
+    steady_grip = {
+        name = "Steady Grip",
+        parent = "root",
+        passive = true,
+        statBonus = { stat = "aim", amount = 0.05 },
+        description = "+5% aim.",
+    },
+    melee_specialist = {
+        name = "Melee Specialist",
+        parent = "root",
+        passive = true,
+        statBonus = { stat = "strength", amount = 0.05 },
+        description = "+5% strength.",
+    },
+    flurry = {
+        name = "Flurry",
+        parent = "melee_specialist",
+        grantsAbility = "flurry",
+        description = "Make three one-handed melee strikes in one full action.",
+    },
+}
+
 -- Every species a character can be built as. `build(globalTags)` returns a
 -- fresh body (a torso with everything attached) - see Luadventure.newTorso/
 -- .attachPart/.installCategoryOrgan/.installGenericOrgan/.recalcGlobalTags
@@ -1263,9 +1378,9 @@ end
 -- object's `enemyType` (see the world data below) - the engine falls
 -- back to "test_dummy" for any object that doesn't set one at all.
 local enemyEntries = {
-    test_dummy = { spawn = spawnTestDummy },
-    raider = { spawn = spawnRaider },
-    bandit = { spawn = spawnBandit },
+    test_dummy = { spawn = spawnTestDummy, xpReward = 10 }, -- can't fight back, cheapest
+    raider = { spawn = spawnRaider, xpReward = 20 },
+    bandit = { spawn = spawnBandit, xpReward = 25 },
 }
 
 --[[
@@ -1380,6 +1495,7 @@ local questEntries = {
         turnInLines = { "\"Ha! Knew you had it in you. Here, take this.\"" },
         isReady = function() return (Luadventure.player.killLog.test_dummy or 0) > 0 end,
         rewardItemId = "dermoregenesis_salve",
+        xpReward = 50,
         nextQuestId = nil,
     },
 }
@@ -1425,6 +1541,7 @@ return {
     weaponEntries = weaponEntries,
     itemEntries = itemEntries,
     abilityEntries = abilityEntries,
+    talentEntries = talentEntries,
     speciesEntries = speciesEntries,
     enemyEntries = enemyEntries,
     world = world,

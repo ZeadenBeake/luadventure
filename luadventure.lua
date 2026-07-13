@@ -56,6 +56,7 @@ local DOT_VERBS = gamedata.DOT_VERBS
 local weaponEntries = gamedata.weaponEntries
 local itemEntries = gamedata.itemEntries
 local abilityEntries = gamedata.abilityEntries
+local talentEntries = gamedata.talentEntries
 local speciesEntries = gamedata.speciesEntries
 local enemyEntries = gamedata.enemyEntries
 local questEntries = gamedata.questEntries
@@ -1038,6 +1039,7 @@ end
 local character = {
     stats = {
         level = 0,
+        xp = 0, -- Banked toward the next level - see engine.grantExperience.
         health = 100,
         max_health = 100, -- Modified by armor and possibly clothes
         strength = 1, -- Base multiplier for melee damage; a limb's own bonuses stack on top of this.
@@ -1097,6 +1099,13 @@ function character:new(o, stats, inventory, equipped)
     -- entry says what layer/areas it covers), same convention as inventory.
     o.worn = {}
 
+    -- Talents taken (talentId -> true) - shared infrastructure like
+    -- cooldowns/belt, so it works uniformly for the player or any NPC.
+    -- "root" (see talentEntries) is granted free to everyone at
+    -- construction, so a root-child's own prerequisite check never needs
+    -- a special case for the root itself.
+    o.talents = { root = true }
+
     return o
 end
 
@@ -1123,6 +1132,13 @@ player.pronouns = { subject = "they", object = "them" }
 player.quests = {}
 player.killLog = {}
 player.spareLog = {}
+
+-- Banked, unspent level-up rewards (see engine.grantExperience) - one of
+-- each per level gained, spent any time via the Character screen
+-- (engine.runCharacterScreen), not forced the instant a level-up happens,
+-- since a talent's own prerequisite might not be taken yet.
+player.skillPoints = 0
+player.talentPoints = 0
 
 -- Body/globalTags are built once species is actually chosen (see
 -- engine.runCharacterCreation, run once at startup, right before the first
@@ -1331,6 +1347,41 @@ function engine.dialogue(str, who)
     end))
 end
 
+-- How much XP a combatant needs to reach `level + 1` - a small, clearly
+-- tunable curve (level 0->1 costs 100, 1->2 costs 200, 2->3 costs 300,
+-- ...), same "named local constant" convention as STAT_ALLOCATION/
+-- ATTRITION_DEATH_HEALTH/REFLEX_QUICK_THRESHOLD.
+local XP_CURVE = { base = 100, step = 100 }
+
+function engine.xpForNextLevel(level)
+    return (level + 1) * XP_CURVE.step
+end
+
+-- Awards XP to any combatant, looping while banked xp clears the next
+-- threshold so a single big grant (a quest reward, say) can chain
+-- multiple level-ups in one call. Only the player has a skill/talent
+-- point economy or a display for either - a non-player combatant's xp/
+-- level still tracks harmlessly on its own stats table, but nothing
+-- surfaces it, so this is effectively player-only in practice (see
+-- debugConsole.grantExperience for the player-only debug entry point).
+function engine.grantExperience(combatant, amount)
+    if amount <= 0 then
+        return
+    end
+    combatant.stats.xp = combatant.stats.xp + amount
+    local leveled = 0
+    while combatant.stats.xp >= engine.xpForNextLevel(combatant.stats.level) do
+        combatant.stats.xp = combatant.stats.xp - engine.xpForNextLevel(combatant.stats.level)
+        combatant.stats.level = combatant.stats.level + 1
+        leveled = leveled + 1
+    end
+    if combatant == player and leveled > 0 then
+        player.skillPoints = player.skillPoints + leveled
+        player.talentPoints = player.talentPoints + leveled
+        engine.logActivity("Reached level " .. combatant.stats.level .. "!")
+    end
+end
+
 function engine.drawStats()
     statsWin.setVisible(false)
     statsWin.clear()
@@ -1342,6 +1393,8 @@ function engine.drawStats()
     statsWin.setCursorPos(1, 3)
     statsWin.write("Lv " .. player.stats.level)
     statsWin.setCursorPos(1, 4)
+    statsWin.write("XP " .. player.stats.xp .. "/" .. engine.xpForNextLevel(player.stats.level))
+    statsWin.setCursorPos(1, 5)
     statsWin.write("Steps " .. player.steps)
     statsWin.setVisible(true)
 end
@@ -1638,7 +1691,7 @@ end
 -- on top of whatever's already there - rather than needing to coexist
 -- with it.
 local pageBarWin = window.create(term.current(), 1, 1, screenW, 2)
-local TOP_BAR_PAGES = { "Inventory", "Medical", "Apparel" }
+local TOP_BAR_PAGES = { "Inventory", "Medical", "Apparel", "Character" }
 local topBarPage = 1
 
 function engine.drawTopBar()
@@ -3011,6 +3064,155 @@ function engine.runApparelScreen()
     end
 end
 
+-- Every talent, depth-first in parent-child order (root first, then each
+-- child before any sibling's own subtree) - same shape engine.
+-- collectLabeledParts already walks the body tree in, reused here for the
+-- same reason: a talent's own `parent` field is directly analogous to a
+-- body part's subSlot nesting.
+function engine.collectTalentTree()
+    local children = {}
+    for id, def in pairs(talentEntries) do
+        if def.parent then
+            children[def.parent] = children[def.parent] or {}
+            table.insert(children[def.parent], id)
+        end
+    end
+    local rows = {}
+    local function walk(id, depth)
+        table.insert(rows, { id = id, def = talentEntries[id], depth = depth })
+        for _, childId in ipairs(children[id] or {}) do
+            walk(childId, depth + 1)
+        end
+    end
+    walk("root", 0)
+    return rows
+end
+
+local CHARACTER_LIST_TOP = 5 -- row 1: title, row 2: level/xp, row 3: banked points, row 4: column header
+
+-- Same two-pane layout Medical/Apparel/Inventory all already use. Left
+-- half is the talent tree (engine.collectTalentTree, indented by depth
+-- same as every other part/limb list here), colored by status - green
+-- once taken, gray while its own parent isn't yet (engine.canTakeTalent),
+-- plain white once it's actually offerable. Right half is the selected
+-- talent's own description plus its status spelled out in words, so the
+-- color alone isn't the only thing conveying it.
+function engine.drawCharacterScreen(rows, selection, scrollOffset)
+    inventoryWin.setVisible(false)
+    inventoryWin.clear()
+
+    local leftW = math.floor(screenW / 2)
+    local rightX = leftW + 2
+
+    inventoryWin.setCursorPos(1, 1)
+    inventoryWin.write("Character")
+    inventoryWin.setCursorPos(1, 2)
+    inventoryWin.write(("Lv %d - XP %d/%d"):format(player.stats.level, player.stats.xp, engine.xpForNextLevel(player.stats.level)))
+    inventoryWin.setCursorPos(1, 3)
+    inventoryWin.write(("Skill points: %d   Talent points: %d"):format(player.skillPoints, player.talentPoints))
+    inventoryWin.setCursorPos(1, 4)
+    inventoryWin.write("Talents")
+
+    local visibleCount = screenH - 1 - CHARACTER_LIST_TOP + 1
+    for i = 1, visibleCount do
+        local entry = rows[scrollOffset + i]
+        if entry then
+            local marker = (scrollOffset + i == selection) and ">" or " "
+            local indent = string.rep(" ", entry.depth * 2)
+            local labelText = (indent .. entry.def.name):sub(1, 20)
+            inventoryWin.setCursorPos(1, CHARACTER_LIST_TOP + i - 1)
+            if engine.hasTalent(player, entry.id) then
+                inventoryWin.setTextColor(colors.green)
+            elseif not engine.canTakeTalent(player, entry.id) then
+                inventoryWin.setTextColor(colors.gray)
+            end
+            inventoryWin.write(marker .. labelText)
+            inventoryWin.setTextColor(colors.white)
+        end
+    end
+
+    local selected = rows[selection]
+    if selected then
+        inventoryWin.setCursorPos(rightX, 2)
+        inventoryWin.write(selected.def.name)
+        local row = 3
+        row = row + engine.writeWrapped(inventoryWin, rightX, row, selected.def.description)
+        row = row + 1
+        local status
+        if engine.hasTalent(player, selected.id) then
+            status = "Taken."
+        elseif engine.canTakeTalent(player, selected.id) then
+            status = "Available - [Enter] to take."
+        else
+            status = "Locked - take " .. talentEntries[selected.def.parent].name .. " first."
+        end
+        row = row + engine.writeWrapped(inventoryWin, rightX, row, status)
+    end
+
+    inventoryWin.setCursorPos(1, screenH)
+    inventoryWin.write("[Enter] take  [S] spend skill point  [C] close")
+
+    inventoryWin.setVisible(true)
+end
+
+-- Blocks until the player closes Character (C again), same modal shape as
+-- Medical/Apparel/Inventory. Enter on an available talent spends a banked
+-- talent point (engine.takeTalent); S opens the same single-point stat
+-- picker character creation's own multi-point one is built from
+-- (engine.spendSkillPoint), spending a banked skill point on success.
+-- Root itself is never a valid "take" target - it's already taken for
+-- everyone at construction (see character:new) - Enter on it (or on
+-- anything already taken, or still locked, or with no points banked)
+-- just doesn't respond, same "invalid selection doesn't answer"
+-- convention every other picker here uses.
+function engine.runCharacterScreen()
+    local rows = engine.collectTalentTree()
+    local selection = 1
+    local scrollOffset = 0
+    local visibleCount = screenH - 1 - CHARACTER_LIST_TOP + 1
+
+    local function redraw()
+        rows = engine.collectTalentTree()
+        selection = math.min(selection, math.max(1, #rows))
+        scrollOffset = engine.clampInventoryScroll(selection, scrollOffset, #rows, visibleCount)
+        engine.drawCharacterScreen(rows, selection, scrollOffset)
+    end
+
+    redraw()
+
+    while true do
+        local _, key = os.pullEvent("key")
+
+        if key == keys.c then
+            return
+        elseif key == keys.up then
+            selection = math.max(1, selection - 1)
+            redraw()
+        elseif key == keys.down then
+            selection = math.min(#rows, selection + 1)
+            redraw()
+        elseif key == ACTIVATE_KEY then
+            local entry = rows[selection]
+            if entry and player.talentPoints > 0 and engine.canTakeTalent(player, entry.id) then
+                engine.takeTalent(player, entry.id)
+                player.talentPoints = player.talentPoints - 1
+            end
+            redraw()
+        elseif key == keys.s then
+            if player.skillPoints > 0 and engine.spendSkillPoint() then
+                player.skillPoints = player.skillPoints - 1
+            end
+            redraw()
+        else
+            local index = keyToNumber[key]
+            if index and rows[index] then
+                selection = index
+                redraw()
+            end
+        end
+    end
+end
+
 -- Window writes don't wrap on their own - text just runs past the edge and
 -- gets silently clipped. Writes `text` at (x, y) using engine.wrapText, and
 -- returns how many rows it used so the caller can stack whatever comes
@@ -3585,6 +3787,54 @@ function engine.pickLimb(prompt, torso)
     end
 end
 
+-- Every equip slot currently holding a functional one-handed melee
+-- weapon - "which hand" for a talent/ability that isn't tied to one
+-- specific weapon the way a weapon's own bonus ability (Rev It Up!) is
+-- (see abilityEntries.flurry). Silent (no prompt at all) if exactly one
+-- qualifies, same digit-select idiom as engine.pickLimb if more than one,
+-- nil if none do.
+function engine.pickOneHandedMeleeSlot(combatant, prompt)
+    local candidates = {}
+    for _, limb in ipairs(engine.getManipulateLimbs(combatant)) do
+        local weaponId = combatant.equipped[limb.label]
+        local weapon = weaponId and weaponEntries[weaponId]
+        if weapon and weapon.handedness == "one-handed" and weapon.type == "melee"
+            and engine.isLimbFunctional(limb.part) then
+            table.insert(candidates, { slot = limb.label, weaponId = weaponId, part = limb.part })
+        end
+    end
+
+    if #candidates == 0 then
+        return nil
+    elseif #candidates == 1 then
+        return candidates[1]
+    end
+
+    combatWin.setVisible(false)
+    combatWin.clear()
+    combatWin.setCursorPos(1, 1)
+    combatWin.write(prompt)
+    local row = 3
+    for i, candidate in ipairs(candidates) do
+        row = row + engine.writeWrapped(combatWin, 1, row, ("[%s] %s (%s)"):format(
+            engine.digitLabel(i), weaponEntries[candidate.weaponId].name, candidate.slot
+        ))
+    end
+    local backIndex = #candidates + 1
+    engine.writeWrapped(combatWin, 1, row, "[" .. engine.digitLabel(backIndex) .. "] Back")
+    combatWin.setVisible(true)
+
+    while true do
+        local _, key = os.pullEvent("key")
+        local index = keyToNumber[key]
+        if index == backIndex then
+            return nil
+        elseif index and candidates[index] then
+            return candidates[index]
+        end
+    end
+end
+
 -- A generic picker for "special" ammo - anything in `combatant`'s
 -- inventory whose itemEntries.specialAmmoFor matches `weaponId` (see
 -- itemEntries.slug_round), one line per distinct item id with its carried
@@ -3727,6 +3977,7 @@ Luadventure.logActivity = engine.logActivity
 Luadventure.logCombat = engine.logCombat
 Luadventure.dialogue = engine.dialogue
 Luadventure.pickLimb = engine.pickLimb
+Luadventure.pickOneHandedMeleeSlot = engine.pickOneHandedMeleeSlot
 Luadventure.pickSpecialAmmo = engine.pickSpecialAmmo
 Luadventure.pickThrowTarget = engine.pickThrowTarget
 Luadventure.queuePendingGrenade = engine.queuePendingGrenade
@@ -3736,6 +3987,12 @@ Luadventure.healPart = engine.healPart
 Luadventure.applyPartStatus = engine.applyPartStatus
 Luadventure.clearPartStatus = engine.clearPartStatus
 Luadventure.applyCharacterStatus = engine.applyCharacterStatus
+-- Exposed for a future dialogue-choice effect (e.g. cleverly avoiding a
+-- fight) to call exactly like Luadventure.logCombat - no such branching
+-- dialogue exists yet to wire it up to (see design.md's "Known gaps"),
+-- but the primitive itself needs no dialogue system changes to be usable
+-- the moment one does.
+Luadventure.grantExperience = engine.grantExperience
 Luadventure.isDead = engine.isDead
 Luadventure.isLimbFunctional = engine.isLimbFunctional
 Luadventure.getLimbStrength = engine.getLimbStrength
@@ -3788,17 +4045,51 @@ function engine.viewLimbs(prompt, torso)
     os.pullEvent("key")
 end
 
+-- Whether `combatant` has taken talent `talentId` - the one primitive
+-- every talent-gated call site (Quick Draw's draw-speed check, engine.
+-- collectAbilities' own active-talent source below) reads instead of
+-- poking combatant.talents directly.
+function engine.hasTalent(combatant, talentId)
+    return combatant.talents[talentId] == true
+end
+
+-- Whether talentId is currently offerable: not already taken, and its
+-- parent has been (root itself is granted free at construction - see
+-- character:new - so a root-child's check passes trivially once nothing
+-- else is in the way).
+function engine.canTakeTalent(combatant, talentId)
+    local def = talentEntries[talentId]
+    return not combatant.talents[talentId] and combatant.talents[def.parent] == true
+end
+
+-- Marks a talent taken and applies its one-time effect: a flat stat bump
+-- (same "added once, not compounding" convention as STAT_ALLOCATION) for
+-- a statBonus talent, nothing extra for a pure passive (engine.hasTalent
+-- reads combatant.talents directly at its own call site) or an active
+-- one (its ability just starts showing up in engine.collectAbilities
+-- below, once talents[id] is true).
+function engine.takeTalent(combatant, talentId)
+    local def = talentEntries[talentId]
+    combatant.talents[talentId] = true
+    if def.statBonus then
+        combatant.stats[def.statBonus.stat] = combatant.stats[def.statBonus.stat] + def.statBonus.amount
+    end
+end
+
 -- Every ability granted by any organ anywhere in the combatant's body, by
 -- anything currently equipped (a weapon's own abilities, like the chain
--- sword's Rev it up! or the laser pistol's Charge Shot), or by anything in
--- the belt (a consumable's own use-ability). Entries on cooldown are left
--- out entirely, same as engine.pickAttack simply not listing an out-of-range
--- weapon. Each entry carries the specific part that granted it (the
--- wielding hand, for a weapon ability), since an effect like Rev it up!
--- needs to know whose strength to use; a weapon ability also carries the
--- equip slot itself, since an ammo-based one (Charge Shot) needs to know
--- which ammo pool to draw from. itemId is set when it came from the belt,
--- so using it can consume it.
+-- sword's Rev it up! or the laser pistol's Charge Shot), by anything in
+-- the belt (a consumable's own use-ability), or by a taken talent (see
+-- talentEntries' own `grantsAbility` - Flurry, so far). Entries on
+-- cooldown are left out entirely, same as engine.pickAttack simply not
+-- listing an out-of-range weapon. Each entry carries the specific part
+-- that granted it (the wielding hand, for a weapon ability), since an
+-- effect like Rev it up! needs to know whose strength to use; a weapon
+-- ability also carries the equip slot itself, since an ammo-based one
+-- (Charge Shot) needs to know which ammo pool to draw from. itemId is
+-- set when it came from the belt, so using it can consume it. A talent's
+-- ability isn't tied to any part/item/slot at all (it belongs to the
+-- fighter, not a limb or a weapon), so those three all come back nil.
 function engine.collectAbilities(combatant)
     local abilities = {}
     local function tryAdd(source, part, itemId, slot)
@@ -3855,6 +4146,13 @@ function engine.collectAbilities(combatant)
         local itemId = combatant.belt[i]
         if itemId then
             tryAdd(itemEntries[itemId], nil, itemId)
+        end
+    end
+
+    for talentId, taken in pairs(combatant.talents) do
+        local def = talentEntries[talentId]
+        if taken and def and def.grantsAbility then
+            tryAdd({ abilities = { def.grantsAbility } }, nil)
         end
     end
 
@@ -4328,6 +4626,19 @@ function engine.runEquipmentAction(combatant, droppedItems, enemy, restricted)
                 end
                 combatState.redrawPanes()
                 engine.logCombat("You draw the " .. weaponEntries[candidate.weaponId].name .. "!")
+
+                -- Quick Draw: a ranged weapon drawn specifically from the
+                -- belt (not another equip slot, and not off the ground) is
+                -- a quick action instead of full, for anyone who's taken
+                -- the talent. A two-handed weapon can never actually be
+                -- the belt-sourced candidate here in the first place (the
+                -- belt can't hold one at all - see "Inventory &
+                -- equipment") so there's no need to also check handedness.
+                if engine.hasTalent(combatant, "quick_draw")
+                    and candidate.kind == "slot" and candidate.slotDescriptor.kind == "belt"
+                    and weaponEntries[candidate.weaponId].type == "ranged" then
+                    return "quick"
+                end
                 return "full"
             end
         end
@@ -4397,6 +4708,10 @@ function engine.showVictoryScreen(scene)
     for _, foe in ipairs(scene) do
         player.killLog[foe.typeId] = (player.killLog[foe.typeId] or 0) + 1
         table.insert(lines, "The " .. foe.name .. " collapses.")
+        local reward = enemyEntries[foe.typeId] and enemyEntries[foe.typeId].xpReward
+        if reward then
+            engine.grantExperience(player, reward)
+        end
     end
     table.insert(lines, "")
     table.insert(lines, "Press any key.")
@@ -5177,6 +5492,9 @@ function engine.interactWithPerson(obj)
         if quest.rewardItemId then
             table.insert(player.inventory, quest.rewardItemId)
         end
+        if quest.xpReward then
+            engine.grantExperience(player, quest.xpReward)
+        end
         player.quests[obj.questId] = "done"
         obj.questId = quest.nextQuestId
     elseif state == "active" then
@@ -5323,6 +5641,9 @@ function engine.buildSaveData(saveId, label)
     local savedActivityLog = {}
     for i, line in ipairs(activityLog) do savedActivityLog[i] = line end
 
+    local talents = {}
+    for id, taken in pairs(player.talents) do talents[id] = taken end
+
     return {
         saveId = saveId,
         label = label,
@@ -5343,6 +5664,9 @@ function engine.buildSaveData(saveId, label)
         killLog = killLog,
         spareLog = spareLog,
         activityLog = savedActivityLog,
+        skillPoints = player.skillPoints,
+        talentPoints = player.talentPoints,
+        talents = talents,
         body = engine.serializeBodyPart(player.body),
         world = engine.buildWorldSnapshot(),
     }
@@ -5358,6 +5682,9 @@ function engine.applySaveData(data)
 
     player.stats = {}
     for k, v in pairs(data.stats) do player.stats[k] = v end
+    -- A pre-leveling save's stats table has no xp field at all - same
+    -- backward-compat convention as everything else below.
+    player.stats.xp = player.stats.xp or 0
 
     player.inventory = {}
     for i, id in ipairs(data.inventory) do player.inventory[i] = id end
@@ -5407,6 +5734,14 @@ function engine.applySaveData(data)
     -- above this point in the file).
     activityLog = {}
     for i, line in ipairs(data.activityLog or {}) do activityLog[i] = line end
+
+    -- Same backward-compat convention: a pre-leveling save has none of
+    -- this, so it comes back at 0 banked points and just the free root
+    -- talent rather than erroring.
+    player.skillPoints = data.skillPoints or 0
+    player.talentPoints = data.talentPoints or 0
+    player.talents = { root = true }
+    for id, taken in pairs(data.talents or {}) do player.talents[id] = taken end
 
     player.body = engine.deserializeBodyPart(data.body, true)
     player.globalTags = engine.recalcGlobalTags(player.body)
@@ -6059,6 +6394,40 @@ debugConsole.commands = {
         return "Attached " .. rest[3] .. " as " .. rest[1] .. "." .. rest[2] .. " (zone: " .. tostring(child.zone) .. ")"
     end,
 
+    -- setLevel <level> - a raw poke: sets player.stats.level directly and
+    -- zeroes xp toward the next threshold, bypassing engine.grantExperience's
+    -- loop and skill/talent point awards entirely. For jumping straight to
+    -- a level to test late-game numbers, not a substitute for
+    -- grantExperience when the point-award flow itself is what's being
+    -- tested. Player-only, same reasoning as `give` - an enemy has no
+    -- level display worth setting.
+    setLevel = function(args)
+        local level = tonumber(args[1])
+        if not level or level ~= math.floor(level) or level < 0 then
+            return "Usage: setLevel <level>"
+        end
+        player.stats.level = level
+        player.stats.xp = 0
+        return "Level set to " .. level
+    end,
+
+    -- grantExperience <amount> - routes through the real
+    -- engine.grantExperience, so it chains multi-level-ups and awards
+    -- skill/talent points exactly like a quest/kill reward would - the
+    -- one to use for testing the actual leveling flow, as opposed to
+    -- setLevel's raw poke. Player-only.
+    grantExperience = function(args)
+        local amount = tonumber(args[1])
+        if not amount or amount <= 0 then
+            return "Usage: grantExperience <amount>"
+        end
+        local levelBefore = player.stats.level
+        engine.grantExperience(player, amount)
+        local gained = player.stats.level - levelBefore
+        return "Granted " .. amount .. " XP (" .. gained .. " level-up(s), now Lv " .. player.stats.level
+            .. ", " .. player.skillPoints .. " skill pt, " .. player.talentPoints .. " talent pt)"
+    end,
+
     -- addStatus <limb> <status> [amount] [@<target>] - only part-scoped
     -- statuses (bleed, poison, fracture) - character-wide ones
     -- (adrenaline) aren't reachable this way, since every command here
@@ -6121,7 +6490,7 @@ debugConsole.commands = {
     end,
 
     help = function()
-        return "setHealth <limb> <hp> [@t] | give <item> [n] | wear/unwear <item> | attachLimb <parentLimb> <slot> <template> [@t] | addStatus <limb> <status> [n] [@t] | clearStatus <limb> <status|all> [@t] | targets | exit"
+        return "setHealth <limb> <hp> [@t] | give <item> [n] | wear/unwear <item> | attachLimb <parentLimb> <slot> <template> [@t] | setLevel <n> | grantExperience <amt> | addStatus <limb> <status> [n] [@t] | clearStatus <limb> <status|all> [@t] | targets | exit"
     end,
 }
 
@@ -6313,6 +6682,44 @@ function engine.runStatAllocation()
     end
 end
 
+-- One skill point, spent immediately on confirm - no multi-point
+-- batching or Reset the way character creation's five-point
+-- engine.runStatAllocation needs, since this is called once per banked
+-- point, any time, from the Character screen. Same +5%/point convention
+-- (STAT_ALLOCATION.step, not compounding). Returns true if a point was
+-- spent, false if the player backed out.
+function engine.spendSkillPoint()
+    combatWin.setVisible(false)
+    combatWin.clear()
+    combatWin.setCursorPos(1, 1)
+    combatWin.write("Spend 1 skill point on:")
+    combatWin.setCursorPos(1, 3)
+    combatWin.write("[1] Strength (+5%)")
+    combatWin.setCursorPos(1, 4)
+    combatWin.write("[2] Reflex (+5%)")
+    combatWin.setCursorPos(1, 5)
+    combatWin.write("[3] Aim (+5%)")
+    combatWin.setCursorPos(1, 6)
+    combatWin.write("[4] Back")
+    combatWin.setVisible(true)
+
+    while true do
+        local _, key = os.pullEvent("key")
+        if key == keys.one then
+            player.stats.strength = player.stats.strength + STAT_ALLOCATION.step
+            return true
+        elseif key == keys.two then
+            player.stats.reflex = player.stats.reflex + STAT_ALLOCATION.step
+            return true
+        elseif key == keys.three then
+            player.stats.aim = player.stats.aim + STAT_ALLOCATION.step
+            return true
+        elseif key == keys.four then
+            return false
+        end
+    end
+end
+
 -- Runs once at startup: name, pronouns, species, then stat points -
 -- everything character creation is responsible for, applied straight onto
 -- the live player object. Species is built here (not in the early player
@@ -6427,8 +6834,10 @@ while true do
                 engine.runInventoryScreen()
             elseif topBarPage == 2 then
                 engine.runMedicalScreen()
-            else
+            elseif topBarPage == 3 then
                 engine.runApparelScreen()
+            else
+                engine.runCharacterScreen()
             end
             engine.render()
         end
@@ -6444,6 +6853,9 @@ while true do
         engine.render()
     elseif key == keys.a then
         engine.runApparelScreen()
+        engine.render()
+    elseif key == keys.c then
+        engine.runCharacterScreen()
         engine.render()
     elseif key == keys.space then
         local playerDied, quitRequested = engine.tryInteract()

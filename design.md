@@ -54,11 +54,13 @@ Four corners while exploring: stats (top-left), a portrait placeholder
 (top-right, nothing draws here yet), the walkable map (bottom-left, half the
 width it used to be), and the activity log (bottom-right - see "Activity
 log"). The inventory, Medical (see "Medical"), Apparel (see "Apparel"),
-and any blurb/dialogue interaction take over the whole screen as their
-own modal window instead of sharing the four corners.
+Character (see "Leveling & talents"), and any blurb/dialogue interaction
+take over the whole screen as their own modal window instead of sharing
+the four corners.
 
-The stats pane (`engine.drawStats`) shows name, an "HP" line, level, and
-step count. HP is health/maxHealth summed across the whole body
+The stats pane (`engine.drawStats`) shows name, an "HP" line, level, an
+"XP" line (`stats.xp` / `engine.xpForNextLevel(stats.level)`), and step
+count. HP is health/maxHealth summed across the whole body
 (`engine.getBodyHealthTotals`), not `stats.health`/`max_health` - those
 are stat-block fields set once at creation and never updated (see "Stats
 & combat"), so they'd read a frozen 100/100 all game regardless of
@@ -77,13 +79,13 @@ full-screen window the inventory and dialogue use.
 
 Controls: arrow keys move, `Space` interacts with whatever's cardinally
 adjacent (see "Environment objects & symbols"), `i` opens the inventory,
-`m` opens Medical (see "Medical"), `a` opens Apparel (see "Apparel"), `q`
-quits immediately. `Tab` opens a slim top-bar strip that jumps straight
-to any of the three (`Left`/`Right` to choose, `Enter` to open) without
-needing its own dedicated key - all three exist mainly for that
-shortcut's own sake. Menus almost everywhere use digit keys `1`-`9`/`0`
-then `a`-`z` for lists longer than ten items (see "Digit/letter menus"
-below).
+`m` opens Medical (see "Medical"), `a` opens Apparel (see "Apparel"), `c`
+opens Character (see "Leveling & talents"), `q` quits immediately. `Tab`
+opens a slim top-bar strip that jumps straight to any of the four
+(`Left`/`Right` to choose, `Enter` to open) without needing its own
+dedicated key - all four exist mainly for that shortcut's own sake. Menus
+almost everywhere use digit keys `1`-`9`/`0` then `a`-`z` for lists longer
+than ten items (see "Digit/letter menus" below).
 
 ### Activity log
 
@@ -981,6 +983,99 @@ a target's flat endurance reduction (but not its resistance or worn
 coverage) entirely, for something billed as armor-piercing enough to earn
 that.
 
+## Leveling & talents
+
+XP is banked on `stats.xp`, alongside the pre-existing `stats.level`
+(`character.stats`'s default table, `character:new`) - both ride along for
+free through save/load, since `buildSaveData`/`applySaveData` already copy
+the whole `stats` table wholesale via `pairs()`.
+
+**The curve**: `XP_CURVE = { base = 100, step = 100 }`,
+`engine.xpForNextLevel(level)` returns `(level + 1) * XP_CURVE.step` - level
+0→1 costs 100, 1→2 costs 200, 2→3 costs 300, and so on. A small, clearly
+tunable local, same convention as `STAT_ALLOCATION`/
+`ATTRITION_DEATH_HEALTH`/`REFLEX_QUICK_THRESHOLD`.
+
+**`engine.grantExperience(combatant, amount)`** adds `amount` to
+`stats.xp`, then loops while it clears `xpForNextLevel(stats.level)`
+(subtracting the threshold, incrementing `level`), so one big grant (a
+quest reward, say) can chain multiple level-ups in a single call. Only the
+player has a skill/talent point economy or a display for either - a
+non-player combatant's xp/level still tracks harmlessly on its own stats
+table if ever granted any, but nothing surfaces it. Each level gained
+awards the player one skill point and one talent point (`player.
+skillPoints`/`player.talentPoints`), and the final reached level (not one
+line per level, if several were gained at once) gets logged via
+`engine.logActivity`. Bridged as `Luadventure.grantExperience`, so a
+future dialogue-choice effect (the "cleverly avoided a fight" case) can
+call it exactly like `Luadventure.logCombat` - no such branching dialogue
+exists yet to wire it up to (see "Known gaps"), but the primitive itself
+needs no dialogue-system changes to become usable the moment one does.
+
+**Sources implemented so far**: a quest's own `xpReward` field, granted at
+turn-in (`engine.interactWithPerson`, see "Quests") alongside its
+`rewardItemId`; an enemy type's own `xpReward` field on `enemyEntries`
+(test_dummy 10, raider 20, bandit 25 - the dummy cheapest since it can't
+fight back), granted per foe in `engine.showVictoryScreen`'s own kill-log
+loop once the whole scene clears.
+
+**Skill points**: `engine.spendSkillPoint()` is a single-point pick -
+`[1] Strength (+5%) [2] Reflex [3] Aim [4] Back` - applying
+`STAT_ALLOCATION.step` once (same non-compounding rule character
+creation's own five-point `runStatAllocation` uses, same constant reused
+directly, no new one needed). Spent from the Character screen (below), any
+time, not forced the instant a level-up happens.
+
+**Talents** are a real prerequisite-gated tree (`talentEntries`,
+gamedata.lua), rooted at `root` - display-only, does nothing itself, and
+is granted free to every combatant at construction (`character:new`'s
+`o.talents = { root = true }`) so a root-child's own prerequisite check
+never needs a special case for the root. `engine.hasTalent(combatant,
+talentId)` reads `combatant.talents[id] == true`; `engine.canTakeTalent`
+additionally checks the talent's own `parent` has been taken;
+`engine.takeTalent` marks it taken and applies a `statBonus` once if the
+talent declares one (same flat, non-compounding rule as everywhere else) -
+a pure `passive` talent has no mechanical field here at all, it's checked
+live by id at whichever specific call site cares (Quick Draw, below); an
+active one names a `grantsAbility` id instead, folded into `engine.
+collectAbilities` (one more source block, alongside organs/weapons/belt
+items) the moment it's taken - `part`/`itemId`/`slot` all come back nil
+for a talent-granted ability, since it isn't tied to any specific limb or
+item the way the others are.
+
+The starter tree (five talents, meant as a working proof of the structure
+rather than a final roster - see "Known gaps"): `root` → `quick_draw`
+(passive), `steady_grip` (passive, +5% aim), and `melee_specialist`
+(passive, +5% strength) as three direct children, with `melee_specialist`
+→ `flurry` (active) one level deeper - both a multi-branch root and a
+real two-deep prerequisite chain, so the tree's actual shape gets
+exercised, not just a flat list dressed up as one.
+
+**Quick Draw** hooks the exact `return "full"` at the end of `engine.
+runEquipmentAction`'s draw-candidate loop: a belt-origin candidate
+(`candidate.kind == "slot"` with `candidate.slotDescriptor.kind ==
+"belt"` - `engine.getAllSlots` confirms belt descriptors are literally
+`{kind="belt", index=i}`, distinct from an equip-slot or a
+ground-dropped-item origin) whose `weaponEntries[...].type == "ranged"`
+returns `"quick"` instead when the talent's taken - excludes ground draws,
+other-equip-slot draws, and melee weapons, matching "drawing a *ranged*
+weapon from *the belt*" literally.
+
+**Flurry** (`abilityEntries.flurry`, gamedata.lua) is three independent
+one-handed melee swings in one full action. Unlike `rev_it_up` (one hit
+roll gating a fixed five-hit combo, tied to the chain sword specifically -
+see "Weapons"), Flurry belongs to the fighter, not one weapon: it picks
+whichever equipped one-handed melee weapon/hand qualifies itself
+(`engine.pickOneHandedMeleeSlot` - silent if exactly one qualifies, a
+digit-select prompt mirroring `engine.pickLimb`'s own shape if more than
+one, nil if none do), then rolls each of its three strikes' hit chance
+independently rather than one roll gating the whole burst - three real
+swings, not one connect-or-whiff combo, a deliberate distinction from Rev
+It Up's guaranteed-or-nothing feel. `cooldown = 3`, and unlike Rev It Up
+(whose "miss" refund is the documented exception - it doesn't semantically
+activate until the blade connects), a total miss on Flurry does **not**
+refund the cooldown: three real swings happened either way.
+
 ## Inventory & equipment
 
 Full-screen modal (`inventoryWin`/`runInventoryScreen`), not the original
@@ -1202,11 +1297,14 @@ having to actually carry the item first.
 ## Quests
 
 `questEntries` - each has state-specific dialogue lines, an `isReady()`
-check, a `rewardItemId`, and a `nextQuestId` (what the giver turns into
-after turn-in; `nil` means they go quiet for good). Progress lives in
+check, a `rewardItemId`, an `xpReward` (see "Leveling & talents" -
+granted via `engine.grantExperience` alongside the item, at the same
+turn-in point), and a `nextQuestId` (what the giver turns into after
+turn-in; `nil` means they go quiet for good). Progress lives in
 `player.quests` (`"active"`/`"done"`, not-yet-taken is just absent). One
 quest exists so far: **Blunt the Blade**, offered by the Old Soldier in the
-village, ready once the test dummy's been beaten at least once.
+village, ready once the test dummy's been beaten at least once, worth 50
+XP on top of its item reward.
 
 ## Main menu
 
@@ -1271,7 +1369,10 @@ to already exist), then 5 points to spend across strength/reflex/aim, each
 worth a flat +5% (`stats.x = stats.x + points*0.05`, not compounding,
 stacking on top of whatever the chosen species already adjusted). Confirm
 is locked until all 5 points are spent; a Reset option clears an
-in-progress allocation back to zero.
+in-progress allocation back to zero. `STAT_ALLOCATION.step` (the +5%
+figure) is reused directly by the single-point skill spend a level-up
+grants later (see "Leveling & talents") - same rule, same constant, just
+one point at a time instead of five up front.
 
 ## Debug console
 
@@ -1319,6 +1420,16 @@ own list already uses. Reaches an enemy mid-fight, not just the player:
   (`debugConsole.findPart`), same as every other limb argument here.
   Reports the zone `engine.sidedZone` actually derived, for checking it
   landed right without a trip through the Apparel screen.
+- **`setLevel <level>`** - a raw poke: sets `stats.level` directly and
+  zeroes `stats.xp`, bypassing `engine.grantExperience`'s loop and
+  skill/talent point awards entirely (see "Leveling & talents"). For
+  jumping straight to a level to test late-game numbers, not a substitute
+  for `grantExperience` when the point-award flow itself is what's being
+  tested. Player-only, same reasoning as `give`.
+- **`grantExperience <amount>`** - routes through the real
+  `engine.grantExperience`, so it chains multi-level-ups and awards
+  skill/talent points exactly like a quest/kill reward would - reports
+  levels gained and current banked points. Player-only.
 - **`addStatus <limb> <status> [amount] [@target]`** - part-scoped
   statuses only (`bleed`/`poison`/`fracture` - `adrenaline` is
   character-wide, not reachable this way since every command here takes a
@@ -1503,8 +1614,18 @@ NPC-to-NPC conversation system.
 ## Known gaps / likely next steps
 
 - Portrait pane is still a placeholder - nothing draws there.
-- No leveling system - `stats.level` exists and displays, nothing changes
-  it.
+- The talent tree (`talentEntries`, see "Leveling & talents") is
+  intentionally small - five talents, meant to prove the prerequisite-gated
+  structure works end to end, not a final roster. Both mechanical shapes a
+  talent can have (`statBonus`, `grantsAbility`) are exercised at least
+  once; growing the tree from here is just adding more entries with a real
+  `parent`.
+- `engine.grantExperience` is bridged (`Luadventure.grantExperience`) so a
+  future dialogue-choice effect (rewarding a player for cleverly avoiding
+  a fight, say) can call it directly - no such branching dialogue exists
+  yet (quest accept/decline is still the only real choice any dialogue
+  offers), so this XP source is a capability, not something reachable in
+  play today.
 - Only three enemy types (test dummy, raider, bandit) and one quest
   exist - real group fights do happen now (see "Sight-triggered combat"),
   just only ever among these three.
