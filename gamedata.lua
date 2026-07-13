@@ -1408,7 +1408,7 @@ local world = {
         -- save file remembers which one made it.
         objects = {
             { kind = "item", x = 12, y = 12, itemId = "bullet" },
-            { kind = "person", x = 10, y = 8, name = "Old Soldier", questId = "test_the_dummy" },
+            { kind = "person", x = 10, y = 8, name = "Old Soldier", npcId = "old_soldier" },
             { kind = "person", x = 18, y = 20, name = "Villager",
               greeting = { "\"Nice weather we're having, isn't it?\"" } },
             { kind = "person", x = 5, y = 25, name = "Villager", greetingId = "villager_gossip" },
@@ -1480,23 +1480,60 @@ local world = {
     },
 }
 
--- A quest's own definition: dialogue for each state, its completion check,
--- and what it hands over on turn-in. `nextQuestId` is what the giver's
--- questId becomes after that (nil = nothing more, they go quiet).
+-- A quest's own definition: `name`/`description` (the latter is what the
+-- Quest log screen shows - see design.md), `offerLines` (shown once,
+-- Accept/Not now, by whoever gives `startStep`), and `steps` - a graph, not
+-- a flat list. Each step has:
+--   `npc`          - an npcId (see the village's Old Soldier object) that
+--                    must be talked to for this step to progress, or nil
+--                    for a step that advances the instant its own
+--                    `condition()` goes true, no interaction needed. The
+--                    start step always needs one - that's how a quest is
+--                    ever discovered/accepted in the first place.
+--   `condition`    - a plain no-argument boolean function - as simple or
+--                    as involved as the step actually needs.
+--   `waitingLines` - shown if you talk to `npc` before `condition()` is
+--                    true (ignored if `npc` is nil).
+--   `completeLines`- shown via the turn-in prompt when `npc` is set and
+--                    `condition()` is true; logged to the activity log one
+--                    line at a time instead when `npc` is nil and the step
+--                    auto-advances, since there's no dialogue to show it
+--                    through.
+--   `rewardItemId`/`xpReward` - optional, applied once, per step.
+--   `onComplete`   - optional no-argument function, run once this step
+--                    finishes - for a step whose real payoff is a change
+--                    to the world itself rather than loot (an NPC doing
+--                    the player a favor - unlocking a door, adding a new
+--                    object, changing what someone says from here on).
+--                    Luadventure.world is the live world table this reaches
+--                    for that.
+--   `next`         - a string (the next step id), nil (this step finishes
+--                    the whole quest), or a function() -> stepId|nil for a
+--                    branch, resolved at the moment this step completes.
+-- Quests aren't meant to loop - the convention is to let one finish and
+-- become offerable again rather than a step's `next` cycling back into its
+-- own graph - but nothing here actually enforces that.
 local questEntries = {
     test_the_dummy = {
         name = "Blunt the Blade",
+        description = "The Old Soldier wants the test dummy out in the grasslands roughed up.",
+        startStep = "beat_the_dummy",
         offerLines = {
             "\"That test dummy out back in the grasslands",
             "could use a good working-over. Rough it up",
             "for me, would you?\"",
         },
-        activeLines = { "\"Still waiting on that test dummy...\"" },
-        turnInLines = { "\"Ha! Knew you had it in you. Here, take this.\"" },
-        isReady = function() return (Luadventure.player.killLog.test_dummy or 0) > 0 end,
-        rewardItemId = "dermoregenesis_salve",
-        xpReward = 50,
-        nextQuestId = nil,
+        steps = {
+            beat_the_dummy = {
+                npc = "old_soldier",
+                condition = function() return (Luadventure.player.killLog.test_dummy or 0) > 0 end,
+                waitingLines = { "\"Still waiting on that test dummy...\"" },
+                completeLines = { "\"Ha! Knew you had it in you. Here, take this.\"" },
+                rewardItemId = "dermoregenesis_salve",
+                xpReward = 50,
+                next = nil,
+            },
+        },
     },
 }
 

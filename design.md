@@ -54,9 +54,9 @@ Four corners while exploring: stats (top-left), a portrait placeholder
 (top-right, nothing draws here yet), the walkable map (bottom-left, half the
 width it used to be), and the activity log (bottom-right - see "Activity
 log"). The inventory, Medical (see "Medical"), Apparel (see "Apparel"),
-Character (see "Leveling & talents"), and any blurb/dialogue interaction
-take over the whole screen as their own modal window instead of sharing
-the four corners.
+Character (see "Leveling & talents"), Quests (see "Quest log"), and any
+blurb/dialogue interaction take over the whole screen as their own modal
+window instead of sharing the four corners.
 
 The stats pane (`engine.drawStats`) shows name, an "HP" line, level, an
 "XP" line (`stats.xp` / `engine.xpForNextLevel(stats.level)`), and step
@@ -80,12 +80,13 @@ full-screen window the inventory and dialogue use.
 Controls: arrow keys move, `Space` interacts with whatever's cardinally
 adjacent (see "Environment objects & symbols"), `i` opens the inventory,
 `m` opens Medical (see "Medical"), `a` opens Apparel (see "Apparel"), `c`
-opens Character (see "Leveling & talents"), `q` quits immediately. `Tab`
-opens a slim top-bar strip that jumps straight to any of the four
-(`Left`/`Right` to choose, `Enter` to open) without needing its own
-dedicated key - all four exist mainly for that shortcut's own sake. Menus
-almost everywhere use digit keys `1`-`9`/`0` then `a`-`z` for lists longer
-than ten items (see "Digit/letter menus" below).
+opens Character (see "Leveling & talents"), `j` opens Quests (see "Quest
+log"), `q` quits immediately. `Tab` opens a slim top-bar strip that jumps
+straight to any of the five (`Left`/`Right` to choose, `Enter` to open)
+without needing its own dedicated key - all five exist mainly for that
+shortcut's own sake. Menus almost everywhere use digit keys `1`-`9`/`0`
+then `a`-`z` for lists longer than ten items (see "Digit/letter menus"
+below).
 
 ### Activity log
 
@@ -242,9 +243,9 @@ Each location has an `objects` list. `findObjectAt` resolves collisions,
 | `*` | item | Auto-collected the moment you step onto it (`collectItem`) - logged, no prompt |
 | `-` / `\|` | door | Horizontal/vertical; see below - opens/closes without a prompt either, always a zone boundary regardless of state |
 | `:` | window | Blocks movement like a wall, but never a zone boundary - glass merges whatever's on either side into one visible zone permanently |
-| `!` | person (quest) | Quest not yet taken, or done and ready to hand in |
-| `?` | person (quest) | Quest active, not yet ready to turn in |
-| `0` | person | Flavor-only NPC, or a quest giver with nothing left to give |
+| `!` | person (quest) | A quest step this NPC (`npcId`) owns is offerable or ready to turn in - see "Quests" |
+| `?` | person (quest) | A quest step this NPC owns is in progress, not yet ready to turn in |
+| `0` | person | Flavor-only NPC, or nothing actionable from this NPC right now |
 | `E` | enemy | Fight starts the moment it's aware of you (see "Sight-triggered combat") - walking into it directly still works too. `enemyType` (defaulting to the test dummy) says which NPC type actually spawns - see "NPCs" |
 | `$` | save point | Save / Load / Quit Game (see "Save & load") |
 
@@ -1030,9 +1031,10 @@ call it exactly like `Luadventure.logCombat` - no such branching dialogue
 exists yet to wire it up to (see "Known gaps"), but the primitive itself
 needs no dialogue-system changes to become usable the moment one does.
 
-**Sources implemented so far**: a quest's own `xpReward` field, granted at
-turn-in (`engine.interactWithPerson`, see "Quests") alongside its
-`rewardItemId`; an enemy type's own `xpReward` field on `enemyEntries`
+**Sources implemented so far**: a quest step's own `xpReward` field,
+granted on that step's completion (`engine.completeQuestStep`, see
+"Quests") alongside its `rewardItemId`; an enemy type's own `xpReward`
+field on `enemyEntries`
 (test_dummy 10, raider 20, bandit 25 - the dummy cheapest since it can't
 fight back), granted per foe in `engine.showVictoryScreen`'s own kill-log
 loop once the whole scene clears.
@@ -1321,15 +1323,144 @@ having to actually carry the item first.
 
 ## Quests
 
-`questEntries` - each has state-specific dialogue lines, an `isReady()`
-check, a `rewardItemId`, an `xpReward` (see "Leveling & talents" -
-granted via `engine.grantExperience` alongside the item, at the same
-turn-in point), and a `nextQuestId` (what the giver turns into after
-turn-in; `nil` means they go quiet for good). Progress lives in
-`player.quests` (`"active"`/`"done"`, not-yet-taken is just absent). One
-quest exists so far: **Blunt the Blade**, offered by the Old Soldier in the
-village, ready once the test dummy's been beaten at least once, worth 50
-XP on top of its item reward.
+A quest (`questEntries`) is a `name`/`description` (the latter is what the
+Quest log screen shows - see below) plus a `startStep` and a `steps` table -
+a graph, not a flat list, since real content wants multi-beat chains that
+can branch, not just one boolean condition per quest the way this used to
+work. Each step:
+
+- **`npc`** - an `npcId` (see below) that has to be talked to for this step
+  to progress, or `nil` for a step that advances the instant its own
+  `condition()` goes true, no interaction needed ("moves on right away").
+  The **start step** always has one - that's the only way a quest is ever
+  discovered or accepted in the first place; only a step *after* the first
+  can omit it.
+- **`condition`** - a plain no-argument boolean function, exactly today's
+  `isReady` idiom just scoped to one step instead of the whole quest - "as
+  simple as a comparison, or very complex," reading whatever state it wants
+  (`Luadventure.player.killLog`/`spareLog`/`globalTags`/stats/inventory,
+  already bridged - see "Leveling & talents"/"NPCs"). This is also what
+  keeps the mechanism ready for a future faction-reputation number: a step
+  reading `Luadventure.player.reputation.someFaction` needs no engine
+  changes at all, the same way today's steps already read `killLog` -
+  reputation itself isn't built yet, just left room for.
+- **`waitingLines`** - shown if the player talks to `npc` before
+  `condition()` is true (meaningless if `npc` is nil).
+- **`completeLines`** - shown as the turn-in prompt when `npc` is set and
+  `condition()` is true; logged to the activity log one line at a time
+  instead (via `engine.logActivity`/`engine.dialogue`) when `npc` is nil
+  and the step auto-advances, since there's no dialogue interaction to
+  show it through.
+- **`rewardItemId`/`xpReward`** - optional, applied once, per step (not
+  once per whole quest anymore).
+- **`onComplete`** - optional no-argument function, run once when this step
+  finishes, independent of (and in addition to) the reward above - for a
+  step whose real payoff isn't loot at all, but a change to the world
+  itself: an NPC doing the player a favor (unlocking a door, adding an
+  object, changing what someone says from here on). Reaches
+  `Luadventure.world` (a live reference to the same `world` table
+  `engine.buildWorldSnapshot`/`applyWorldSnapshot` already treat as the
+  source of truth - bridged the same way `Luadventure.player` already is)
+  directly - deliberately the only new bridge this needed, rather than a
+  bespoke "world-editing API" for cases nothing's asked for yet.
+- **`next`** - a string (the next step id), `nil` (this step finishes the
+  whole quest), or a `function() -> stepId|nil` for a branch, resolved at
+  the exact moment this step completes - the entire branching mechanism is
+  this one field.
+
+Quests generally shouldn't loop back on themselves - the convention is to
+let a quest finish and become offerable again rather than a step's `next`
+cycling into its own graph - but this is a preference, not something the
+engine checks for or blocks; `next` is free to point anywhere, including
+backward, if a real case ever calls for it.
+
+**Progress** (`player.quests[questId]`) is still a single string: absent
+(not taken), a valid step id (in progress, currently at that step), or
+`"done"` (`"done"` is reserved and can never be a real step id - same
+convention as `"none"` meaning an empty equip slot elsewhere in this
+codebase). No save-code changes were needed for this - `buildSaveData`/
+`applySaveData`'s existing `player.quests` copy-loops are opaque-string
+passthroughs regardless of what the string means.
+
+**`npcId` replaces the old `questId` on a person map object.** Previously a
+person object *held* the quest it was giving (`obj.questId`), rewritten to
+`nextQuestId` on turn-in - that breaks down the moment a chain's steps want
+*different* NPCs, since one object can't hold more than one quest's state.
+Instead, any person object that matters to quest content gets a stable
+`npcId` (its own identity, independent of which quest or step currently
+cares about it - e.g. the village's Old Soldier is `npcId = "old_soldier"`),
+and a step's `npc` field references that same id.
+`engine.findActionableQuestStep(npcId)` is the reverse lookup both
+`engine.interactWithPerson` and `engine.getObjectGlyph`'s person branch use
+instead of reading a field the object carries directly: it walks
+`questEntries`, and for each quest checks whether `npcId` owns the start
+step (not yet taken - "offer") or the player's current step (in progress -
+"waiting" or "turnin", depending on `condition()`); returns `nil` if
+nothing's actionable, in which case the object just falls back to its
+plain `greeting`/`greetingId` flavor line, same as any non-quest NPC. An
+`npcId` field round-trips through save/load for free, exactly like
+`questId` used to, since `engine.buildWorldSnapshot`/`applyWorldSnapshot`
+already snapshot every location's whole `objects` list wholesale.
+
+`engine.completeQuestStep(questId, quest, stepId, step)` is where a step
+actually finishes - applies the reward, calls `onComplete` if present,
+resolves `next`, and either moves `player.quests[questId]` to the next
+step or marks it `"done"`. Shared by both the NPC turn-in path
+(`engine.interactWithPerson`) and the auto-advance checker below, so
+reward/effect/branch logic lives in exactly one place regardless of which
+path completed a step.
+
+**Auto-advance** (`engine.checkQuestProgress`) is what makes a no-`npc`
+step actually move on right away: it walks every in-progress quest, and
+while the current step has no `npc` and its `condition()` is already true,
+completes it (logging `completeLines` to the activity log instead of a
+dialogue prompt) and re-checks the new current step - so several
+already-satisfied free steps in a row resolve in one pass, not one per
+action. This is called from the main loop (luadventure.lua, right
+alongside every existing `engine.render()` call, not inside `render()`
+itself) - `engine.render()` is a pure draw function
+(`drawStats`/`drawSprite`/`drawMain`/`drawLog`, no state mutation
+anywhere else in it) and the codebase is deliberate about keeping it that
+way (see "Combat deliberately never calls `drawStats()`..." above), so
+`checkQuestProgress` sits next to `render()`'s call sites rather than
+inside it. The main loop already calls `render()` after *every*
+state-changing action (screens, interact, movement, the debug console),
+so this one set of call sites covers everything, the same idiom
+`engine.checkAwareness` already established for "recheck a background
+condition after anything that could matter."
+
+**Old-save backward compatibility**: no migration shim. An old save with
+`player.quests.test_the_dummy = "active"` (the previous system's only
+state string) loads fine - the load loop doesn't validate values. At
+runtime, `"active"` simply isn't a valid step id;
+`findActionableQuestStep`/`checkQuestProgress` both guard `quest.steps[state]`
+for `nil` and skip that quest entirely if so, so an old save's quest just
+goes inert (glyph `"0"`, no interaction offered, no auto-advance) rather
+than erroring. This matches this project's existing backward-compat bar
+(`data.spareLog or {}` - "default a missing field," not "upgrade an old
+value's meaning") - deliberate, not an oversight.
+
+One quest exists so far: **Blunt the Blade** (`test_the_dummy`), a single
+step (`beat_the_dummy`) offered by the Old Soldier (`npcId = "old_soldier"`)
+in the village, ready once the test dummy's been beaten at least once,
+worth 50 XP on top of its item reward, and completing the whole quest
+(`next = nil`).
+
+## Quest log
+
+A 5th top-bar page (`TOP_BAR_PAGES` gains `"Quests"`, hotkey `j` for
+Journal), reachable the same way Inventory/Medical/Apparel/Character
+already are. Modeled directly on the Character screen (the newest, most
+similar two-pane list+detail full-screen modal): left half
+(`engine.collectQuestLog`) lists every quest the player has ever started
+(skips ones never taken - nothing to show), green once `"done"`, white
+while still in progress; right half shows the selected quest's own
+`description`, plus a rough "what's next" hint - the current step's own
+`waitingLines` first line while in progress (an in-progress auto-advance
+step just reads "In progress." instead, since there's no dialogue line
+written for one to borrow), or "Complete." once done. Read-only - unlike
+Character's talent-taking, there's nothing to pick here, just navigation
+(`engine.runQuestLogScreen`, closes on `j` again).
 
 ## Main menu
 
@@ -1455,6 +1586,12 @@ own list already uses. Reaches an enemy mid-fight, not just the player:
   `engine.grantExperience`, so it chains multi-level-ups and awards
   skill/talent points exactly like a quest/kill reward would - reports
   levels gained and current banked points. Player-only.
+- **`setQuestStep <questId> <stepId>`** - a raw poke, the direct analog to
+  `setLevel`: sets `player.quests[questId]` straight to `stepId` (or
+  `"done"`), bypassing offer/condition/reward/`onComplete` logic entirely
+  (see "Quests"). What makes a branching path's later steps actually
+  testable without playing through everything ahead of them for real.
+  Player-only.
 - **`addStatus <limb> <status> [amount] [@target]`** - part-scoped
   statuses only (`bleed`/`poison`/`fracture` - `adrenaline` is
   character-wide, not reachable this way since every command here takes a
@@ -1654,6 +1791,13 @@ NPC-to-NPC conversation system.
 - Only three enemy types (test dummy, raider, bandit) and one quest
   exist - real group fights do happen now (see "Sight-triggered combat"),
   just only ever among these three.
+- The step-based quest system (see "Quests") is only exercised by one
+  real, single-step quest - multi-step chains, branching `next` functions,
+  auto-advance steps, and `onComplete` world effects were all verified
+  live with temporary test content (a second NPC, a small branching test
+  quest) that was removed once confirmed working, so none of that is
+  reachable in play yet. The mechanism itself is proven end to end; real
+  multi-step content is just future work.
 - Pronouns are consumed by name/`{{subject}}`/`{{object}}` templating;
   `UNSIGHTLY` by one hardcoded dialogue check. Neither affects anything
   beyond that yet - social mechanics (haggling, reactions) wait on NPCs and

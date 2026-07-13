@@ -1448,14 +1448,14 @@ function engine.getObjectGlyph(obj)
     elseif obj.kind == "window" then
         return ":"
     elseif obj.kind == "person" then
-        if not obj.questId then
+        if not obj.npcId then
             return "0"
         end
-        local quest = questEntries[obj.questId]
-        if player.quests[obj.questId] == "active" then
-            return quest.isReady() and "!" or "?"
+        local found = engine.findActionableQuestStep(obj.npcId)
+        if not found then
+            return "0" -- nothing actionable right now - flavor-only, or a quest giver with nothing left to give
         end
-        return "!" -- not yet taken
+        return found.mode == "waiting" and "?" or "!" -- "offer"/"turnin" both read as "!"
     end
     return "?"
 end
@@ -1695,7 +1695,7 @@ end
 -- on top of whatever's already there - rather than needing to coexist
 -- with it.
 local pageBarWin = window.create(term.current(), 1, 1, screenW, 2)
-local TOP_BAR_PAGES = { "Inventory", "Medical", "Apparel", "Character" }
+local TOP_BAR_PAGES = { "Inventory", "Medical", "Apparel", "Character", "Quests" }
 local topBarPage = 1
 
 function engine.drawTopBar()
@@ -3217,6 +3217,117 @@ function engine.runCharacterScreen()
     end
 end
 
+-- Every quest the player has ever taken (skips ones never accepted at
+-- all - nothing to show for those), one row per {questId, quest, state} -
+-- state is either a step id (in progress) or "done". Plain pairs() order
+-- over questEntries, same as engine.findActionableQuestStep - fine given
+-- how few quests exist so far.
+function engine.collectQuestLog()
+    local rows = {}
+    for questId, quest in pairs(questEntries) do
+        local state = player.quests[questId]
+        if state then
+            table.insert(rows, { questId = questId, quest = quest, state = state })
+        end
+    end
+    return rows
+end
+
+local QUEST_LOG_LIST_TOP = 3 -- row 1: title, row 2: blank, row 3: list
+
+-- Same two-pane layout Character/Medical/Apparel/Inventory all use. Left
+-- half lists every started quest (engine.collectQuestLog), green once
+-- done, white while still in progress; right half is the selected quest's
+-- own description, plus a rough "what's next" hint - the current step's
+-- own waitingLines first line while in progress (only ever set on an
+-- npc-gated step; an in-progress auto-advance step just reads "In
+-- progress." since there's no dialogue line written for it to borrow) or
+-- "Complete." once state is "done". Read-only - nothing to pick here.
+function engine.drawQuestLogScreen(rows, selection, scrollOffset)
+    inventoryWin.setVisible(false)
+    inventoryWin.clear()
+
+    local leftW = math.floor(screenW / 2)
+    local rightX = leftW + 2
+
+    inventoryWin.setCursorPos(1, 1)
+    inventoryWin.write("Quests")
+
+    local visibleCount = screenH - 1 - QUEST_LOG_LIST_TOP + 1
+    for i = 1, visibleCount do
+        local entry = rows[scrollOffset + i]
+        if entry then
+            local marker = (scrollOffset + i == selection) and ">" or " "
+            inventoryWin.setCursorPos(1, QUEST_LOG_LIST_TOP + i - 1)
+            if entry.state == "done" then
+                inventoryWin.setTextColor(colors.green)
+            end
+            inventoryWin.write(marker .. entry.quest.name:sub(1, 20))
+            inventoryWin.setTextColor(colors.white)
+        end
+    end
+
+    local selected = rows[selection]
+    if selected then
+        inventoryWin.setCursorPos(rightX, 2)
+        inventoryWin.write(selected.quest.name)
+        local row = 3
+        row = row + engine.writeWrapped(inventoryWin, rightX, row, selected.quest.description)
+        row = row + 1
+        if selected.state == "done" then
+            row = row + engine.writeWrapped(inventoryWin, rightX, row, "Complete.")
+        else
+            local step = selected.quest.steps[selected.state]
+            local hint = step and step.waitingLines and step.waitingLines[1]
+            row = row + engine.writeWrapped(inventoryWin, rightX, row, hint or "In progress.")
+        end
+    end
+
+    inventoryWin.setCursorPos(1, screenH)
+    inventoryWin.write("[J] close")
+
+    inventoryWin.setVisible(true)
+end
+
+-- Blocks until the player closes Quests (J again), same modal shape as
+-- Character/Medical/Apparel/Inventory - read-only, so no Enter action like
+-- Character's talent-taking, just navigation.
+function engine.runQuestLogScreen()
+    local rows = engine.collectQuestLog()
+    local selection = 1
+    local scrollOffset = 0
+    local visibleCount = screenH - 1 - QUEST_LOG_LIST_TOP + 1
+
+    local function redraw()
+        rows = engine.collectQuestLog()
+        selection = math.min(math.max(1, #rows), selection)
+        scrollOffset = engine.clampInventoryScroll(selection, scrollOffset, #rows, visibleCount)
+        engine.drawQuestLogScreen(rows, selection, scrollOffset)
+    end
+
+    redraw()
+
+    while true do
+        local _, key = os.pullEvent("key")
+
+        if key == keys.j then
+            return
+        elseif key == keys.up then
+            selection = math.max(1, selection - 1)
+            redraw()
+        elseif key == keys.down then
+            selection = math.min(math.max(1, #rows), selection + 1)
+            redraw()
+        else
+            local index = keyToNumber[key]
+            if index and rows[index] then
+                selection = index
+                redraw()
+            end
+        end
+    end
+end
+
 -- Window writes don't wrap on their own - text just runs past the edge and
 -- gets silently clipped. Writes `text` at (x, y) using engine.wrapText, and
 -- returns how many rows it used so the caller can stack whatever comes
@@ -4012,6 +4123,7 @@ end
 -- inside a function body that doesn't run until real gameplay, well after
 -- this point.
 Luadventure.player = player
+Luadventure.world = world
 Luadventure.logActivity = engine.logActivity
 Luadventure.logCombat = engine.logCombat
 Luadventure.dialogue = engine.dialogue
@@ -5511,38 +5623,128 @@ function engine.showInteraction(lines, options)
     end
 end
 
+-- Whether npcId has anything actionable to offer right now, across every
+-- quest - not just whichever one a map object happens to be holding
+-- (nothing holds a quest directly anymore - see engine.getObjectGlyph/
+-- engine.interactWithPerson below, and "Quests" in the design doc for why
+-- npcId replaced a person object's old questId field). Walks
+-- questEntries; for a quest not yet taken, npcId only matters if it's the
+-- one who gives the start step; for one in progress, only if npcId owns
+-- the step the player's actually on right now - anyone else's dialogue
+-- for that quest is simply not relevant to this NPC at this moment. A
+-- `nil` `player.quests[questId]` step id (an invalid/old-save value - see
+-- "Quests") is treated the same as "nothing here," not an error. Returns
+-- nil if nothing matches at all, so the caller falls back to a plain
+-- greeting.
+function engine.findActionableQuestStep(npcId)
+    for questId, quest in pairs(questEntries) do
+        local state = player.quests[questId]
+        if state == nil then
+            if quest.steps[quest.startStep].npc == npcId then
+                return { questId = questId, quest = quest, mode = "offer" }
+            end
+        elseif state ~= "done" then
+            local step = quest.steps[state]
+            if step and step.npc == npcId then
+                return {
+                    questId = questId, quest = quest, stepId = state, step = step,
+                    mode = step.condition() and "turnin" or "waiting",
+                }
+            end
+        end
+    end
+    return nil
+end
+
+-- Finishes one step: its own reward (identical rules to the old flat
+-- per-quest reward, just per-step now), then its onComplete world-side
+-- effect if it has one (see "Quests" - Luadventure.world is what that
+-- reaches for), then resolves `next` (calling it if it's a function - the
+-- entire branching mechanism lives in this one line) into either another
+-- step id or nothing, in which case the whole quest is done. Shared by
+-- the NPC turn-in path (engine.interactWithPerson) and the auto-advance
+-- checker (engine.checkQuestProgress) below, so this reward/effect/branch
+-- logic exists in exactly one place regardless of which path completed a
+-- step.
+function engine.completeQuestStep(questId, quest, stepId, step)
+    if step.rewardItemId then
+        table.insert(player.inventory, step.rewardItemId)
+    end
+    if step.xpReward then
+        engine.grantExperience(player, step.xpReward)
+    end
+    if step.onComplete then
+        step.onComplete()
+    end
+
+    local nextStep = step.next
+    if type(nextStep) == "function" then
+        nextStep = nextStep()
+    end
+
+    if nextStep then
+        player.quests[questId] = nextStep
+    else
+        player.quests[questId] = "done"
+        engine.logActivity(quest.name .. ": quest complete!")
+    end
+end
+
+-- Advances every in-progress quest currently sitting on a step that needs
+-- no NPC at all ("moves on right away") once its own condition() actually
+-- goes true - nothing else would ever notice, since there's no
+-- interaction to trigger it. Called from the main loop right alongside
+-- engine.render() (see the loop itself), the same "recheck after
+-- anything that could matter" idiom engine.checkAwareness already uses,
+-- rather than folding a state check into engine.render() itself (which is
+-- otherwise a pure draw function - see its own comment). Reassigning an
+-- existing player.quests entry's value mid-pairs()-iteration is safe in
+-- Lua (only adding/removing keys during iteration isn't, and this does
+-- neither); loops per-quest so two or more already-satisfied free steps
+-- in a row resolve in one pass instead of one per action.
+function engine.checkQuestProgress()
+    for questId, state in pairs(player.quests) do
+        local quest = questEntries[questId]
+        local step = state ~= "done" and quest.steps[state]
+        while step and not step.npc and step.condition() do
+            if step.completeLines then
+                for _, line in ipairs(step.completeLines) do
+                    engine.logActivity(engine.dialogue(line, player))
+                end
+            end
+            engine.completeQuestStep(questId, quest, state, step)
+            state = player.quests[questId]
+            step = state ~= "done" and quest.steps[state]
+        end
+    end
+end
+
 -- A pure lore/flavor person just shows their greeting. A quest giver either
--- offers the quest (not yet taken), nudges you about it (active, not
--- ready), or turns it in (active and ready) - turning in hands over the
--- reward and moves the giver on to nextQuestId, same "! -> ? -> ! -> 0 (or
--- !)" cycle every time.
+-- offers whichever quest's start step they own (not yet taken), nudges the
+-- player about the step they're actually on (in progress, not ready), or
+-- turns that step in (in progress, ready) - turning in hands over the
+-- step's own reward/onComplete and moves on to whatever `next` resolves to
+-- (see engine.completeQuestStep). Sourced from engine.findActionableQuestStep
+-- rather than a field this object holds directly, so different steps of
+-- the same quest can belong to different NPCs.
 function engine.interactWithPerson(obj)
-    if not obj.questId then
+    local found = obj.npcId and engine.findActionableQuestStep(obj.npcId)
+    if not found then
         local greeting = obj.greetingId and dynamicGreetings[obj.greetingId]() or obj.greeting
         engine.showInteraction(greeting or { "\"...\"" }, { "Leave" })
         return
     end
 
-    local quest = questEntries[obj.questId]
-    local state = player.quests[obj.questId]
-
-    if state == "active" and quest.isReady() then
-        engine.showInteraction(quest.turnInLines, { "Continue" })
-        if quest.rewardItemId then
-            table.insert(player.inventory, quest.rewardItemId)
-        end
-        if quest.xpReward then
-            engine.grantExperience(player, quest.xpReward)
-        end
-        player.quests[obj.questId] = "done"
-        obj.questId = quest.nextQuestId
-    elseif state == "active" then
-        engine.showInteraction(quest.activeLines, { "Leave" })
-    else
-        local choice = engine.showInteraction(quest.offerLines, { "Accept", "Not now" })
+    if found.mode == "offer" then
+        local choice = engine.showInteraction(found.quest.offerLines, { "Accept", "Not now" })
         if choice == 1 then
-            player.quests[obj.questId] = "active"
+            player.quests[found.questId] = found.quest.startStep
         end
+    elseif found.mode == "turnin" then
+        engine.showInteraction(found.step.completeLines, { "Continue" })
+        engine.completeQuestStep(found.questId, found.quest, found.stepId, found.step)
+    else
+        engine.showInteraction(found.step.waitingLines, { "Leave" })
     end
 end
 
@@ -6467,6 +6669,25 @@ debugConsole.commands = {
             .. ", " .. player.skillPoints .. " skill pt, " .. player.talentPoints .. " talent pt)"
     end,
 
+    -- setQuestStep <questId> <stepId> - a raw poke, the direct analog to
+    -- setLevel: sets player.quests[questId] straight to stepId (or "done"),
+    -- bypassing offer/condition/reward/onComplete logic entirely. This is
+    -- what makes a branching path's later steps actually testable without
+    -- playing through everything ahead of them for real. Player-only, same
+    -- reasoning as `give` - quests are tracked on the player, not an enemy.
+    setQuestStep = function(args)
+        local questId, stepId = args[1], args[2]
+        local quest = questId and questEntries[questId]
+        if not quest then
+            return "Usage: setQuestStep <questId> <stepId> - unknown quest: " .. tostring(questId)
+        end
+        if stepId ~= "done" and not (stepId and quest.steps[stepId]) then
+            return "Usage: setQuestStep <questId> <stepId> - unknown step: " .. tostring(stepId)
+        end
+        player.quests[questId] = stepId
+        return "Quest " .. questId .. " set to " .. stepId
+    end,
+
     -- addStatus <limb> <status> [amount] [@<target>] - only part-scoped
     -- statuses (bleed, poison, fracture) - character-wide ones
     -- (adrenaline) aren't reachable this way, since every command here
@@ -6529,7 +6750,7 @@ debugConsole.commands = {
     end,
 
     help = function()
-        return "setHealth <limb> <hp> [@t] | give <item> [n] | wear/unwear <item> | attachLimb <parentLimb> <slot> <template> [@t] | setLevel <n> | grantExperience <amt> | addStatus <limb> <status> [n] [@t] | clearStatus <limb> <status|all> [@t] | targets | exit"
+        return "setHealth <limb> <hp> [@t] | give <item> [n] | wear/unwear <item> | attachLimb <parentLimb> <slot> <template> [@t] | setLevel <n> | grantExperience <amt> | setQuestStep <questId> <stepId> | addStatus <limb> <status> [n] [@t] | clearStatus <limb> <status|all> [@t] | targets | exit"
     end,
 }
 
@@ -6842,6 +7063,7 @@ if menuChoice == "new" then
     loc.playerZone = loc.tileZone[player.gridX] and loc.tileZone[player.gridX][player.gridY]
     engine.recomputeVisibleZones(loc)
 end
+engine.checkQuestProgress()
 engine.render()
 
 local topBarOpen = false
@@ -6854,6 +7076,7 @@ while true do
 
     if debugConsole.enabled and debugConsole.openKeys[key] then
         debugConsole.run()
+        engine.checkQuestProgress()
         engine.render()
     elseif topBarOpen then
         if key == keys.tab then
@@ -6875,9 +7098,12 @@ while true do
                 engine.runMedicalScreen()
             elseif topBarPage == 3 then
                 engine.runApparelScreen()
-            else
+            elseif topBarPage == 4 then
                 engine.runCharacterScreen()
+            else
+                engine.runQuestLogScreen()
             end
+            engine.checkQuestProgress()
             engine.render()
         end
     elseif key == keys.tab then
@@ -6886,21 +7112,30 @@ while true do
         engine.drawTopBar()
     elseif key == keys.i then
         engine.runInventoryScreen()
+        engine.checkQuestProgress()
         engine.render()
     elseif key == keys.m then
         engine.runMedicalScreen()
+        engine.checkQuestProgress()
         engine.render()
     elseif key == keys.a then
         engine.runApparelScreen()
+        engine.checkQuestProgress()
         engine.render()
     elseif key == keys.c then
         engine.runCharacterScreen()
+        engine.checkQuestProgress()
+        engine.render()
+    elseif key == keys.j then
+        engine.runQuestLogScreen()
+        engine.checkQuestProgress()
         engine.render()
     elseif key == keys.space then
         local playerDied, quitRequested = engine.tryInteract()
         if playerDied or quitRequested then
             break
         end
+        engine.checkQuestProgress()
         engine.render()
     else
         local dir = keyToDir[key]
@@ -6909,6 +7144,7 @@ while true do
             if playerDied or quitRequested then
                 break
             end
+            engine.checkQuestProgress()
             engine.render()
         end
     end
