@@ -546,6 +546,22 @@ local itemEntries = {
         covers = { "upper_body", "lower_body" },
         coverage = { bludgeoning = 2, piercing = 1, slashing = 1 },
     },
+    -- The undersuit real armor is meant to be worn over - both go on the
+    -- inner layer, same as padded_shirt (and so can't stack with it, or
+    -- each other, over any area they share). `pelvis` sits in the torso
+    -- zone (see COVERAGE_AREAS), not legs, so the bottom half's own
+    -- coverage there also nudges the torso's average up slightly - a
+    -- long underlayer riding up to the waist plausibly does that too.
+    ballistic_underlayer_top = {
+        name = "Ballistic Underlayer Top", bulk = 1, layer = "inner",
+        covers = { "upper_body", "lower_body", "upper_arm", "lower_arm" },
+        coverage = { bludgeoning = 1, piercing = 2, slashing = 1 },
+    },
+    ballistic_underlayer_bottom = {
+        name = "Ballistic Underlayer Bottom", bulk = 1, layer = "inner",
+        covers = { "upper_leg", "lower_leg", "pelvis" },
+        coverage = { bludgeoning = 1, piercing = 2, slashing = 1 },
+    },
     ballistic_vest = {
         name = "Ballistic Vest", bulk = 2, layer = "outer",
         covers = { "upper_body" },
