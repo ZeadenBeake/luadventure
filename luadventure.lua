@@ -212,6 +212,15 @@ end
 -- parent's zone instead, which is already sided by the time a child
 -- attaches under it. Anything unpaired (head, torso, tail) has no
 -- left_/right_ to find anywhere in that chain and comes back unchanged.
+--
+-- A MULTI_LIMBED body's second arm pair (left_arm_2/right_arm_2 - see
+-- partEntries' subSlotDefs on the torso) also carries its own "_2" suffix
+-- through, all the way down to that pair's own hand (left_hand_2) - without
+-- this, both arm pairs would collapse onto the exact same "left_arm" zone
+-- and a single sleeve would end up protecting two unrelated arms at once.
+-- A slot's own suffix wins; a child with none of its own (hand, under
+-- left_arm_2) inherits its parent's.
+--
 -- Called from both engine.attachPart and engine.deserializeBodyPart, so a
 -- loaded save re-derives the same zone a fresh attach would rather than
 -- trusting a stored one (see engine.serializeBodyPart's own note on that).
@@ -221,10 +230,11 @@ function engine.sidedZone(baseZone, slotName, parentZone)
     end
     local side = slotName:match("^(left)_") or slotName:match("^(right)_")
         or (parentZone and (parentZone:match("^(left)_") or parentZone:match("^(right)_")))
-    if side then
-        return side .. "_" .. baseZone
+    if not side then
+        return baseZone
     end
-    return baseZone
+    local suffix = slotName:match("_(%d+)$") or (parentZone and parentZone:match("_(%d+)$"))
+    return side .. "_" .. baseZone .. (suffix and ("_" .. suffix) or "")
 end
 
 -- Attaches a whole new part into one of a parent part's sub-slots (a hand into
@@ -575,11 +585,15 @@ end
 
 -- Gives a child slot a side-qualified label when its parent has one, so e.g.
 -- the "hand" slot under "left_arm" is reported as "left_hand" rather than two
--- indistinguishable "hand" entries.
+-- indistinguishable "hand" entries. A parent's own numbered-pair suffix (a
+-- MULTI_LIMBED body's left_arm_2 - see engine.sidedZone) carries through the
+-- same way, so that pair's hand becomes "left_hand_2" rather than colliding
+-- with the first pair's "left_hand".
 function engine.partLabel(parentLabel, slotName)
     local side = parentLabel:match("^(left)_") or parentLabel:match("^(right)_")
     if side and not slotName:match("^left_") and not slotName:match("^right_") then
-        return side .. "_" .. slotName
+        local suffix = parentLabel:match("_(%d+)$")
+        return side .. "_" .. slotName .. (suffix and ("_" .. suffix) or "")
     end
     return slotName
 end
@@ -835,7 +849,10 @@ end
 -- engine.getAreaCoverage takes, passed straight through.
 function engine.getCoverage(combatant, part, damageType, layer)
     local zone = engine.getPartZone(part)
-    if not zone then
+    -- A zone COVERAGE_AREAS doesn't declare (a MULTI_LIMBED body's second
+    -- arm pair, say, before any content actually adds one) is uncovered by
+    -- definition, same as having no zone at all - not a crash.
+    if not zone or not COVERAGE_AREAS[zone] then
         return 0
     end
     local total, count = 0, 0
@@ -859,7 +876,7 @@ end
 function engine.getPartCoveringItems(combatant, part, layer)
     local zone = engine.getPartZone(part)
     local items = {}
-    if not zone then
+    if not zone or not COVERAGE_AREAS[zone] then
         return items
     end
     local areas = {}
@@ -5985,10 +6002,10 @@ debugConsole.commands = {
     end,
 
     -- wear <itemId> - straight onto player.worn, bypassing
-    -- engine.canWearItem's own layer/area overlap check entirely (nothing
-    -- in the game actually offers a "wear it" action yet - see the
-    -- Apparel screen's own doc comment - so this is currently the only
-    -- way to test it against anything but an empty coverage set).
+    -- engine.canWearItem's own layer/area overlap check entirely - same
+    -- bypass-the-normal-rule philosophy as every other debug command,
+    -- alongside the real wear/unwear action Inventory's own Enter key
+    -- offers (see "Inventory & equipment").
     wear = function(args)
         if not args[1] or not itemEntries[args[1]] or not itemEntries[args[1]].layer then
             return "Usage: wear <itemId> - unknown apparel: " .. tostring(args[1])
@@ -6011,6 +6028,35 @@ debugConsole.commands = {
             end
         end
         return "Not wearing: " .. args[1]
+    end,
+
+    -- attachLimb <parentLimb> <slotName> <templateId> [@<target>] -
+    -- bypasses engine.attachPart's own tag-lock check entirely (same
+    -- philosophy as wear bypassing engine.canWearItem), so a slot that's
+    -- normally locked behind an organ (left_arm_2/right_arm_2, behind
+    -- MULTI_LIMBED - see spinal_graft) can be exercised without actually
+    -- installing one. Reports the zone engine.sidedZone actually derived,
+    -- so this doubles as the quickest way to check it landed right.
+    attachLimb = function(args)
+        local body, err, rest = debugConsole.extractTarget(args)
+        if err then
+            return err
+        end
+        if not rest[1] or not rest[2] or not rest[3] then
+            return "Usage: attachLimb <parentLimb> <slotName> <templateId> [@<target>]"
+        end
+        local parent = debugConsole.findPart(rest[1], body)
+        if not parent then
+            return "No such limb: " .. rest[1]
+        end
+        if not partEntries[rest[3]] then
+            return "Unknown part template: " .. rest[3]
+        end
+        local child = engine.instantiatePart(rest[3])
+        child.parent = parent
+        child.zone = engine.sidedZone(child.zone, rest[2], parent.zone)
+        parent.subSlots[rest[2]] = child
+        return "Attached " .. rest[3] .. " as " .. rest[1] .. "." .. rest[2] .. " (zone: " .. tostring(child.zone) .. ")"
     end,
 
     -- addStatus <limb> <status> [amount] [@<target>] - only part-scoped
@@ -6075,7 +6121,7 @@ debugConsole.commands = {
     end,
 
     help = function()
-        return "setHealth <limb> <hp> [@t] | give <item> [n] | wear/unwear <item> | addStatus <limb> <status> [n] [@t] | clearStatus <limb> <status|all> [@t] | targets | exit"
+        return "setHealth <limb> <hp> [@t] | give <item> [n] | wear/unwear <item> | attachLimb <parentLimb> <slot> <template> [@t] | addStatus <limb> <status> [n] [@t] | clearStatus <limb> <status|all> [@t] | targets | exit"
     end,
 }
 

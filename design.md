@@ -512,6 +512,22 @@ instead - real one-sided coverage can't be expressed any other way, and
 trying to teach one item entry "which side you put it on" would need a
 whole extra picker for something two item entries already say for free.
 
+A MULTI_LIMBED body's second arm pair (`left_arm_2`/`right_arm_2` - see
+"Body system") carries its own numbered suffix through `engine.sidedZone`
+too, all the way down to that pair's own hand (`left_hand_2`) - without
+it, both pairs would collapse onto the exact same `left_arm` zone and a
+single sleeve would protect two unrelated arms at once.
+`engine.partLabel` (the same side-qualifying logic, but for a part's
+*display* label rather than its coverage zone - see "Body system") needed
+the identical suffix-carrying fix, for the same reason: without it, both
+pairs' hands would render as an indistinguishable "left_hand" in the
+Apparel/Medical part list, and the debug console's own `findPart`
+(label-based) could never reach the second one at all. A zone
+`COVERAGE_AREAS` doesn't declare - a second arm pair, before any real
+content adds coverage for one - reads as plainly uncovered
+(`getCoverage`/`getPartCoveringItems` both guard for this explicitly),
+not a crash.
+
 Damage reduction only cares about the zone as a whole, not which exact area
 got hit - and critically, it's the **average** coverage across every area in
 that zone (`getCoverage`/`getAreaCoverage`), not the full value of whichever
@@ -1290,6 +1306,19 @@ own list already uses. Reaches an enemy mid-fight, not just the player:
 - **`give <itemId> [count]`** - straight into the player's own inventory,
   no bulk check - an enemy has no inventory to give into, so this one
   never takes a target at all.
+- **`wear <itemId>`** / **`unwear <itemId>`** - straight onto/off of
+  `player.worn`, bypassing `engine.canWearItem`'s layer/area overlap
+  check entirely (see "Apparel & coverage") - alongside, not instead of,
+  the real wear/unwear action Inventory's own `Enter` offers (see
+  "Inventory & equipment"). Player-only, same reasoning as `give`.
+- **`attachLimb <parentLimb> <slotName> <templateId> [@target]`** -
+  bypasses `engine.attachPart`'s own tag-lock check entirely, so a slot
+  normally gated behind an organ (`left_arm_2`/`right_arm_2`, behind
+  MULTI_LIMBED - see "Body system") can be exercised without actually
+  installing one. `parentLimb` is looked up by its display label
+  (`debugConsole.findPart`), same as every other limb argument here.
+  Reports the zone `engine.sidedZone` actually derived, for checking it
+  landed right without a trip through the Apparel screen.
 - **`addStatus <limb> <status> [amount] [@target]`** - part-scoped
   statuses only (`bleed`/`poison`/`fracture` - `adrenaline` is
   character-wide, not reachable this way since every command here takes a
