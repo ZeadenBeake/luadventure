@@ -60,6 +60,7 @@ local talentEntries = gamedata.talentEntries
 local speciesEntries = gamedata.speciesEntries
 local enemyEntries = gamedata.enemyEntries
 local questEntries = gamedata.questEntries
+local factionEntries = gamedata.factionEntries
 local dynamicGreetings = gamedata.dynamicGreetings
 world = gamedata.world
 
@@ -1137,6 +1138,17 @@ player.quests = {}
 player.killLog = {}
 player.spareLog = {}
 
+-- A faction's own key is only ever present here once that faction has
+-- actually interacted with the player (see engine.adjustReputation) - a
+-- real third state, not just "0 means unknown" - so a faction the player
+-- has never crossed paths with is absent entirely, distinct from a known
+-- faction sitting at a genuinely neutral 0. specialFaction is the one
+-- faction (if any) the player has committed to via engine.setSpecialFaction -
+-- mutually exclusive with every other faction's own special tier, see
+-- "Factions & reputation".
+player.reputation = {}
+player.specialFaction = nil
+
 -- Banked, unspent level-up rewards (see engine.grantExperience) - one of
 -- each per level gained, spent any time via the Character screen
 -- (engine.runCharacterScreen), not forced the instant a level-up happens,
@@ -1257,6 +1269,20 @@ local combatMapWin = window.create(term.current(), 1, 1, leftWidth, topHeight)
 local combatLogWin = window.create(term.current(), leftWidth + 1, 1, screenW - leftWidth, topHeight)
 local combatActionWin = window.create(term.current(), 1, topHeight + 1, leftWidth, screenH - topHeight)
 local combatEnemyWin = window.create(term.current(), leftWidth + 1, topHeight + 1, screenW - leftWidth, screenH - topHeight)
+
+-- The Factions screen gets its own real four-corner layout too, same
+-- reasoning as combat's above - all four panes need to coexist and
+-- redraw independently (changing the selected faction shouldn't have to
+-- rebuild the description scroll position, and vice versa), rather than
+-- sharing inventoryWin's single-window two-pane convention every other
+-- full-screen modal here uses. List top-left, a logo placeholder
+-- bottom-left (nothing draws here yet, same as the overworld's own
+-- portrait pane), current rank/progress/effect top-right, the faction's
+-- own scrollable description bottom-right.
+local factionListWin = window.create(term.current(), 1, 1, leftWidth, topHeight)
+local factionLogoWin = window.create(term.current(), 1, topHeight + 1, leftWidth, screenH - topHeight)
+local factionStatusWin = window.create(term.current(), leftWidth + 1, 1, screenW - leftWidth, topHeight)
+local factionDescWin = window.create(term.current(), leftWidth + 1, topHeight + 1, screenW - leftWidth, screenH - topHeight)
 
 -- A full-screen takeover, shared by combat's own sub-pickers (choosing an
 -- attack, a limb, an ability, a reload/belt target), victory/death,
@@ -1384,6 +1410,102 @@ function engine.grantExperience(combatant, amount)
         player.talentPoints = player.talentPoints + leveled
         engine.logActivity("Reached level " .. combatant.stats.level .. "!")
     end
+end
+
+-- Reputation range and the shared five-band scale every faction maps its
+-- own rank names onto (see factionEntries.*.ranks) - six boundaries make
+-- five bands, since a band is the space between two of them. Tunable, not
+-- load-bearing numbers.
+local REPUTATION_MIN, REPUTATION_MAX = -100, 100
+local REPUTATION_TIERS = { -100, -75, -25, 25, 75, 100 }
+
+-- Which of the five generic bands (1 = Hated..5 = Loved) `value` falls
+-- into - walks consecutive pairs of REPUTATION_TIERS, and folds the exact
+-- top boundary (REPUTATION_MAX itself) into the last band rather than
+-- falling off the end. Never returns anything for Special/Enforcer - that
+-- tier is never computed from this scale at all, see
+-- engine.setSpecialFaction.
+function engine.getReputationTierIndex(value)
+    for i = 1, #REPUTATION_TIERS - 1 do
+        if value >= REPUTATION_TIERS[i] and (value < REPUTATION_TIERS[i + 1] or i == #REPUTATION_TIERS - 1) then
+            return i
+        end
+    end
+    return 1
+end
+
+-- The display name for a faction's current standing - "Enforcer" (or
+-- whatever that faction's own special.name is) if the player has
+-- committed to this specific faction, otherwise whichever generic band
+-- (see engine.getReputationTierIndex) the raw reputation number falls
+-- into, in that faction's own words (factionEntries.*.ranks).
+function engine.getFactionRankName(factionId)
+    local faction = factionEntries[factionId]
+    if player.specialFaction == factionId then
+        return faction.special.name
+    end
+    local value = player.reputation[factionId] or 0
+    return faction.ranks[engine.getReputationTierIndex(value)].name
+end
+
+-- The one mutator for reputation - if this is the first time `factionId`
+-- has ever come up for the player, starts it at 0 (this is the moment a
+-- faction "learns of" the player - see player.reputation's own comment),
+-- then applies `delta`. `cap`, if given, is the ceiling (or floor, for a
+-- negative delta) *this specific call* can push reputation to - repeated
+-- low-stakes actions (petty patrol work, say) can cap out well short of a
+-- faction's top rank, without that cap ever pulling back reputation
+-- someone already earned by bigger means (engine.adjustReputation never
+-- lowers `current` below itself just because a capped call came in below
+-- it - see the `math.max(current, cap)` below). Omit `cap` for an
+-- uncapped adjustment, same as before this existed.
+function engine.adjustReputation(factionId, delta, cap)
+    local current = player.reputation[factionId] or 0
+    local newValue = current + delta
+    if cap then
+        if delta > 0 and newValue > cap then
+            newValue = math.max(current, cap)
+        elseif delta < 0 and newValue < cap then
+            newValue = math.min(current, cap)
+        end
+    end
+    player.reputation[factionId] = math.max(REPUTATION_MIN, math.min(REPUTATION_MAX, newValue))
+end
+
+-- The commitment primitive for a faction's Special tier ("who you work
+-- for") - succeeds only if the player hasn't already committed to a
+-- faction at all; refuses (returns false, no state change) otherwise, so
+-- "by default you can't switch away from one" lives in exactly this one
+-- place rather than being re-checked at every future call site. Doesn't
+-- check reputation or the faction's own special.condition itself - those
+-- are for whatever calls this (a quest, eventually) to check first; this
+-- is just the actual state transition.
+function engine.setSpecialFaction(factionId)
+    if player.specialFaction ~= nil then
+        return false
+    end
+    player.specialFaction = factionId
+    return true
+end
+
+-- Every faction the player has ever interacted with (see
+-- player.reputation's own comment - a faction absent from it hasn't, and
+-- doesn't show up here) - what the Factions screen's own list is built
+-- from.
+function engine.collectKnownFactions()
+    local ids = {}
+    for factionId in pairs(player.reputation) do
+        table.insert(ids, factionId)
+    end
+    return ids
+end
+
+-- "[#####-----]" - current/max as a filled/unfilled bar `width` cells
+-- wide, clamped so a value at or past `max` always reads fully filled
+-- rather than overflowing the brackets.
+function engine.formatProgressBar(current, max, width)
+    local filled = math.max(0, math.min(width, math.floor((current / max) * width + 0.5)))
+    return "[" .. string.rep("#", filled) .. string.rep("-", width - filled) .. "]"
 end
 
 function engine.drawStats()
@@ -1695,7 +1817,7 @@ end
 -- on top of whatever's already there - rather than needing to coexist
 -- with it.
 local pageBarWin = window.create(term.current(), 1, 1, screenW, 2)
-local TOP_BAR_PAGES = { "Inventory", "Medical", "Apparel", "Character", "Quests" }
+local TOP_BAR_PAGES = { "Inventory", "Medical", "Apparel", "Character", "Quests", "Factions" }
 local topBarPage = 1
 
 function engine.drawTopBar()
@@ -3328,6 +3450,144 @@ function engine.runQuestLogScreen()
     end
 end
 
+-- Draws all four Factions panes at once - unlike the inventoryWin-sharing
+-- screens, each of these is its own real window (see their declarations
+-- near combatEnemyWin), so nothing here needs cursor-position math to
+-- split one window into halves.
+function engine.drawFactionsScreen(factionIds, selection, descScroll)
+    factionListWin.setVisible(false)
+    factionListWin.clear()
+    local listWidth = factionListWin.getSize()
+    factionListWin.setCursorPos(1, 1)
+    factionListWin.write("Factions")
+    for i, factionId in ipairs(factionIds) do
+        local marker = (i == selection) and ">" or " "
+        factionListWin.setCursorPos(1, i + 1)
+        factionListWin.write((marker .. factionEntries[factionId].name):sub(1, listWidth))
+    end
+    factionListWin.setVisible(true)
+
+    -- Nothing draws here yet - same placeholder convention engine.drawSprite
+    -- already uses for the overworld's own portrait pane.
+    factionLogoWin.setVisible(false)
+    factionLogoWin.clear()
+    factionLogoWin.setCursorPos(1, 1)
+    factionLogoWin.write("[ no logo ]")
+    factionLogoWin.setVisible(true)
+
+    local factionId = factionIds[selection]
+    factionStatusWin.setVisible(false)
+    factionStatusWin.clear()
+    if factionId then
+        local faction = factionEntries[factionId]
+        local value = player.reputation[factionId] or 0
+        local tierIndex = engine.getReputationTierIndex(value)
+        local barWidth = math.max(10, factionStatusWin.getSize() - 2)
+
+        factionStatusWin.setCursorPos(1, 1)
+        factionStatusWin.write(engine.getFactionRankName(factionId))
+
+        local row = 2
+        if player.specialFaction == factionId then
+            -- Already committed here - the rank line above already says
+            -- "Enforcer" (or whatever this faction calls it), so the bar
+            -- just reads full with nothing extra to add.
+            factionStatusWin.setCursorPos(1, row)
+            factionStatusWin.write(engine.formatProgressBar(1, 1, barWidth))
+        elseif tierIndex == 5 then
+            -- Loved band: no higher *reputation* band exists, so the bar
+            -- always reads full here regardless of the exact number - only
+            -- the faction's own special.condition (checked elsewhere, by
+            -- whatever future content offers it) stands between here and
+            -- Special. Only worth flagging if the player hasn't already
+            -- committed to a *different* faction - otherwise this one's
+            -- special is genuinely unavailable, so saying so would be
+            -- misleading.
+            factionStatusWin.setCursorPos(1, row)
+            factionStatusWin.write(engine.formatProgressBar(1, 1, barWidth))
+            if player.specialFaction == nil then
+                row = row + 1
+                factionStatusWin.setCursorPos(1, row)
+                factionStatusWin.write("SPECIAL RANK AVAILABLE")
+            end
+        else
+            local lower, upper = REPUTATION_TIERS[tierIndex], REPUTATION_TIERS[tierIndex + 1]
+            factionStatusWin.setCursorPos(1, row)
+            factionStatusWin.write(engine.formatProgressBar(value - lower, upper - lower, barWidth))
+        end
+
+        row = row + 2
+        local effect = (player.specialFaction == factionId) and faction.special.description or faction.ranks[tierIndex].effect
+        engine.writeWrapped(factionStatusWin, 1, row, effect)
+    end
+    factionStatusWin.setVisible(true)
+
+    factionDescWin.setVisible(false)
+    factionDescWin.clear()
+    if factionId then
+        local lines = factionEntries[factionId].description
+        local _, height = factionDescWin.getSize()
+        for i = 1, height do
+            local line = lines[descScroll + i]
+            if line then
+                factionDescWin.setCursorPos(1, i)
+                factionDescWin.write(line)
+            end
+        end
+    end
+    factionDescWin.setVisible(true)
+end
+
+-- Blocks until the player closes Factions (F again). Left/Right change
+-- which known faction is selected (not Tab - Tab has to stay free for the
+-- shared top-bar strip this screen is also reachable through, same as
+-- every other page); Up/Down scroll the selected faction's own
+-- description instead, independent of which faction is picked.
+function engine.runFactionsScreen()
+    local factionIds = engine.collectKnownFactions()
+    local selection = 1
+    local descScroll = 0
+
+    local function redraw()
+        factionIds = engine.collectKnownFactions()
+        selection = math.min(math.max(1, #factionIds), selection)
+        engine.drawFactionsScreen(factionIds, selection, descScroll)
+    end
+
+    redraw()
+
+    while true do
+        local _, key = os.pullEvent("key")
+
+        if key == keys.f then
+            return
+        elseif key == keys.left then
+            if #factionIds > 0 then
+                selection = (selection - 2) % #factionIds + 1
+                descScroll = 0
+            end
+            redraw()
+        elseif key == keys.right then
+            if #factionIds > 0 then
+                selection = selection % #factionIds + 1
+                descScroll = 0
+            end
+            redraw()
+        elseif key == keys.up then
+            descScroll = math.max(0, descScroll - 1)
+            redraw()
+        elseif key == keys.down then
+            local factionId = factionIds[selection]
+            if factionId then
+                local _, height = factionDescWin.getSize()
+                local maxScroll = math.max(0, #factionEntries[factionId].description - height)
+                descScroll = math.min(maxScroll, descScroll + 1)
+            end
+            redraw()
+        end
+    end
+end
+
 -- Window writes don't wrap on their own - text just runs past the edge and
 -- gets silently clipped. Writes `text` at (x, y) using engine.wrapText, and
 -- returns how many rows it used so the caller can stack whatever comes
@@ -4144,6 +4404,12 @@ Luadventure.applyCharacterStatus = engine.applyCharacterStatus
 -- but the primitive itself needs no dialogue system changes to be usable
 -- the moment one does.
 Luadventure.grantExperience = engine.grantExperience
+-- Exposed for a future quest step's onComplete to call directly (see
+-- "Factions & reputation") - no real content calls either yet, same
+-- "capability before content" situation grantExperience's own dialogue
+-- hook is in.
+Luadventure.adjustReputation = engine.adjustReputation
+Luadventure.setSpecialFaction = engine.setSpecialFaction
 Luadventure.isDead = engine.isDead
 Luadventure.isLimbFunctional = engine.isLimbFunctional
 Luadventure.getLimbStrength = engine.getLimbStrength
@@ -5879,6 +6145,9 @@ function engine.buildSaveData(saveId, label)
     local spareLog = {}
     for id, count in pairs(player.spareLog) do spareLog[id] = count end
 
+    local reputation = {}
+    for id, value in pairs(player.reputation) do reputation[id] = value end
+
     local savedActivityLog = {}
     for i, line in ipairs(activityLog) do savedActivityLog[i] = line end
 
@@ -5904,6 +6173,8 @@ function engine.buildSaveData(saveId, label)
         quests = quests,
         killLog = killLog,
         spareLog = spareLog,
+        reputation = reputation,
+        specialFaction = player.specialFaction,
         activityLog = savedActivityLog,
         skillPoints = player.skillPoints,
         talentPoints = player.talentPoints,
@@ -5965,6 +6236,13 @@ function engine.applySaveData(data)
     -- to load here, not a missing field to error on.
     player.spareLog = {}
     for id, count in pairs(data.spareLog or {}) do player.spareLog[id] = count end
+
+    -- Same convention: a pre-faction save has neither field, so it comes
+    -- back exactly like a fresh character - no faction has ever heard of
+    -- the player, no Special commitment.
+    player.reputation = {}
+    for id, value in pairs(data.reputation or {}) do player.reputation[id] = value end
+    player.specialFaction = data.specialFaction or nil
 
     -- Same backward-compat convention for the activity log - restored
     -- wholesale (already-wrapped lines, same as engine.logActivity always
@@ -6688,6 +6966,45 @@ debugConsole.commands = {
         return "Quest " .. questId .. " set to " .. stepId
     end,
 
+    -- setReputation <factionId> <amount> - a raw poke: sets
+    -- player.reputation[factionId] straight to <amount> (creating the
+    -- entry if it wasn't there - same "this faction now knows the player"
+    -- moment engine.adjustReputation's own lazy-init is), clamped to
+    -- [REPUTATION_MIN, REPUTATION_MAX]. No `cap` here on purpose - a debug
+    -- set is meant to land exactly on the requested number for testing,
+    -- not simulate a capped in-game gain. Player-only, same reasoning as
+    -- `give`/`setQuestStep`.
+    setReputation = function(args)
+        local factionId, amountStr = args[1], args[2]
+        if not factionId or not factionEntries[factionId] then
+            return "Usage: setReputation <factionId> <amount> - unknown faction: " .. tostring(factionId)
+        end
+        local amount = tonumber(amountStr)
+        if not amount then
+            return "Usage: setReputation <factionId> <amount>"
+        end
+        player.reputation[factionId] = math.max(REPUTATION_MIN, math.min(REPUTATION_MAX, amount))
+        return "Reputation with " .. factionId .. " set to " .. player.reputation[factionId]
+    end,
+
+    -- setSpecialFaction <factionId|none> - a raw poke that bypasses
+    -- engine.setSpecialFaction's own single-committer check entirely (that
+    -- check would otherwise make re-testing a second faction's Special
+    -- impossible without restarting). `none` clears the commitment back to
+    -- nil. Player-only.
+    setSpecialFaction = function(args)
+        local factionId = args[1]
+        if factionId == "none" then
+            player.specialFaction = nil
+            return "specialFaction cleared."
+        end
+        if not factionId or not factionEntries[factionId] then
+            return "Usage: setSpecialFaction <factionId|none> - unknown faction: " .. tostring(factionId)
+        end
+        player.specialFaction = factionId
+        return "specialFaction set to " .. factionId
+    end,
+
     -- addStatus <limb> <status> [amount] [@<target>] - only part-scoped
     -- statuses (bleed, poison, fracture) - character-wide ones
     -- (adrenaline) aren't reachable this way, since every command here
@@ -6750,7 +7067,7 @@ debugConsole.commands = {
     end,
 
     help = function()
-        return "setHealth <limb> <hp> [@t] | give <item> [n] | wear/unwear <item> | attachLimb <parentLimb> <slot> <template> [@t] | setLevel <n> | grantExperience <amt> | setQuestStep <questId> <stepId> | addStatus <limb> <status> [n] [@t] | clearStatus <limb> <status|all> [@t] | targets | exit"
+        return "setHealth <limb> <hp> [@t] | give <item> [n] | wear/unwear <item> | attachLimb <parentLimb> <slot> <template> [@t] | setLevel <n> | grantExperience <amt> | setQuestStep <questId> <stepId> | setReputation <factionId> <amt> | setSpecialFaction <factionId|none> | addStatus <limb> <status> [n] [@t] | clearStatus <limb> <status|all> [@t] | targets | exit"
     end,
 }
 
@@ -7100,8 +7417,10 @@ while true do
                 engine.runApparelScreen()
             elseif topBarPage == 4 then
                 engine.runCharacterScreen()
-            else
+            elseif topBarPage == 5 then
                 engine.runQuestLogScreen()
+            else
+                engine.runFactionsScreen()
             end
             engine.checkQuestProgress()
             engine.render()
@@ -7128,6 +7447,10 @@ while true do
         engine.render()
     elseif key == keys.j then
         engine.runQuestLogScreen()
+        engine.checkQuestProgress()
+        engine.render()
+    elseif key == keys.f then
+        engine.runFactionsScreen()
         engine.checkQuestProgress()
         engine.render()
     elseif key == keys.space then

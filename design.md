@@ -81,11 +81,13 @@ Controls: arrow keys move, `Space` interacts with whatever's cardinally
 adjacent (see "Environment objects & symbols"), `i` opens the inventory,
 `m` opens Medical (see "Medical"), `a` opens Apparel (see "Apparel"), `c`
 opens Character (see "Leveling & talents"), `j` opens Quests (see "Quest
-log"), `q` quits immediately. `Tab` opens a slim top-bar strip that jumps
-straight to any of the five (`Left`/`Right` to choose, `Enter` to open)
-without needing its own dedicated key - all five exist mainly for that
-shortcut's own sake. Menus almost everywhere use digit keys `1`-`9`/`0`
-then `a`-`z` for lists longer than ten items (see "Digit/letter menus"
+log"), `f` opens Factions (see "Factions screen" - its own `Left`/`Right`/
+`Up`/`Down` bindings only apply once it's open, so this doesn't collide
+with movement), `q` quits immediately. `Tab` opens a slim top-bar strip
+that jumps straight to any of the six (`Left`/`Right` to choose, `Enter`
+to open) without needing its own dedicated key - all six exist mainly for
+that shortcut's own sake. Menus almost everywhere use digit keys `1`-`9`/
+`0` then `a`-`z` for lists longer than ten items (see "Digit/letter menus"
 below).
 
 ### Activity log
@@ -1462,6 +1464,105 @@ written for one to borrow), or "Complete." once done. Read-only - unlike
 Character's talent-taking, there's nothing to pick here, just navigation
 (`engine.runQuestLogScreen`, closes on `j` again).
 
+## Factions & reputation
+
+A faction (`factionEntries`) is a `name`/`abbreviation`/`description` (the
+description is the in-world blurb the Factions screen's own description
+pane shows, already authored to width rather than re-wrapped), a `ranks`
+array (5 entries, own name + a one-line `effect` summary), and a `special`
+tier (`name`/`description`/`condition`).
+
+**`player.reputation`** is a plain `{ [factionId] = integer }` table.
+Absence of a key is a real, meaningful third state - "this faction has
+never interacted with the player" - distinct from a present value of `0`
+("Neutral, and they know you exist"), same convention `player.quests`
+already uses for "not yet taken." Range is `[-100, 100]`
+(`REPUTATION_MIN`/`REPUTATION_MAX`), mapped onto five shared bands via six
+boundary numbers (a band is the space between two of them):
+`REPUTATION_TIERS = { -100, -75, -25, 25, 75, 100 }` - Hated/Disliked/
+Neutral/Liked/Loved. Every faction reuses this same scale
+(`engine.getReputationTierIndex`) and only supplies its own rank *names*
+via `ranks` (index 1 = Hated band ... 5 = Loved band) - UGFC's own are
+Most Wanted/Criminal/Citizen/Vigilante/Peacekeeper.
+
+`engine.adjustReputation(factionId, delta, cap)` is the one mutator - lazy-
+inits a faction's entry to `0` the first time it's touched (this is the
+moment it "learns of" the player), then applies `delta`. `cap` is optional:
+the ceiling (or floor, for a negative `delta`) *this specific call* can
+push reputation to - repeatable low-stakes actions (routine patrol work,
+say) can cap out well short of a faction's top rank without that cap ever
+pulling back reputation already earned by bigger means (a capped call
+never lowers reputation below whatever it already was, only stops it
+*overshooting* past the cap). Bridged as `Luadventure.adjustReputation` for
+a future quest step's `onComplete` to call - no real content calls it with
+either argument yet.
+
+**Special (a sixth tier, per faction)** is "who you work for" - a
+discrete, sticky commitment, not something derived from the reputation
+number at all. `player.specialFaction` is a single value (not per-faction)
+- the one faction, if any, the player has committed to; mutually exclusive
+with every other faction's own special tier by construction.
+`engine.setSpecialFaction(factionId)` is the one commitment primitive:
+succeeds only if `player.specialFaction` is currently `nil`, otherwise
+refuses - "by default you can't switch away from one" lives in exactly
+this one place. Nothing here auto-grants Special just from reputation
+crossing into the Loved band - a faction's own `special.condition` (the
+same no-argument "as simple as a comparison, or very complex" idiom quest
+step conditions use) is free to check that band as one of its
+requirements, but reaching Special always goes through
+`engine.setSpecialFaction` explicitly, called by whatever real content
+offers it (a quest, eventually - not built yet). `engine.getFactionRankName`
+is what actually resolves display: `special.name` if
+`player.specialFaction == factionId`, otherwise whichever band name the
+raw reputation number falls into.
+
+One faction exists so far: **U.G.F.C.** (United Galactic Federal
+Coalition), the settled galaxy's primary governing body - ranks Most
+Wanted/Criminal/Citizen/Vigilante/Peacekeeper, special tier **Enforcer**.
+Its `special.condition` (`player.stats.level >= 5`) is a placeholder -
+real faction-quest content to gate Enforcer properly is future work, same
+proof-of-structure-first spirit the talent tree and the quest step system
+were both introduced with.
+
+## Factions screen
+
+A 6th top-bar page (`TOP_BAR_PAGES` gains `"Factions"`, hotkey `f`),
+reachable the same way every other page is - but unlike
+Inventory/Medical/Apparel/Character/Quests (which all share one full-
+screen `inventoryWin`, split into panes by cursor position), this is a
+genuine four-window screen, the same real-window four-corner layout the
+overworld and combat each already use (`factionListWin`/`factionLogoWin`/
+`factionStatusWin`/`factionDescWin`, right alongside `combatMapWin` and
+friends) - all four panes need to redraw independently, the same reason
+combat's own four corners aren't a single shared window either.
+
+- **Top-left**: every faction the player has ever interacted with
+  (`engine.collectKnownFactions` - walks `player.reputation`'s own keys),
+  current selection marked. `Left`/`Right` change it - not `Tab`, which has
+  to stay free for the shared top-bar strip this screen is also reachable
+  through, same as every other page.
+- **Bottom-left**: left empty - a placeholder (`"[ no logo ]"`), exactly
+  like the overworld's own portrait pane.
+- **Top-right**: the selected faction's current rank
+  (`engine.getFactionRankName`), a progress bar (`engine.formatProgressBar`,
+  new - nothing like it existed before this), and the current rank's
+  `effect` line (or `special.description` if the player is Special with
+  this faction). Three bar cases: bands 1-4 fill toward the next band's
+  boundary; band 5 (Loved) with no Special committed to *anyone* yet reads
+  full plus a `"SPECIAL RANK AVAILABLE"` line (there's no higher
+  *reputation* band left - only the faction's own `special.condition`
+  stands between here and Special); band 5 (or any band, once committed)
+  with `player.specialFaction` already set - just the full bar, no extra
+  text, since claiming it's "available" would be wrong once the player's
+  mutually-exclusive choice is already made (to this faction or a
+  different one).
+- **Bottom-right**: the faction's own `description`, scrolled by `Up`/
+  `Down` (independent of which faction is selected) - modeled on
+  `engine.drawLog`'s own scroll-to-window pattern.
+
+`engine.runFactionsScreen()` closes on `f` again, same self-closing
+convention every other page uses.
+
 ## Main menu
 
 The very first thing shown at startup (`runMainMenu`, a `showInteraction`
@@ -1591,6 +1692,17 @@ own list already uses. Reaches an enemy mid-fight, not just the player:
   `"done"`), bypassing offer/condition/reward/`onComplete` logic entirely
   (see "Quests"). What makes a branching path's later steps actually
   testable without playing through everything ahead of them for real.
+  Player-only.
+- **`setReputation <factionId> <amount>`** - a raw poke: sets
+  `player.reputation[factionId]` directly (creating the entry if it wasn't
+  there), clamped to `[REPUTATION_MIN, REPUTATION_MAX]` (see "Factions &
+  reputation"). No `cap` parameter - a debug set is meant to land exactly
+  on the requested number for testing, not simulate a capped in-game gain.
+  Player-only.
+- **`setSpecialFaction <factionId|none>`** - bypasses
+  `engine.setSpecialFaction`'s own single-committer check entirely (that
+  check would otherwise make testing a second faction's Special impossible
+  without restarting); `none` clears the commitment back to `nil`.
   Player-only.
 - **`addStatus <limb> <status> [amount] [@target]`** - part-scoped
   statuses only (`bleed`/`poison`/`fracture` - `adrenaline` is
@@ -1798,6 +1910,16 @@ NPC-to-NPC conversation system.
   quest) that was removed once confirmed working, so none of that is
   reachable in play yet. The mechanism itself is proven end to end; real
   multi-step content is just future work.
+- U.G.F.C. (see "Factions & reputation") is the only faction defined so
+  far, and its Enforcer tier's `special.condition` (`player.stats.level
+  >= 5`) is a stand-in - real faction-quest content to gate a Special tier
+  properly doesn't exist yet, same proof-of-structure-first spirit as the
+  talent tree and the quest step system. Nothing in the game currently
+  grants or adjusts reputation during play either (no quest reward,
+  encounter outcome, etc. calls `engine.adjustReputation` yet) - the whole
+  system is reachable today only through the `setReputation`/
+  `setSpecialFaction` debug commands, same "capability before content"
+  situation `engine.grantExperience`'s own dialogue-choice hook is in.
 - Pronouns are consumed by name/`{{subject}}`/`{{object}}` templating;
   `UNSIGHTLY` by one hardcoded dialogue check. Neither affects anything
   beyond that yet - social mechanics (haggling, reactions) wait on NPCs and

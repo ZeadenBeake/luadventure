@@ -1537,6 +1537,57 @@ local questEntries = {
     },
 }
 
+-- A faction's own definition: `name`/`abbreviation`/`description` (the
+-- latter is what the Factions screen's own description pane shows,
+-- already-authored to width rather than re-wrapped - same convention
+-- quest dialogue lines already use), `ranks` (a plain 5-entry array,
+-- positionally mapped to the engine's shared REPUTATION_TIERS bands -
+-- index 1 is the Hated band, ...5 is the Loved band - so every faction
+-- reuses the same numeric thresholds while still naming/flavoring each
+-- rank entirely its own way), and `special` (the sixth, Enforcer-style
+-- tier - `name`/`description`, plus a `condition` function, the same
+-- no-argument "as simple as a comparison, or very complex" idiom quest
+-- step conditions already use, checked by whatever future content
+-- actually offers to call engine.setSpecialFaction, never by anything
+-- here automatically).
+local factionEntries = {
+    ugfc = {
+        name = "United Galactic Federal Coalition",
+        abbreviation = "U.G.F.C.",
+        description = {
+            "The United Galactic Federal Coalition is the closest thing",
+            "the settled galaxy has to a single law. A true democracy",
+            "in principle - every core world sends its own elected voice",
+            "to the High Assembly - and ruthless in practice, where its",
+            "peacekeeper corps enforces Assembly rulings with whatever",
+            "force a situation calls for. Ships fly its ident beacons",
+            "because most systems require it, not because most systems",
+            "love it: the Coalition machine grinds slow, buries",
+            "decisions in committee, and its handling of recent unrest",
+            "has left more than a few worlds openly questioning whether",
+            "the Assembly still speaks for anyone but itself.",
+        },
+        ranks = {
+            { name = "Most Wanted", effect = "Kill-on-sight priority target - UGFC patrols engage without warning." },
+            { name = "Criminal", effect = "Flagged in every regional database - checkpoints and patrols treat you as an active threat." },
+            { name = "Citizen", effect = "An ordinary registered citizen. No special treatment, good or bad." },
+            { name = "Vigilante", effect = "Recognized for lawful conduct beyond the call of duty - minor favors and leniency from local patrols." },
+            { name = "Peacekeeper", effect = "Trusted enough to be waved through checkpoints, and occasionally called on for backup." },
+        },
+        -- A stand-in condition - real faction-quest content (what should
+        -- actually gate becoming an Enforcer) is future work, same
+        -- proof-of-structure-first spirit as the talent tree's own
+        -- starter roster.
+        special = {
+            name = "Enforcer",
+            description = "A sworn agent of the Coalition - full backup, restricted equipment, and access ordinary citizens never see.",
+            condition = function()
+                return Luadventure.player.stats.level >= 5
+            end,
+        },
+    },
+}
+
 -- Greetings that depend on live player state (rather than always showing
 -- the same lines) can't just be a table sitting on the object - a save
 -- captures the whole world snapshot as plain data, and a function isn't
@@ -1583,5 +1634,6 @@ return {
     enemyEntries = enemyEntries,
     world = world,
     questEntries = questEntries,
+    factionEntries = factionEntries,
     dynamicGreetings = dynamicGreetings,
 }
