@@ -1820,15 +1820,33 @@ local pageBarWin = window.create(term.current(), 1, 1, screenW, 2)
 local TOP_BAR_PAGES = { "Inventory", "Medical", "Apparel", "Character", "Quests", "Factions" }
 local topBarPage = 1
 
+-- Six pages don't all fit on a real 51-wide computer screen at once, so
+-- the strip scrolls horizontally to keep whichever page is selected
+-- centered - tracks each tab's own start column in the full concatenated
+-- string, then windows a `width`-wide slice of it around the selected
+-- one (clamped so it never scrolls past either end, same "compute a
+-- centered window, then clamp" idea a scroll offset elsewhere in this
+-- file would use, just horizontal here instead of vertical).
 function engine.drawTopBar()
     pageBarWin.setVisible(false)
     pageBarWin.clear()
-    local tabs = {}
+
+    local text = ""
+    local tabStarts, tabLens = {}, {}
     for i, name in ipairs(TOP_BAR_PAGES) do
-        table.insert(tabs, i == topBarPage and ("[" .. name .. "]") or (" " .. name .. " "))
+        local tab = i == topBarPage and ("[" .. name .. "]") or (" " .. name .. " ")
+        tabStarts[i] = #text + 1
+        tabLens[i] = #tab
+        text = text .. tab .. " "
     end
+
+    local width = pageBarWin.getSize()
+    local selCenter = tabStarts[topBarPage] + tabLens[topBarPage] / 2
+    local viewStart = math.floor(selCenter - width / 2)
+    viewStart = math.max(1, math.min(viewStart, math.max(1, #text - width + 1)))
+
     pageBarWin.setCursorPos(1, 1)
-    pageBarWin.write(table.concat(tabs, " "))
+    pageBarWin.write(text:sub(viewStart, viewStart + width - 1))
     pageBarWin.setCursorPos(1, 2)
     pageBarWin.write("[Enter] open  [Tab] close")
     pageBarWin.setVisible(true)
@@ -2879,8 +2897,16 @@ function engine.drawMedicalScreen(parts, selection, scrollOffset)
     inventoryWin.setCursorPos(1, 1)
     inventoryWin.write("Medical")
 
+    -- Health (plus the `*` status flag) is right-aligned flush to the
+    -- pane's own right edge, in a fixed-width trailing block ("999/999 *"
+    -- at its longest) - whatever's left of the pane's width, after the
+    -- marker column, goes entirely to the part label instead of a small
+    -- hardcoded cap, so a deeply-indented name actually has room to read.
+    local HEALTH_COL_WIDTH = 10
+    local labelWidth = math.max(1, leftW - 1 - HEALTH_COL_WIDTH)
+
     inventoryWin.setCursorPos(1, 2)
-    inventoryWin.write(("%-12s %s"):format("Part", "Health"))
+    inventoryWin.write((" %-" .. labelWidth .. "s%" .. HEALTH_COL_WIDTH .. "s"):format("Part", "Health"))
 
     local visibleCount = screenH - 1 - MEDICAL_LIST_TOP + 1
     for i = 1, visibleCount do
@@ -2888,11 +2914,10 @@ function engine.drawMedicalScreen(parts, selection, scrollOffset)
         if entry then
             local marker = (scrollOffset + i == selection) and ">" or " "
             local indent = string.rep(" ", entry.depth * 2)
-            local labelText = (indent .. entry.label):sub(1, 12)
-            local healthText = entry.part.health .. "/" .. entry.part.maxHealth
-            local statusFlag = next(entry.part.statuses) and " *" or ""
+            local labelText = (indent .. entry.label):sub(1, labelWidth)
+            local healthText = entry.part.health .. "/" .. entry.part.maxHealth .. (next(entry.part.statuses) and " *" or "")
             inventoryWin.setCursorPos(1, MEDICAL_LIST_TOP + i - 1)
-            inventoryWin.write(marker .. ("%-12s %-7s%s"):format(labelText, healthText, statusFlag))
+            inventoryWin.write(marker .. ("%-" .. labelWidth .. "s%" .. HEALTH_COL_WIDTH .. "s"):format(labelText, healthText))
         end
     end
 
@@ -3214,7 +3239,7 @@ function engine.collectTalentTree()
     return rows
 end
 
-local CHARACTER_LIST_TOP = 5 -- row 1: title, row 2: level/xp, row 3: banked points, row 4: column header
+local CHARACTER_LIST_TOP = 6 -- row 1: title, row 2: level/xp, row 3: skill points, row 4: talent points, row 5: column header
 
 -- Same two-pane layout Medical/Apparel/Inventory all already use. Left
 -- half is the talent tree (engine.collectTalentTree, indented by depth
@@ -3235,8 +3260,10 @@ function engine.drawCharacterScreen(rows, selection, scrollOffset)
     inventoryWin.setCursorPos(1, 2)
     inventoryWin.write(("Lv %d - XP %d/%d"):format(player.stats.level, player.stats.xp, engine.xpForNextLevel(player.stats.level)))
     inventoryWin.setCursorPos(1, 3)
-    inventoryWin.write(("Skill points: %d   Talent points: %d"):format(player.skillPoints, player.talentPoints))
+    inventoryWin.write("Skill points: " .. player.skillPoints)
     inventoryWin.setCursorPos(1, 4)
+    inventoryWin.write("Talent points: " .. player.talentPoints)
+    inventoryWin.setCursorPos(1, 5)
     inventoryWin.write("Talents")
 
     local visibleCount = screenH - 1 - CHARACTER_LIST_TOP + 1
@@ -3468,11 +3495,19 @@ function engine.drawFactionsScreen(factionIds, selection, descScroll)
     factionListWin.setVisible(true)
 
     -- Nothing draws here yet - same placeholder convention engine.drawSprite
-    -- already uses for the overworld's own portrait pane.
+    -- already uses for the overworld's own portrait pane. This pane's own
+    -- last row happens to be the screen's actual last row too, so the
+    -- control hint (every other screen has one) lives here rather than
+    -- needing a 5th window just for it.
     factionLogoWin.setVisible(false)
     factionLogoWin.clear()
     factionLogoWin.setCursorPos(1, 1)
     factionLogoWin.write("[ no logo ]")
+    local _, logoHeight = factionLogoWin.getSize()
+    factionLogoWin.setCursorPos(1, logoHeight - 1)
+    factionLogoWin.write("L/R: faction  U/D: scroll")
+    factionLogoWin.setCursorPos(1, logoHeight)
+    factionLogoWin.write("[F] close")
     factionLogoWin.setVisible(true)
 
     local factionId = factionIds[selection]

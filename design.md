@@ -86,7 +86,13 @@ log"), `f` opens Factions (see "Factions screen" - its own `Left`/`Right`/
 with movement), `q` quits immediately. `Tab` opens a slim top-bar strip
 that jumps straight to any of the six (`Left`/`Right` to choose, `Enter`
 to open) without needing its own dedicated key - all six exist mainly for
-that shortcut's own sake. Menus almost everywhere use digit keys `1`-`9`/
+that shortcut's own sake. Six page names don't all fit on a real 51-wide
+computer screen at once, so `engine.drawTopBar` scrolls the strip
+horizontally to keep whichever page is currently selected centered,
+clamped so it never scrolls past either end - the same "compute a
+centered window into a longer string, then clamp" idea, just horizontal
+here rather than a vertical list scroll. Menus almost everywhere use digit
+keys `1`-`9`/
 `0` then `a`-`z` for lists longer than ten items (see "Digit/letter menus"
 below).
 
@@ -1235,7 +1241,10 @@ reusing the same `inventoryWin` the same way every full-screen modal here
 does, since the two are never open at once. Same two-pane layout as
 Inventory: left half is every labeled body part (`engine.collectLabeledParts`,
 same depth-indented list `pickLimb`/`viewLimbs` already use), health and a
-`*` flag for anyone currently carrying an active status; right half is
+`*` flag for anyone currently carrying an active status - health is right-
+aligned flush to the pane's own edge in a fixed-width trailing column, so
+a deeply-indented part name (a hand three levels deep, say) gets whatever
+width is actually left over rather than a small hardcoded cap; right half is
 full detail on whichever part is selected - health, every active status
 by name and remaining duration (`engine.formatPartStatuses`, blank for a
 permanent one - "Fractured" rather than "Fractured (-1)"), and every organ
@@ -1541,8 +1550,12 @@ combat's own four corners aren't a single shared window either.
   current selection marked. `Left`/`Right` change it - not `Tab`, which has
   to stay free for the shared top-bar strip this screen is also reachable
   through, same as every other page.
-- **Bottom-left**: left empty - a placeholder (`"[ no logo ]"`), exactly
-  like the overworld's own portrait pane.
+- **Bottom-left**: mostly empty - a placeholder (`"[ no logo ]"`), exactly
+  like the overworld's own portrait pane, except its own last two rows
+  carry the control hint every other page has (`[Left/Right]`/`[Up/Down]`/
+  `[F] close`) - this pane's own bottom row happens to be the screen's
+  actual last row too, so the hint lives here rather than needing a 5th
+  window just for it.
 - **Top-right**: the selected faction's current rank
   (`engine.getFactionRankName`), a progress bar (`engine.formatProgressBar`,
   new - nothing like it existed before this), and the current rank's
