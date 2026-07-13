@@ -96,6 +96,17 @@ keys `1`-`9`/
 `0` then `a`-`z` for lists longer than ten items (see "Digit/letter menus"
 below).
 
+Every full-screen page's own bottom-row control hint (`[Enter] take  [S]
+spend skill point  [C] close`, and its siblings on every other page) is
+colored yellow, `colors.white` everywhere else - purely a readability
+fix: a hint line that sits flush against a pane's own edge (no margin to
+spare on an already-tight screen) can otherwise read as if it's part of
+whatever text happens to be immediately next to it, especially on the
+Factions screen (see "Factions screen"), where two independent real
+windows sit directly edge-to-edge with no gap between them at all. A
+distinct color makes a hint unambiguously its own thing regardless of
+what's touching it.
+
 ### Activity log
 
 Two separate logs sharing one pattern (`wrapText` wraps a line to the
@@ -1575,6 +1586,16 @@ combat's own four corners aren't a single shared window either.
 
 `engine.runFactionsScreen()` closes on `f` again, same self-closing
 convention every other page uses.
+
+A faction's `description` (gamedata.lua) is authored as one plain string,
+not pre-broken into lines - `engine.wrapTextToWindow(win, text)` (a sibling
+of `engine.wrapText`/`engine.writeWrapped` that reads `win`'s own current
+width instead of a caller-supplied one) wraps it fresh every draw to
+whatever the description pane's own width actually turns out to be, so
+writing one of these doesn't mean guessing a screen size up front, and the
+same content wraps correctly on a narrow real computer screen and a wide
+one alike. Scrolling (`descScroll`, the `Up`/`Down` handlers) works
+against this same freshly-wrapped line list each time, not a stored one.
 
 ## Main menu
 

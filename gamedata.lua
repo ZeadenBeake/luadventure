@@ -1538,14 +1538,16 @@ local questEntries = {
 }
 
 -- A faction's own definition: `name`/`abbreviation`/`description` (the
--- latter is what the Factions screen's own description pane shows,
--- already-authored to width rather than re-wrapped - same convention
--- quest dialogue lines already use), `ranks` (a plain 5-entry array,
--- positionally mapped to the engine's shared REPUTATION_TIERS bands -
--- index 1 is the Hated band, ...5 is the Loved band - so every faction
--- reuses the same numeric thresholds while still naming/flavoring each
--- rank entirely its own way), and `special` (the sixth, Enforcer-style
--- tier - `name`/`description`, plus a `condition` function, the same
+-- latter is what the Factions screen's own description pane shows - a
+-- plain string, not pre-broken into lines, since engine.wrapTextToWindow
+-- wraps it fresh at draw time to whatever the description pane's own
+-- width actually is - no need to guess a screen width up front while
+-- writing one of these), `ranks` (a plain 5-entry array, positionally
+-- mapped to the engine's shared REPUTATION_TIERS bands - index 1 is the
+-- Hated band, ...5 is the Loved band - so every faction reuses the same
+-- numeric thresholds while still naming/flavoring each rank entirely its
+-- own way), and `special` (the sixth, Enforcer-style tier -
+-- `name`/`description`, plus a `condition` function, the same
 -- no-argument "as simple as a comparison, or very complex" idiom quest
 -- step conditions already use, checked by whatever future content
 -- actually offers to call engine.setSpecialFaction, never by anything
@@ -1554,19 +1556,7 @@ local factionEntries = {
     ugfc = {
         name = "United Galactic Federal Coalition",
         abbreviation = "U.G.F.C.",
-        description = {
-            "The United Galactic Federal Coalition is the closest thing",
-            "the settled galaxy has to a single law. A true democracy",
-            "in principle - every core world sends its own elected voice",
-            "to the High Assembly - and ruthless in practice, where its",
-            "peacekeeper corps enforces Assembly rulings with whatever",
-            "force a situation calls for. Ships fly its ident beacons",
-            "because most systems require it, not because most systems",
-            "love it: the Coalition machine grinds slow, buries",
-            "decisions in committee, and its handling of recent unrest",
-            "has left more than a few worlds openly questioning whether",
-            "the Assembly still speaks for anyone but itself.",
-        },
+        description = "The United Galactic Federal Coalition is the closest thing the settled galaxy has to a single law. A true democracy in principle - every core world sends its own elected voice to the High Assembly - and ruthless in practice, where its peacekeeper corps enforces Assembly rulings with whatever force a situation calls for. Ships fly its ident beacons because most systems require it, not because most systems love it: the Coalition machine grinds slow, buries decisions in committee, and its handling of recent unrest has left more than a few worlds openly questioning whether the Assembly still speaks for anyone but itself.",
         ranks = {
             { name = "Most Wanted", effect = "Kill-on-sight priority target - UGFC patrols engage without warning." },
             { name = "Criminal", effect = "Flagged in every regional database - checkpoints and patrols treat you as an active threat." },

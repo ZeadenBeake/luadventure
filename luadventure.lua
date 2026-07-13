@@ -1318,6 +1318,19 @@ function engine.wrapText(text, maxWidth)
     return lines
 end
 
+-- engine.wrapText, but reads `win`'s own current width instead of a
+-- caller-supplied maxWidth - lets a long blurb (a faction's own
+-- description, say) be authored as one plain string, with no need to
+-- guess a screen width up front or hand-break it into lines at all;
+-- whatever's actually showing it wraps it to fit at draw time. Meant for
+-- scrollable content that needs real discrete lines to scroll through
+-- (see engine.drawFactionsScreen) - engine.writeWrapped (below) already
+-- covers the simpler "just write this and move on" case the same way.
+function engine.wrapTextToWindow(win, text)
+    local width = win.getSize()
+    return engine.wrapText(text, width)
+end
+
 -- Every wrapped line logged so far, oldest first - only the tail end that
 -- actually fits gets drawn (see engine.drawLog), so this can just grow forever
 -- without needing to cap or scroll it manually.
@@ -1848,7 +1861,9 @@ function engine.drawTopBar()
     pageBarWin.setCursorPos(1, 1)
     pageBarWin.write(text:sub(viewStart, viewStart + width - 1))
     pageBarWin.setCursorPos(1, 2)
+    pageBarWin.setTextColor(colors.yellow)
     pageBarWin.write("[Enter] open  [Tab] close")
+    pageBarWin.setTextColor(colors.white)
     pageBarWin.setVisible(true)
 end
 
@@ -2289,7 +2304,9 @@ function engine.drawInventoryScreen(rows, selection, scrollOffset, pageBarVisibl
     end
 
     inventoryWin.setCursorPos(1, screenH)
+    inventoryWin.setTextColor(colors.yellow)
     inventoryWin.write("[Tab] pages  [Enter] use  [M] move  [I] close")
+    inventoryWin.setTextColor(colors.white)
 
     inventoryWin.setVisible(true)
 end
@@ -2940,7 +2957,9 @@ function engine.drawMedicalScreen(parts, selection, scrollOffset)
     end
 
     inventoryWin.setCursorPos(1, screenH)
+    inventoryWin.setTextColor(colors.yellow)
     inventoryWin.write("[Enter] treat  [M] close")
+    inventoryWin.setTextColor(colors.white)
 
     inventoryWin.setVisible(true)
 end
@@ -3160,7 +3179,9 @@ function engine.drawApparelScreen(parts, selection, scrollOffset, wornSelection)
     end
 
     inventoryWin.setCursorPos(1, screenH)
+    inventoryWin.setTextColor(colors.yellow)
     inventoryWin.write("[Tab] cycle worn  [A] close")
+    inventoryWin.setTextColor(colors.white)
 
     inventoryWin.setVisible(true)
 end
@@ -3303,7 +3324,9 @@ function engine.drawCharacterScreen(rows, selection, scrollOffset)
     end
 
     inventoryWin.setCursorPos(1, screenH)
+    inventoryWin.setTextColor(colors.yellow)
     inventoryWin.write("[Enter] take  [S] spend skill point  [C] close")
+    inventoryWin.setTextColor(colors.white)
 
     inventoryWin.setVisible(true)
 end
@@ -3433,7 +3456,9 @@ function engine.drawQuestLogScreen(rows, selection, scrollOffset)
     end
 
     inventoryWin.setCursorPos(1, screenH)
+    inventoryWin.setTextColor(colors.yellow)
     inventoryWin.write("[J] close")
+    inventoryWin.setTextColor(colors.white)
 
     inventoryWin.setVisible(true)
 end
@@ -3504,10 +3529,12 @@ function engine.drawFactionsScreen(factionIds, selection, descScroll)
     factionLogoWin.setCursorPos(1, 1)
     factionLogoWin.write("[ no logo ]")
     local _, logoHeight = factionLogoWin.getSize()
+    factionLogoWin.setTextColor(colors.yellow)
     factionLogoWin.setCursorPos(1, logoHeight - 1)
     factionLogoWin.write("L/R: faction  U/D: scroll")
     factionLogoWin.setCursorPos(1, logoHeight)
     factionLogoWin.write("[F] close")
+    factionLogoWin.setTextColor(colors.white)
     factionLogoWin.setVisible(true)
 
     local factionId = factionIds[selection]
@@ -3560,7 +3587,7 @@ function engine.drawFactionsScreen(factionIds, selection, descScroll)
     factionDescWin.setVisible(false)
     factionDescWin.clear()
     if factionId then
-        local lines = factionEntries[factionId].description
+        local lines = engine.wrapTextToWindow(factionDescWin, factionEntries[factionId].description)
         local _, height = factionDescWin.getSize()
         for i = 1, height do
             local line = lines[descScroll + i]
@@ -3614,8 +3641,9 @@ function engine.runFactionsScreen()
         elseif key == keys.down then
             local factionId = factionIds[selection]
             if factionId then
+                local lines = engine.wrapTextToWindow(factionDescWin, factionEntries[factionId].description)
                 local _, height = factionDescWin.getSize()
-                local maxScroll = math.max(0, #factionEntries[factionId].description - height)
+                local maxScroll = math.max(0, #lines - height)
                 descScroll = math.min(maxScroll, descScroll + 1)
             end
             redraw()
