@@ -3433,6 +3433,29 @@ function engine.resetCombatLog()
     engine.drawCombatLog()
 end
 
+-- Paints one map cell in the combat field pane at grid (x, y), in `color` -
+-- translating through the same camera origin engine.drawRoomView used (see
+-- combatState.cameraX/Y, stashed by engine.drawCombatField) now that the
+-- map can scroll. A cell currently off-screen is silently skipped rather
+-- than writing into an unrelated part of the window; returns whether it
+-- actually painted, so a caller that needs to know (combatState.flash)
+-- can. Shared by the selected-enemy highlight below and combatState.flash,
+-- so both agree on what "on-screen" means.
+function engine.paintFieldCell(x, y, glyph, color)
+    local camX, camY = combatState.cameraX or 1, combatState.cameraY or 1
+    local screenX, screenY = x - camX + 1, y - camY + 1
+    local winW, winH = combatMapWin.getSize()
+    if screenX < 1 or screenX > winW or screenY < 1 or screenY > winH - 2 then
+        return false
+    end
+
+    combatMapWin.setTextColor(color)
+    combatMapWin.setCursorPos(screenX, screenY + 1)
+    combatMapWin.write(glyph)
+    combatMapWin.setTextColor(colors.white)
+    return true
+end
+
 -- Shows the same real room engine.drawMain does (walls, doors, items and
 -- all - see engine.drawRoomView) with every combatant in the scene
 -- overlaid on top, so position (and thus range/spread) is something the
@@ -3440,7 +3463,7 @@ end
 -- pane rather than sharing a full-screen window with the action menu.
 -- Stashes the camera origin it used on combatState so combatState.flash
 -- can translate a hit's grid coordinates into the same screen space.
-function engine.drawCombatField(loc, scene)
+function engine.drawCombatField(loc, scene, selectedIndex)
     combatMapWin.setVisible(false)
     combatMapWin.clear()
 
@@ -3451,33 +3474,34 @@ function engine.drawCombatField(loc, scene)
 
     combatState.cameraX, combatState.cameraY = engine.drawRoomView(combatMapWin, loc, player.gridX, player.gridY, extraCells)
 
+    -- The currently-selected enemy (Tab cycles it - see engine.promptAction)
+    -- gets its own "E" repainted yellow right over the plain one drawRoomView
+    -- just drew, same targeted-repaint approach combatState.flash already
+    -- uses rather than teaching drawRoomView per-cell colors for one caller.
+    local selected = scene[selectedIndex]
+    if selected then
+        engine.paintFieldCell(selected.gridX, selected.gridY, "E", colors.yellow)
+    end
+
     combatMapWin.setVisible(true)
 end
 
 -- Briefly flips a single map cell to red, for a hit landing - the map's
 -- already sitting there visible from the last engine.drawCombatField, so this
 -- just paints straight over the one cell rather than redrawing the whole
--- pane, then paints it back once combatState.logDelay has passed. Grid
--- coordinates have to go through the same camera translation
--- engine.drawRoomView used (see combatState.cameraX/Y, stashed by
--- engine.drawCombatField) now that the map can scroll - a cell that's
--- currently off-screen just doesn't flash at all rather than writing
--- into an unrelated part of the window.
+-- pane, then paints it back once combatState.logDelay has passed. Restores
+-- to yellow rather than white if this happens to be the currently-selected
+-- enemy's own cell (a grenade or an AOE can flash a foe that isn't the one
+-- selected, same as it can flash the player's own "@") - otherwise the
+-- flash would silently clear the selection highlight it landed on.
 function combatState.flash(x, y, symbol)
-    local camX, camY = combatState.cameraX or 1, combatState.cameraY or 1
-    local screenX, screenY = x - camX + 1, y - camY + 1
-    local winW, winH = combatMapWin.getSize()
-    if screenX < 1 or screenX > winW or screenY < 1 or screenY > winH - 2 then
+    if not engine.paintFieldCell(x, y, symbol, colors.red) then
         return
     end
-
-    combatMapWin.setTextColor(colors.red)
-    combatMapWin.setCursorPos(screenX, screenY + 1)
-    combatMapWin.write(symbol)
     sleep(combatState.logDelay)
-    combatMapWin.setTextColor(colors.white)
-    combatMapWin.setCursorPos(screenX, screenY + 1)
-    combatMapWin.write(symbol)
+    local selected = combatState.scene and combatState.scene[combatState.selectedIndex]
+    local restoreColor = (selected and selected.gridX == x and selected.gridY == y) and colors.yellow or colors.white
+    engine.paintFieldCell(x, y, symbol, restoreColor)
 end
 
 -- The bottom-right pane: every foe still in the scene, health included, with
@@ -3515,7 +3539,7 @@ end
 -- picker returns, before resolution logging begins.
 function combatState.redrawPanes()
     if combatState.loc then
-        engine.drawCombatField(combatState.loc, combatState.scene)
+        engine.drawCombatField(combatState.loc, combatState.scene, combatState.selectedIndex)
         engine.drawEnemyList(combatState.scene, combatState.selectedIndex)
         engine.drawCombatLog()
 
@@ -3551,7 +3575,7 @@ local ACTION_LABELS = {
 -- own. Returns (action, moveDir, selectedIndex); moveDir is only
 -- meaningful when action == "move".
 function engine.promptAction(loc, scene, selectedIndex, restricted)
-    engine.drawCombatField(loc, scene)
+    engine.drawCombatField(loc, scene, selectedIndex)
     engine.drawEnemyList(scene, selectedIndex)
     engine.drawCombatLog()
 
@@ -3593,7 +3617,18 @@ function engine.promptAction(loc, scene, selectedIndex, restricted)
     while true do
         local _, key = os.pullEvent("key")
         if key == keys.tab then
+            local oldFoe = scene[selectedIndex]
             selectedIndex = selectedIndex % #scene + 1
+            -- Targeted repaint rather than a full engine.drawCombatField -
+            -- Tab doesn't cost a turn or change anything else on the map,
+            -- so only the highlight itself needs to move.
+            if oldFoe then
+                engine.paintFieldCell(oldFoe.gridX, oldFoe.gridY, "E", colors.white)
+            end
+            local newFoe = scene[selectedIndex]
+            if newFoe then
+                engine.paintFieldCell(newFoe.gridX, newFoe.gridY, "E", colors.yellow)
+            end
             engine.drawEnemyList(scene, selectedIndex)
         elseif key == keys.space then
             return "interact", nil, selectedIndex

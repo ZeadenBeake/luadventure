@@ -133,7 +133,16 @@ combined line, so the delay actually paces them apart; a multi-hit ability
 also logs a "dealt N damage" summary line once it's done. Landing a hit also
 flashes the target's map glyph red for the same `logDelay`
 (`combatState.flash`, straight ANSI color via `term`'s `colors` API - works
-fine through CraftOS-PC's ncurses CLI renderer). Since a fullscreen
+fine through CraftOS-PC's ncurses CLI renderer). `combatState.flash` restores
+to yellow rather than white afterward if the cell it just painted belongs to
+the currently-selected enemy (see "Enemy selection" below) - it can flash a
+foe that isn't the one selected (a grenade's blast, say) or the player's own
+`@`, so it checks by comparing the flashed coordinates against
+`combatState.scene[combatState.selectedIndex]`'s own `gridX`/`gridY` rather
+than assuming. Both share `engine.paintFieldCell(x, y, glyph, color)` - the
+same camera-translated, off-screen-safe single-cell repaint, extracted so
+the selection highlight and the flash always agree on what "on-screen"
+means. Since a fullscreen
 sub-picker (choosing an attack, a limb, an ability) draws right over the
 map/enemy/log/action panes, whatever was showing needs putting back the
 moment the picker closes - `combatState.redrawPanes` redraws the map, enemy
@@ -723,7 +732,16 @@ cumulative-across-every-part math, see "Body system"/"Surrender", is a
 separate figure this list was never updated to reflect), with whichever
 one's currently selected marked - `Tab` cycles it, handled right inside
 `promptAction`'s own key loop
-(doesn't cost a turn or count as an action). **Fight** and **Look**, and
+(doesn't cost a turn or count as an action). The selected foe's own map
+glyph is highlighted yellow too (`engine.drawCombatField`'s `selectedIndex`
+parameter, painted via `engine.paintFieldCell` right after `drawRoomView`
+draws the plain map) - so the enemy list's own marker isn't the only place
+the selection shows. `Tab` doesn't trigger a full `drawCombatField` redraw
+for this, though; it repaints just the two affected cells directly (the
+old selection back to white, the new one to yellow), the same
+targeted-single-cell approach `combatState.flash` already uses, since
+nothing else about the map needs to change for a selection change alone.
+**Fight** and **Look**, and
 whatever enemy an ability's own effect targets, all act on this selection
 rather than a hardcoded single opponent - `runEncounter` reads it back out
 as `foe` (`scene[selectedEnemyIndex]`) once `promptAction` returns. A group
