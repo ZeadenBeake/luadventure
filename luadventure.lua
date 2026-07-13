@@ -1898,6 +1898,16 @@ function engine.getInventoryRows(combatant)
         end
     end
 
+    for i, itemId in ipairs(combatant.worn) do
+        local item = itemEntries[itemId]
+        local prefix = (item.layer == "outer") and "Outer: " or "Inner: "
+        table.insert(rows, {
+            kind = "worn", index = i, itemId = itemId,
+            name = prefix .. item.name,
+            countText = "", bulkText = engine.formatBulk(item.bulk),
+        })
+    end
+
     local groups = {}
     for _, itemId in ipairs(combatant.inventory) do
         local group = groups[itemId]
@@ -2405,15 +2415,32 @@ function engine.runInventoryScreen()
 
             redraw()
         elseif key == ACTIVATE_KEY then
-            -- "Use it immediately" - reload for ammo, or whatever ability
-            -- an item/belt entry grants (the salve, so far); anything else
-            -- (a weapon sitting in inventory, apparel, ammo itself, an
-            -- equip slot) just doesn't respond - equipping a weapon needs a
-            -- chosen destination, which is what Move is for.
+            -- "Use it immediately" - reload for ammo, take a worn item back
+            -- off, put on a piece of apparel (checking engine.canWearItem's
+            -- layer/area overlap rule, since nothing upstream of this
+            -- already did), or whatever ability an item/belt entry grants
+            -- otherwise (the salve, so far). A spare weapon sitting loose,
+            -- or an equip slot, still doesn't respond either way -
+            -- equipping a weapon needs a chosen destination, which is what
+            -- Move is for.
             local entry = rows[selection]
             if entry then
-                if entry.kind == "ammo" then
+                if entry.kind == "worn" then
+                    table.remove(player.worn, entry.index)
+                    table.insert(player.inventory, entry.itemId)
+                    engine.logActivity(engine.dialogue("{{name}} took off the " .. itemEntries[entry.itemId].name .. ".", player))
+                elseif entry.kind == "ammo" then
                     engine.reloadWeapon(player, entry.slot)
+                elseif entry.itemId and itemEntries[entry.itemId].layer then
+                    local canWear, conflictId = engine.canWearItem(player, entry.itemId)
+                    if canWear then
+                        engine.consumeCarriedItem(player, entry, entry.itemId)
+                        table.insert(player.worn, entry.itemId)
+                        engine.logActivity(engine.dialogue("{{name}} put on the " .. itemEntries[entry.itemId].name .. ".", player))
+                    else
+                        engine.logActivity("Can't wear the " .. itemEntries[entry.itemId].name .. " - it conflicts with the " ..
+                            itemEntries[conflictId].name .. " already worn.")
+                    end
                 elseif entry.itemId then
                     local abilityId = itemEntries[entry.itemId].abilities and itemEntries[entry.itemId].abilities[1]
                     local ability = abilityId and abilityEntries[abilityId]

@@ -485,7 +485,9 @@ Worn items (`character.worn`, a flat list of item ids) each declare a
 (`upper_body`, `hand`, `head`, ...), and flat per-damage-type `coverage`.
 Areas roll up into **zones** (`COVERAGE_AREAS`/`AREA_TO_ZONE`) that match a
 body part's own `zone` field. Two items on the same layer can't claim
-overlapping areas (`canWearItem`).
+overlapping areas (`canWearItem`, called live from Inventory's `Enter` -
+see "Inventory & equipment" - and bypassed outright by the debug
+console's `wear`/`unwear`).
 
 Damage reduction only cares about the zone as a whole, not which exact area
 got hit - and critically, it's the **average** coverage across every area in
@@ -947,27 +949,34 @@ one-row bar - that bar still exists as a page-tab strip (`Tab` to toggle),
 just repurposed. Rows, top to bottom: belt slots (always visible, even
 empty), one **equip slot** per MANIPULATE limb (`getManipulateLimbs`,
 derived from the body rather than a hardcoded pair of hands), that limb's
-ammo (only shown if what's wielded there actually uses ammo), then
-everything else in the bag, grouped by id with a count (five energy
-charges are one row, not five).
+ammo (only shown if what's wielded there actually uses ammo), one row per
+currently-**worn** apparel item (`"Outer: "`/`"Inner: "` plus its name, by
+`layer`), then everything else in the bag, grouped by id with a count
+(five energy charges are one row, not five).
 
 Two keys do the work, split by what they mean rather than what they touch:
 
 - **`Enter`** - use immediately. Reload for an ammo row (bypassing the
   in-combat reload action entirely - nothing special happens on reload, so
-  there's no reason to make the player go through combat for it); whatever
-  ability a belt/inventory entry grants otherwise (the salve, the splint -
-  `ability.effect` is called directly, works outside combat since nothing
-  it does is combat-specific, and a cancelled limb-pick correctly doesn't
-  consume it, same `"noop"` convention combat abilities already use). An
-  ability that's ever usable both ways can tell which by whether it was
-  handed a real `enemy` (only `runEncounter` ever passes one) - the salve
-  uses this to show its usual full-screen confirmation in a fight, but just
-  log the result (see "Activity log") outside one, where a "press any key"
-  prompt would just be friction once the limb's already picked.
-  Everything else (a spare weapon sitting in the bag, apparel, ammo itself,
-  an equip slot) doesn't respond - equipping needs a chosen destination,
-  which Enter alone can't express.
+  there's no reason to make the player go through combat for it); take a
+  worn row back off (straight back into the bag, no check needed - taking
+  something off can't conflict with anything); put on a bagged/belted item
+  that has a `layer` (apparel), checking `engine.canWearItem`'s layer/area
+  overlap rule first and, on a conflict, logging which already-worn item
+  it collides with instead of moving it (see "Apparel & coverage"); or
+  whatever ability a belt/inventory entry grants otherwise (the salve, the
+  splint - `ability.effect` is called directly, works outside combat since
+  nothing it does is combat-specific, and a cancelled limb-pick correctly
+  doesn't consume it, same `"noop"` convention combat abilities already
+  use). An ability that's ever usable both ways can tell which by whether
+  it was handed a real `enemy` (only `runEncounter` ever passes one) - the
+  salve uses this to show its usual full-screen confirmation in a fight,
+  but just log the result (see "Activity log") outside one, where a "press
+  any key" prompt would just be friction once the limb's already picked.
+  Wearing/removing apparel always just logs the result the same way,
+  success or conflict alike. Everything else (a spare weapon sitting in
+  the bag, ammo itself, an equip slot) doesn't respond - equipping a
+  weapon needs a chosen destination, which Enter alone can't express.
 - **`M` (Move)** - picks up whatever's in the selected row (its ammo, if it's
   a weapon with any loaded, travels right along with it), then places it
   wherever you navigate to next and press `M` again. A weapon *or* a plain
@@ -1113,13 +1122,13 @@ its own picker when the part's already chosen for it.
 
 A third full-screen page (`engine.runApparelScreen`, `a` to open/close,
 reachable from the top bar too - see "Screen layout"), same two-pane
-layout and shared `inventoryWin` every other one here uses. Unlike
-Medical, this is a pure viewer - there's nothing to act on, since nothing
-in the game can actually equip or remove apparel through any UI yet (see
-"Known gaps" - `engine.canWearItem` exists, just isn't wired to a live
-action). Left half is the same per-part list `collectLabeledParts` always
-gives (see "Medical"); right half is full coverage detail on whichever
-part is currently selected.
+layout and shared `inventoryWin` every other one here uses. This is a
+pure viewer - putting apparel on and taking it off both happen from the
+Inventory screen instead (see "Inventory & equipment"), same as every
+other item action; Apparel only ever displays the result. Left half is
+the same per-part list `collectLabeledParts` always gives (see
+"Medical"); right half is full coverage detail on whichever part is
+currently selected.
 
 Two independent cursors, since they answer different questions and
 shouldn't have to share one: arrow keys (or a part's own digit straight
@@ -1145,12 +1154,11 @@ damage type with nothing covering it on either layer is left out
 entirely rather than shown as a bare "0" - most parts only have two or
 three types actually covered at once.
 
-Since nothing in the game can equip apparel through any real action yet,
-the debug console's own `wear`/`unwear <itemId>` (bypassing
+The debug console's own `wear`/`unwear <itemId>` (bypassing
 `engine.canWearItem`'s layer/area overlap check entirely, same as every
-other debug command bypasses whatever rule would normally apply) is
-currently the only way to actually populate `player.worn` for this
-screen to have anything to show.
+other debug command bypasses whatever rule would normally apply) still
+exists alongside the real action, for setting up a scenario without
+having to actually carry the item first.
 
 ## Quests
 
@@ -1465,13 +1473,14 @@ NPC-to-NPC conversation system.
   it has nothing to drop - disarming (arm/hand destruction, a future disarm
   skill) is a player-only mechanic for now, same as the dropped-weapon
   system it's built on top of.
-- Apparel can be *viewed* (see "Apparel") but still not actually equipped
-  or removed through anything the player can reach - worn items are still
-  only ever set directly in code (`spawnTestDummy`) or the debug
-  console's own `wear`/`unwear`. `engine.canWearItem` (the layer/area
-  overlap rule a real "wear it" action would need to check) exists but
-  isn't called from anywhere live yet. Only weapons got the "equip slot"
-  treatment.
+- Coverage **areas** (`hand`, `foot`, ...) aren't split left/right the way
+  body parts are - both hands share one `hands` zone, so a single item
+  covering `hand` protects both at once and there's no way to express "just
+  the left glove." If a genuinely one-sided item (a single glove or boot)
+  ever gets made, it needs its own left/right pair of item entries rather
+  than trying to teach the area system a side it doesn't have - `covers`
+  itself would need new paired areas (`left_hand`/`right_hand` or similar)
+  for that to actually differ per side; nothing does yet.
 - Quest/NPC dialogue still always shows a full prompt, even the purely
   flavor ones - only item pickup, doors, and outside-combat item use moved
   to the activity log so far.
