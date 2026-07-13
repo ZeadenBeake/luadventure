@@ -482,12 +482,35 @@ plus `level`/`health`/`max_health`.
 
 Worn items (`character.worn`, a flat list of item ids) each declare a
 `layer` (`inner`/`outer`), which finer-grained **areas** they `covers`
-(`upper_body`, `hand`, `head`, ...), and flat per-damage-type `coverage`.
-Areas roll up into **zones** (`COVERAGE_AREAS`/`AREA_TO_ZONE`) that match a
-body part's own `zone` field. Two items on the same layer can't claim
-overlapping areas (`canWearItem`, called live from Inventory's `Enter` -
-see "Inventory & equipment" - and bypassed outright by the debug
+(`upper_body`, `left_hand`, `head`, ...), and flat per-damage-type
+`coverage`. Areas roll up into **zones** (`COVERAGE_AREAS`/`AREA_TO_ZONE`)
+that match a body part's own `zone` field. Two items on the same layer
+can't claim overlapping areas (`canWearItem`, called live from Inventory's
+`Enter` - see "Inventory & equipment" - and bypassed outright by the debug
 console's `wear`/`unwear`).
+
+A part that comes in a left/right pair (arm, hand, leg, foot) has its own
+sided zone (`left_arm`/`right_arm`, `left_hand`/`right_hand`, ...) and
+sided areas to match - `left_hand`/`right_hand` are genuinely separate
+areas, not one `hand` area shared by both. head/torso/tail stay unsided
+(one of each per body, nothing to side). A part's own `zone` field
+(`partEntries`) is only ever the unsided base name (`hand`, not
+`left_hand`) - the same template is reused for both sides, so it can't bake
+a side into itself. The actual side gets stitched on once, at attach time
+(`engine.sidedZone`, called from both `engine.attachPart` and
+`engine.deserializeBodyPart` - a loaded save re-derives it fresh from the
+slot tree rather than trusting a stored value, same reasoning as everything
+else `engine.serializeBodyPart` leaves out): a slot itself sided
+(`left_arm`/`right_arm`, attached straight onto the torso) carries it
+directly, while a slot that isn't (`hand`, attached under an arm; `foot`,
+under a leg) inherits whichever side its own parent's zone already has.
+An item meaning to protect a symmetric pair either way (a jacket's sleeves,
+`ballistic_underlayer_top`) lists both sides' areas explicitly rather than
+one generic area standing in for both; a genuinely one-sided item (a single
+glove, `left_glove`/`right_glove`) is its own separate item entry per side
+instead - real one-sided coverage can't be expressed any other way, and
+trying to teach one item entry "which side you put it on" would need a
+whole extra picker for something two item entries already say for free.
 
 Damage reduction only cares about the zone as a whole, not which exact area
 got hit - and critically, it's the **average** coverage across every area in
@@ -1473,14 +1496,6 @@ NPC-to-NPC conversation system.
   it has nothing to drop - disarming (arm/hand destruction, a future disarm
   skill) is a player-only mechanic for now, same as the dropped-weapon
   system it's built on top of.
-- Coverage **areas** (`hand`, `foot`, ...) aren't split left/right the way
-  body parts are - both hands share one `hands` zone, so a single item
-  covering `hand` protects both at once and there's no way to express "just
-  the left glove." If a genuinely one-sided item (a single glove or boot)
-  ever gets made, it needs its own left/right pair of item entries rather
-  than trying to teach the area system a side it doesn't have - `covers`
-  itself would need new paired areas (`left_hand`/`right_hand` or similar)
-  for that to actually differ per side; nothing does yet.
 - Quest/NPC dialogue still always shows a full prompt, even the purely
   flavor ones - only item pickup, doors, and outside-combat item use moved
   to the activity log so far.

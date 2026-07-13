@@ -142,7 +142,13 @@ local organEntries = {
 -- `zone` is which apparel coverage zone this part draws its protection from
 -- (see COVERAGE_AREAS/AREA_TO_ZONE below) - horns, antennae, and a stinger
 -- can't be covered at all, so their templates just don't set one, which
--- makes them fall through to whatever zone their parent has instead.
+-- makes them fall through to whatever zone their parent has instead. For a
+-- part that comes in a left/right pair (arm, hand, leg, foot), this is just
+-- the unsided base name ("arm", not "left_arm") - the same template is
+-- reused for both sides, so it can't bake a side in itself. The actual
+-- sided zone ("left_arm"/"right_arm") gets stitched on once, at attach time
+-- (engine.sidedZone, called from engine.attachPart and
+-- engine.deserializeBodyPart), from whichever slot it's attached into.
 --
 -- `aimDifficulty` (default 1, omitted where it doesn't apply) divides both
 -- this part's hit chance (see the engine's getFinalHitChance) and its own
@@ -163,7 +169,7 @@ local partEntries = {
     human_arm = {
         tags = {},
         health = 100,
-        zone = "arms",
+        zone = "arm",
         organSlots = { skin = "human_skin", bone = "human_bone", muscle = "human_muscle" },
         subSlots = {
             hand = { requires = {} },
@@ -172,7 +178,7 @@ local partEntries = {
     human_hand = {
         tags = { MANIPULATE = true }, -- can hold something, so can also throw an unarmed punch
         health = 100,
-        zone = "hands",
+        zone = "hand",
         aimDifficulty = 1.5,
         organSlots = { skin = "human_skin", bone = "human_bone", muscle = "human_muscle" },
         subSlots = {},
@@ -180,7 +186,7 @@ local partEntries = {
     human_leg = {
         tags = {},
         health = 100,
-        zone = "legs",
+        zone = "leg",
         organSlots = { skin = "human_skin", bone = "human_bone", muscle = "human_muscle" },
         subSlots = {
             foot = { requires = {} },
@@ -189,7 +195,7 @@ local partEntries = {
     human_foot = {
         tags = {},
         health = 100,
-        zone = "feet",
+        zone = "foot",
         organSlots = { skin = "human_skin", bone = "human_bone", muscle = "human_muscle" },
         subSlots = {},
     },
@@ -281,13 +287,24 @@ local damageTypes = { "bludgeoning", "piercing", "slashing", "fire", "frost", "r
 -- engine doesn't track hit location any finer than "which part got hit."
 -- Note: "belt" here is a coverage area (a waist accessory slot), unrelated
 -- to the combat belt slots.
+--
+-- head/torso/tail are singular - nothing to side, one of each per body.
+-- arm/hand/leg/foot come in a left/right pair (see engine.sidedZone), so
+-- both the zone and its areas are sided here too - a glove covering just
+-- `right_hand` genuinely doesn't touch the left one, and an item meaning to
+-- cover a symmetric pair (a jacket's sleeves, say) lists both sides'
+-- areas explicitly rather than one generic one standing in for both.
 local COVERAGE_AREAS = {
     head = { "face", "head", "neck" },
     torso = { "upper_body", "lower_body", "pelvis", "belt" },
-    arms = { "upper_arm", "lower_arm" },
-    hands = { "hand" },
-    legs = { "upper_leg", "lower_leg" },
-    feet = { "foot" },
+    left_arm = { "left_upper_arm", "left_lower_arm" },
+    right_arm = { "right_upper_arm", "right_lower_arm" },
+    left_hand = { "left_hand" },
+    right_hand = { "right_hand" },
+    left_leg = { "left_upper_leg", "left_lower_leg" },
+    right_leg = { "right_upper_leg", "right_lower_leg" },
+    left_foot = { "left_foot" },
+    right_foot = { "right_foot" },
     tail = { "upper_tail", "lower_tail" },
 }
 
@@ -548,18 +565,20 @@ local itemEntries = {
     },
     -- The undersuit real armor is meant to be worn over - both go on the
     -- inner layer, same as padded_shirt (and so can't stack with it, or
-    -- each other, over any area they share). `pelvis` sits in the torso
-    -- zone (see COVERAGE_AREAS), not legs, so the bottom half's own
-    -- coverage there also nudges the torso's average up slightly - a
-    -- long underlayer riding up to the waist plausibly does that too.
+    -- each other, over any area they share). A symmetric garment like this
+    -- lists both sides' areas explicitly (see COVERAGE_AREAS) rather than
+    -- one generic area standing in for both. `pelvis` sits in the torso
+    -- zone, not either leg, so the bottom half's own coverage there also
+    -- nudges the torso's average up slightly - a long underlayer riding up
+    -- to the waist plausibly does that too.
     ballistic_underlayer_top = {
         name = "Ballistic Underlayer Top", bulk = 1, layer = "inner",
-        covers = { "upper_body", "lower_body", "upper_arm", "lower_arm" },
+        covers = { "upper_body", "lower_body", "left_upper_arm", "right_upper_arm", "left_lower_arm", "right_lower_arm" },
         coverage = { bludgeoning = 1, piercing = 2, slashing = 1 },
     },
     ballistic_underlayer_bottom = {
         name = "Ballistic Underlayer Bottom", bulk = 1, layer = "inner",
-        covers = { "upper_leg", "lower_leg", "pelvis" },
+        covers = { "left_upper_leg", "right_upper_leg", "left_lower_leg", "right_lower_leg", "pelvis" },
         coverage = { bludgeoning = 1, piercing = 2, slashing = 1 },
     },
     ballistic_vest = {
@@ -571,6 +590,34 @@ local itemEntries = {
         name = "Helmet", bulk = 1, layer = "outer",
         covers = { "head" },
         coverage = { bludgeoning = 4, piercing = 3, slashing = 3 },
+    },
+
+    -- A genuinely one-sided item (unlike the two above) can't be expressed
+    -- as one item covering a shared area - a real single glove only
+    -- protects the hand it's actually on. So, per the sided areas above,
+    -- these are two separate item entries, each claiming just its own
+    -- side's `hand` - the pattern any future single-sided item (a boot,
+    -- an arm guard) should follow rather than trying to add a "which side"
+    -- choice to wearing one generic item.
+    left_glove = {
+        name = "Left Glove", bulk = 0.1, layer = "outer",
+        covers = { "left_hand" },
+        coverage = { bludgeoning = 2, piercing = 2, slashing = 3 },
+    },
+    right_glove = {
+        name = "Right Glove", bulk = 0.1, layer = "outer",
+        covers = { "right_hand" },
+        coverage = { bludgeoning = 2, piercing = 2, slashing = 3 },
+    },
+    left_boot = {
+        name = "Left Boot", bulk = 0.5, layer = "outer",
+        covers = { "left_foot" },
+        coverage = { bludgeoning = 3, piercing = 2, slashing = 2 },
+    },
+    right_boot = {
+        name = "Right Boot", bulk = 0.5, layer = "outer",
+        covers = { "right_foot" },
+        coverage = { bludgeoning = 3, piercing = 2, slashing = 2 },
     },
 }
 

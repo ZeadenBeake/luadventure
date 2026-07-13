@@ -203,6 +203,30 @@ function engine.newTorso()
     }
 end
 
+-- A paired part's template zone (see partEntries) is just the unsided base
+-- name ("arm"), since the same template serves both sides - this stitches
+-- the actual side on, once, from whichever slot it landed in. Slots that
+-- are themselves sided (left_arm/right_arm/left_leg/right_leg, attached
+-- straight onto the torso) carry it directly; a slot that isn't (hand,
+-- attached under an arm; foot, under a leg) inherits it from its own
+-- parent's zone instead, which is already sided by the time a child
+-- attaches under it. Anything unpaired (head, torso, tail) has no
+-- left_/right_ to find anywhere in that chain and comes back unchanged.
+-- Called from both engine.attachPart and engine.deserializeBodyPart, so a
+-- loaded save re-derives the same zone a fresh attach would rather than
+-- trusting a stored one (see engine.serializeBodyPart's own note on that).
+function engine.sidedZone(baseZone, slotName, parentZone)
+    if not baseZone then
+        return nil
+    end
+    local side = slotName:match("^(left)_") or slotName:match("^(right)_")
+        or (parentZone and (parentZone:match("^(left)_") or parentZone:match("^(right)_")))
+    if side then
+        return side .. "_" .. baseZone
+    end
+    return baseZone
+end
+
 -- Attaches a whole new part into one of a parent part's sub-slots (a hand into
 -- an arm, a leg into the torso, ...). Fails if the slot is tag-locked.
 function engine.attachPart(parent, slotName, templateId, globalTags)
@@ -213,6 +237,7 @@ function engine.attachPart(parent, slotName, templateId, globalTags)
     end
     local child = engine.instantiatePart(templateId)
     child.parent = parent
+    child.zone = engine.sidedZone(child.zone, slotName, parent.zone)
     parent.subSlots[slotName] = child
     return true
 end
@@ -309,6 +334,7 @@ function engine.deserializeBodyPart(data, isRoot)
     for slotName, childData in pairs(data.subSlots) do
         local child = engine.deserializeBodyPart(childData, false)
         child.parent = part
+        child.zone = engine.sidedZone(child.zone, slotName, part.zone)
         part.subSlots[slotName] = child
     end
     return part
