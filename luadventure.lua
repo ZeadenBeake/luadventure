@@ -665,8 +665,12 @@ function engine.getBulkCapacity(combatant)
 end
 
 -- "Light" bulk (0.1) displays as L rather than a fraction; anything else is
--- just the plain number.
+-- just the plain number. Rounded to the nearest tenth first - no item's own
+-- bulk is ever finer than that, but a derived value like engine.
+-- getBulkCapacity (limb health/strength fractions, averaged across every
+-- part) can come out as a long, meaningless decimal otherwise.
 function engine.formatBulk(bulk)
+    bulk = math.floor(bulk * 10 + 0.5) / 10
     if bulk == 0.1 then
         return "L"
     end

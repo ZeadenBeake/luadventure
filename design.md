@@ -1143,7 +1143,14 @@ flat `bulk` cost except 0.1 ("Light", displayed as `L`). Capacity
 (`getBulkCapacity`) is `10 * average limb strength + bulkBonus` (equipment
 like a backpack would raise `bulkBonus`; nothing does yet). Equipped (or
 holstered) weapons don't count against it, same as worn clothes never
-have - only what's actually sitting loose in the bag does.
+have - only what's actually sitting loose in the bag does. `engine.
+formatBulk` rounds to the nearest tenth before displaying anything - no
+item's own `bulk` is ever finer than that, but `getBulkCapacity` is a real
+average of several parts' own health/maxHealth ratios chained up the body
+tree (see "Stats & combat"), which can otherwise come out as a long,
+meaningless decimal (health ratios like `41/67` aren't clean to begin
+with, and the ancestor-chain multiplication compounds that further) the
+moment a limb takes anything but a round chunk of damage.
 
 **Belt**: a fixed number of slots (`beltSize`, currently 1) for
 combat-usable items, separate from the main bag - and, like an equip slot,
@@ -1649,3 +1656,15 @@ NPC-to-NPC conversation system.
 - Quest/NPC dialogue still always shows a full prompt, even the purely
   flavor ones - only item pickup, doors, and outside-combat item use moved
   to the activity log so far.
+- Fleeing and later re-engaging the same fight fully heals whoever's still
+  alive in it - `engine.runEncounter` calls a fresh `enemyEntries[...].spawn()`
+  every time an encounter starts, and a flee (see "Sight-triggered combat")
+  only carries a surviving foe's *position* forward via its own
+  `spawnObject`, not the combatant instance itself (body, health, statuses,
+  cooldowns) - a new one is built from scratch on the next engagement.
+  Deliberate for now, not an oversight: each encounter starting clean keeps
+  the flee/re-engage loop simple, at the cost of a partial win before
+  retreating not actually carrying forward. Persisting real combatant state
+  across a flee (storing it on `spawnObject` itself, restoring it in
+  `spawn()`) would be the fix if that ever matters more than the
+  simplicity does.
