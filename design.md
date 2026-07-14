@@ -470,8 +470,7 @@ Five backgrounds exist so far:
 - **Sacrificed Wayfarer** - a member of the Wayfarer pirate gangs, handed to
   Signus Biomedical as punishment for breaking the pirate code.
   `statAdjustments = { reflex = 0.10 }`; `reputationBonus = { wayfarers,
-  -25 }` (the exact bottom edge of Neutral - the gang making an example of
-  them).
+  -30 }`, landing at Disliked (the gang making an example of them).
 
 Every background's `description` (the in-world flavor text shown in the
 picker) is still blank - narrative content, not mechanical wiring, and

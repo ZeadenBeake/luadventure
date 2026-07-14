@@ -1158,7 +1158,7 @@ local backgroundEntries = {
         name = "Sacrificed Wayfarer",
         description = "",
         statAdjustments = { reflex = 0.10 },
-        reputationBonus = { factionId = "wayfarers", amount = -25 },
+        reputationBonus = { factionId = "wayfarers", amount = -30 },
     },
 }
 
