@@ -58,6 +58,7 @@ local itemEntries = gamedata.itemEntries
 local abilityEntries = gamedata.abilityEntries
 local talentEntries = gamedata.talentEntries
 local speciesEntries = gamedata.speciesEntries
+local backgroundEntries = gamedata.backgroundEntries
 local enemyEntries = gamedata.enemyEntries
 local questEntries = gamedata.questEntries
 local factionEntries = gamedata.factionEntries
@@ -1127,6 +1128,12 @@ player.steps = 0 -- Increments on every successful step, in or out of combat.
 -- somehow doesn't happen first.
 player.name = "Adventurer"
 player.pronouns = { subject = "they", object = "them" }
+
+-- Which backgroundEntries id the player chose (see engine.pickBackground) -
+-- who they were before the game started. Defaulted to nil here for the
+-- same reason name/pronouns are defaulted above: nothing should read this
+-- before character creation actually sets it.
+player.background = nil
 
 -- Per-quest progress ("active", "done" - not-yet-taken is just absent), and
 -- a running tally of kills by typeId (see engine.showVictoryScreen) - quest
@@ -6223,6 +6230,7 @@ function engine.buildSaveData(saveId, label)
         steps = player.steps,
         name = player.name,
         pronouns = { subject = player.pronouns.subject, object = player.pronouns.object },
+        background = player.background,
         stats = stats,
         inventory = inventory,
         equipped = equipped,
@@ -6254,6 +6262,9 @@ function engine.applySaveData(data)
     player.steps = data.steps
     player.name = data.name
     player.pronouns = { subject = data.pronouns.subject, object = data.pronouns.object }
+    -- A pre-Backgrounds save has no background field at all - same
+    -- backward-compat convention as everything else here.
+    player.background = data.background or nil
 
     player.stats = {}
     for k, v in pairs(data.stats) do player.stats[k] = v end
@@ -7262,6 +7273,64 @@ function engine.pickPronouns()
     return subject, object
 end
 
+-- Display order for the Backgrounds picker - backgroundEntries (gamedata.lua)
+-- has everything else about each one. Picked first in character creation,
+-- right after name/pronouns - who the player was before the game started,
+-- decided before anything about their body (species) or capabilities
+-- (stats) is.
+local BACKGROUND_ORDER = {
+    "lab_volunteer",
+    "ex_peacekeeper",
+    "incarcerated_separatist",
+    "gravely_wounded_trader",
+    "sacrificed_wayfarer",
+}
+
+-- A dedicated Up/Down-to-browse, Enter-to-confirm picker, rather than
+-- engine.showInteraction's flat numbered list, so the currently-highlighted
+-- background's own description previews before committing. Background
+-- flavor text isn't written yet (backgroundEntries' description fields are
+-- still blank) - this is the wiring the feature needs, not its content, so
+-- nothing here needs to change once that text exists.
+function engine.pickBackground()
+    local selection = 1
+    while true do
+        combatWin.setVisible(false)
+        combatWin.clear()
+        combatWin.setCursorPos(1, 1)
+        combatWin.write("Choose your background:")
+        local row = 3
+        for i, id in ipairs(BACKGROUND_ORDER) do
+            combatWin.setCursorPos(1, row)
+            local marker = i == selection and "> " or "  "
+            combatWin.write(marker .. backgroundEntries[id].name)
+            row = row + 1
+        end
+        row = row + 1
+        local description = backgroundEntries[BACKGROUND_ORDER[selection]].description
+        if description ~= "" then
+            row = row + engine.writeWrapped(combatWin, 1, row, description)
+        end
+        local _, height = combatWin.getSize()
+        combatWin.setTextColor(colors.yellow)
+        combatWin.setCursorPos(1, height)
+        combatWin.write("[Up/Down] select  [Enter] confirm")
+        combatWin.setTextColor(colors.white)
+        combatWin.setVisible(true)
+
+        local _, key = os.pullEvent("key")
+        if key == keys.up then
+            selection = selection - 1
+            if selection < 1 then selection = #BACKGROUND_ORDER end
+        elseif key == keys.down then
+            selection = selection + 1
+            if selection > #BACKGROUND_ORDER then selection = 1 end
+        elseif key == keys.enter then
+            return BACKGROUND_ORDER[selection]
+        end
+    end
+end
+
 -- Display order for the species menu - speciesEntries (defined alongside
 -- engine.newHumanBody/engine.newInsectoidBody) has everything else about each one.
 local SPECIES_ORDER = { "human", "insectoid" }
@@ -7360,11 +7429,11 @@ function engine.spendSkillPoint()
     end
 end
 
--- Runs once at startup: name, pronouns, species, then stat points -
--- everything character creation is responsible for, applied straight onto
--- the live player object. Species is built here (not in the early player
--- setup above) since it needs the species menu, which needs combatWin,
--- which doesn't exist until after that setup runs.
+-- Runs once at startup: name, pronouns, background, species, then stat
+-- points - everything character creation is responsible for, applied
+-- straight onto the live player object. Species is built here (not in the
+-- early player setup above) since it needs the species menu, which needs
+-- combatWin, which doesn't exist until after that setup runs.
 function engine.runCharacterCreation()
     combatWin.setVisible(false)
     combatWin.clear()
@@ -7374,6 +7443,9 @@ function engine.runCharacterCreation()
     player.name = engine.promptText(combatWin, 1, 2, 20)
 
     player.pronouns.subject, player.pronouns.object = engine.pickPronouns()
+
+    player.background = engine.pickBackground()
+    local background = backgroundEntries[player.background]
 
     local species = speciesEntries[engine.pickSpecies()]
     player.globalTags = {}
@@ -7387,6 +7459,21 @@ function engine.runCharacterCreation()
 
     for stat, delta in pairs(species.statAdjustments) do
         player.stats[stat] = player.stats[stat] + delta
+    end
+
+    -- Same flat, one-time delta as species' own statAdjustments, just
+    -- background-driven (some backgrounds leave this empty on purpose -
+    -- see backgroundEntries.gravely_wounded_trader).
+    for stat, delta in pairs(background.statAdjustments) do
+        player.stats[stat] = player.stats[stat] + delta
+    end
+
+    -- Not every background starts with a relationship to a faction (see
+    -- backgroundEntries.ex_peacekeeper) - uncapped, since this is meant to
+    -- land exactly on the number the background's own backstory implies,
+    -- not simulate a repeatable in-game gain the way a real cap would.
+    if background.reputationBonus then
+        engine.adjustReputation(background.reputationBonus.factionId, background.reputationBonus.amount)
     end
 
     local points = engine.runStatAllocation()

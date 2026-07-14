@@ -415,6 +415,71 @@ itself. `getLimbStrength` combines that with each ancestor's own condition
 (current health / max health), so a fracture on the arm still throttles a
 perfectly healthy hand at the end of it.
 
+## Backgrounds
+
+`backgroundEntries` - who the player was before the game started. Each
+entry has a `name`, an in-world `description` blurb, and `statAdjustments`
+(the exact same flat, one-time-delta shape as `speciesEntries`' own field
+below - stacking on top of whatever species already adjusted, applied once
+in `engine.runCharacterCreation`). Picked first in character creation,
+right after name/pronouns, via a dedicated `engine.pickBackground()`
+picker (`Up`/`Down` to browse, `Enter` to confirm) rather than
+`showInteraction`'s flat numbered list, so the currently-highlighted
+background's own description previews live before committing - the same
+reason the Factions screen needed real scrolling instead of a static blurb.
+The chosen id is stored on `player.background` (a plain string, `nil` until
+creation runs, same defaulting convention as `player.name`/`pronouns`), and
+persisted through save/load exactly like `specialFaction` (a single scalar
+value, `data.background or nil` on load for backward compatibility with a
+pre-Backgrounds save).
+
+An optional `reputationBonus` (a single `{ factionId, amount }` pair, absent
+on backgrounds that don't have one) is applied the same moment, via
+`engine.adjustReputation(factionId, amount)` - uncapped, since it's meant to
+land exactly on the number the background's own backstory implies, not
+simulate a repeatable in-game gain. This is also what actually makes a
+faction "known" (see "Factions & reputation") straight out of character
+creation, before the player has done anything in play yet.
+
+Five backgrounds exist so far:
+
+- **Lab Volunteer** - a Signus Biomedical employee who volunteered for the
+  splicing program (the game's own opening - waking up from a test tube,
+  not quite human - is this background's backstory). No stat bonus;
+  `reputationBonus = { signus, +30 }`, landing at Liked (Signus has the
+  paperwork proving it was voluntary, even if the result is unrecognizable).
+- **Ex-Peacekeeper** - a former UGFC Peacekeeper who saw too much and was
+  abducted. `statAdjustments = { aim = 0.10 }` (what's left of the
+  training); no `reputationBonus` at all - UGFC doesn't recognize them
+  anymore. The relationship is meant to matter later even so (easier to
+  rebuild than starting cold), which is exactly why `player.background`
+  itself is kept around rather than just being spent on a stat bonus and
+  discarded - future dialogue/quest content can check it directly.
+- **Incarcerated Separatist** - a death-row Kaeravoli Separatist, sprung
+  and spared through illegal back channels. `statAdjustments = { strength =
+  0.10 }`; `reputationBonus = { kaeravoli, +20 }` (Neutral band - proving
+  who they once were is what's meant to make climbing back to Sympathizer
+  or further easy, not a free head start into it).
+- **Gravely Wounded Trader** - a wealthy MITG tradesman, gravely wounded by
+  pirates, who took the splicing program as his only way to recover. No
+  stat bonus - his real starting edge is social, and social stats don't
+  exist yet, so `statAdjustments` is deliberately left empty rather than
+  standing in with something unrelated; `reputationBonus = { mitg, +30 }`
+  (Liked - paperwork of who he was, done willingly, buys real standing with
+  the Guild).
+- **Sacrificed Wayfarer** - a member of the Wayfarer pirate gangs, handed to
+  Signus Biomedical as punishment for breaking the pirate code.
+  `statAdjustments = { reflex = 0.10 }`; `reputationBonus = { wayfarers,
+  -25 }` (the exact bottom edge of Neutral - the gang making an example of
+  them).
+
+Every background's `description` (the in-world flavor text shown in the
+picker) is still blank - narrative content, not mechanical wiring, and
+still future work. Nothing about the picker, `runCharacterCreation`, or
+save/load needs to change once it's written, the same "proof of structure
+first, content later" shape the talent tree and quest step system were
+both introduced with.
+
 ## Species
 
 `speciesEntries` - each has a `build(globalTags)` function (same signature
@@ -1536,13 +1601,43 @@ is what actually resolves display: `special.name` if
 `player.specialFaction == factionId`, otherwise whichever band name the
 raw reputation number falls into.
 
-One faction exists so far: **U.G.F.C.** (United Galactic Federal
-Coalition), the settled galaxy's primary governing body - ranks Most
-Wanted/Criminal/Citizen/Vigilante/Peacekeeper, special tier **Enforcer**.
-Its `special.condition` (`player.stats.level >= 5`) is a placeholder -
-real faction-quest content to gate Enforcer properly is future work, same
-proof-of-structure-first spirit the talent tree and the quest step system
-were both introduced with.
+Five factions exist so far - the setting's five main powers, per the
+user's own framing, though not necessarily the only ones that will ever
+exist:
+
+- **U.G.F.C.** (United Galactic Federal Coalition) - the settled galaxy's
+  primary governing body: largest, most professional, generally
+  well-meaning, but buried in bureaucracy and badly under-resourced in
+  places. Ranks Most Wanted/Criminal/Citizen/Vigilante/Peacekeeper, special
+  tier **Enforcer**.
+- **Kaeravoli Separatists** (`kaeravoli`) - planetary governments in open
+  rebellion against the Coalition, originating from Kaeravol III, with no
+  central command and wildly varying tone cell to cell. Ranks Coalition
+  Stooge/Suspect/Outsider/Sympathizer/Comrade, special tier **Vanguard**.
+- **Markenson's Interstellar Trading Guild** (`mitg`) - a trading guild
+  turned political power through wealth, corruption, and backstabbing;
+  membership is restricted to the wealthy or well-connected, and it quietly
+  pays the Wayfarers for protection. Ranks Marked Debtor/Bad Risk/Client/
+  Preferred Client/Guild Asset, special tier **Guild Partner**.
+- **Wayfarers** (`wayfarers`) - pirates, with no real code beyond a loose
+  agreement not to shoot each other; order comes from whoever has the ego
+  and the guns to back a claim. Ranks Marked/Unwelcome/Unknown Face/Crew
+  Friend/Captain's Word, special tier **Fleet Captain**.
+- **Signus Biomedical** (`signus`) - "Blooming a better tomorrow": a
+  profit-driven genetics corporation with real scientific breakthroughs
+  (splicing, GMO agriculture, animal domestication) and a habit of skirting
+  human experimentation law through technicalities the UGFC has never
+  closed. Ranks Terminated Subject/Problem Case/Unlisted/Program Associate/
+  Flagship Result, special tier **In-House Asset**.
+
+Every faction's `special.condition` is currently the same placeholder
+(`player.stats.level >= 5`) - real faction-quest content to gate each
+Special tier properly is future work, same proof-of-structure-first spirit
+the talent tree and the quest step system were both introduced with. Four
+of the five (all but Ex-Peacekeeper's own UGFC) are reachable as "known"
+straight out of character creation, via a background's `reputationBonus`
+(see "Backgrounds") - the only reputation content that exists in play so
+far; nothing else yet calls `engine.adjustReputation`.
 
 ## Factions screen
 
@@ -1654,11 +1749,13 @@ folder, so nothing save-related touches this repo.
 
 Runs once at startup, before the very first render: name (free text),
 pronouns (Male/Female/Nonbinary presets, or "Custom pronouns" for two
-direct text fields), species (see "Species" - this is where `player.body`
+direct text fields), background (see "Backgrounds" - who the player was
+before any of this), species (see "Species" - this is where `player.body`
 actually gets built, since it needs a menu, which needs the game's windows
 to already exist), then 5 points to spend across strength/reflex/aim, each
 worth a flat +5% (`stats.x = stats.x + points*0.05`, not compounding,
-stacking on top of whatever the chosen species already adjusted). Confirm
+stacking on top of whatever the chosen background/species already
+adjusted). Confirm
 is locked until all 5 points are spent; a Reset option clears an
 in-progress allocation back to zero. `STAT_ALLOCATION.step` (the +5%
 figure) is reused directly by the single-point skill spend a level-up
@@ -1944,20 +2041,27 @@ NPC-to-NPC conversation system.
   quest) that was removed once confirmed working, so none of that is
   reachable in play yet. The mechanism itself is proven end to end; real
   multi-step content is just future work.
-- U.G.F.C. (see "Factions & reputation") is the only faction defined so
-  far, and its Enforcer tier's `special.condition` (`player.stats.level
-  >= 5`) is a stand-in - real faction-quest content to gate a Special tier
-  properly doesn't exist yet, same proof-of-structure-first spirit as the
-  talent tree and the quest step system. Nothing in the game currently
-  grants or adjusts reputation during play either (no quest reward,
-  encounter outcome, etc. calls `engine.adjustReputation` yet) - the whole
-  system is reachable today only through the `setReputation`/
-  `setSpecialFaction` debug commands, same "capability before content"
-  situation `engine.grantExperience`'s own dialogue-choice hook is in.
+- All five factions' (see "Factions & reputation") Special tiers share the
+  same placeholder `special.condition` (`player.stats.level >= 5`) - real
+  faction-quest content to gate each one properly doesn't exist yet, same
+  proof-of-structure-first spirit as the talent tree and the quest step
+  system. Reputation itself is only ever granted once, at creation, via a
+  background's `reputationBonus` (see "Backgrounds") - nothing in play
+  after that point calls `engine.adjustReputation` (no quest reward,
+  encounter outcome, etc.), so beyond that starting value the system is
+  reachable only through the `setReputation`/`setSpecialFaction` debug
+  commands, same "capability before content" situation
+  `engine.grantExperience`'s own dialogue-choice hook is in.
 - Pronouns are consumed by name/`{{subject}}`/`{{object}}` templating;
   `UNSIGHTLY` by one hardcoded dialogue check. Neither affects anything
   beyond that yet - social mechanics (haggling, reactions) wait on NPCs and
   a shop system that don't exist yet either.
+- `backgroundEntries` (see "Backgrounds") has five ids with real names,
+  stat/reputation bonuses, and `player.background` is kept around
+  specifically for future content (dialogue, quests) to check directly -
+  but every `description` (the in-world flavor text shown in the picker)
+  is still blank. Narrative content, not mechanical wiring; nothing else
+  about the feature needs to change once it's written.
 - Only one non-human species exists. Adding another is just a `build`
   function plus a `speciesEntries` entry - nothing else references a
   species by name anywhere.

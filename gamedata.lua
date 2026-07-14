@@ -1096,6 +1096,72 @@ local talentEntries = {
     },
 }
 
+-- The very first thing character creation asks after name/pronouns: who the
+-- player was before the game started. `statAdjustments` is the same flat,
+-- one-time-delta convention as speciesEntries below (applied once in
+-- engine.runCharacterCreation, stacking on top of whatever species already
+-- adjusted) - just background-driven instead of species-driven.
+-- `reputationBonus` (optional - most backgrounds don't have one) is a single
+-- `{ factionId, amount }` pair applied via engine.adjustReputation, uncapped,
+-- once at the same point - "you already had a relationship with this
+-- faction before the story started." `description` (the in-world flavor
+-- text) is deliberately still blank - that's coming once it's written;
+-- everything else here is real content.
+local backgroundEntries = {
+    -- Signus's own volunteer, mid-splicing-program - the game's own opening
+    -- (waking up from a test tube, not quite human) is this background's
+    -- backstory. Already carries paperwork proving the procedure was
+    -- voluntary, so Signus reputation starts at +30 (Liked band) despite
+    -- looking unrecognizable now.
+    lab_volunteer = {
+        name = "Lab Volunteer",
+        description = "",
+        statAdjustments = {},
+        reputationBonus = { factionId = "signus", amount = 30 },
+    },
+    -- Saw something as a UGFC Peacekeeper that got them abducted for it.
+    -- The aim bonus is what's left of the training; UGFC itself doesn't
+    -- recognize them anymore (no starting reputation) - but the history is
+    -- still there for later content (dialogue, quests) to check against
+    -- player.background directly, and reputation lost this way is meant to
+    -- be easy to rebuild.
+    ex_peacekeeper = {
+        name = "Ex-Peacekeeper",
+        description = "",
+        statAdjustments = { aim = 0.10 },
+    },
+    -- A death-row Kaeravoli separatist, sprung and spared through illegal
+    -- back channels. Still recognized by the cause they were caught
+    -- fighting for.
+    incarcerated_separatist = {
+        name = "Incarcerated Separatist",
+        description = "",
+        statAdjustments = { strength = 0.10 },
+        reputationBonus = { factionId = "kaeravoli", amount = 20 },
+    },
+    -- A wealthy MITG tradesman, gravely wounded by pirates and left with
+    -- the splicing program as his only way to recover. No stat bonus yet -
+    -- his real starting edge is social, and social stats don't exist yet -
+    -- but the paperwork of who he was (done willingly, unlike most test
+    -- subjects) buys real standing with the Guild up front.
+    gravely_wounded_trader = {
+        name = "Gravely Wounded Trader",
+        description = "",
+        statAdjustments = {},
+        reputationBonus = { factionId = "mitg", amount = 30 },
+    },
+    -- Handed to Signus by their own Wayfarer gang as punishment for
+    -- breaking the (barely-there) pirate code - the reflex bonus is
+    -- whatever's left of a life spent on a ship; the reputation hit is the
+    -- gang making an example of them.
+    sacrificed_wayfarer = {
+        name = "Sacrificed Wayfarer",
+        description = "",
+        statAdjustments = { reflex = 0.10 },
+        reputationBonus = { factionId = "wayfarers", amount = -25 },
+    },
+}
+
 -- Every species a character can be built as. `build(globalTags)` returns a
 -- fresh body (a torso with everything attached) - see Luadventure.newTorso/
 -- .attachPart/.installCategoryOrgan/.installGenericOrgan/.recalcGlobalTags
@@ -1576,6 +1642,90 @@ local factionEntries = {
             end,
         },
     },
+    kaeravoli = {
+        name = "Kaeravoli Separatists",
+        abbreviation = "K.S.",
+        description = "The Kaeravoli Separatists call themselves a nation; the Coalition calls them a rebellion that hasn't been put down yet. What started as a single declared secession on Kaeravol III has spread system by system as local governments break from Coalition rule in its wake, and there's no single charter or command structure holding any of it together - just a shared grievance and a willingness to shoot for it. Tone and discipline vary wildly from one cell to the next: some read as principled freedom fighters, others as exactly the violent extremists UGFC broadcasts insist they all are. Whichever kind you meet, they didn't earn that reputation by being reasonable about it.",
+        ranks = {
+            { name = "Coalition Stooge", effect = "Treated as a UGFC plant - cells refuse to deal with you, and some will act on the suspicion directly." },
+            { name = "Suspect", effect = "Watched closely and rarely trusted with anything that actually matters." },
+            { name = "Outsider", effect = "Not one of them, but not an enemy either - dealt with at arm's length." },
+            { name = "Sympathizer", effect = "Trusted enough to be let in on local plans, and given aid when it's convenient." },
+            { name = "Comrade", effect = "Vouched for across cells - shelter, supplies, and intel are offered freely." },
+        },
+        -- Same stand-in-condition convention as UGFC's own Enforcer - real
+        -- faction-quest content to gate this properly is future work.
+        special = {
+            name = "Vanguard",
+            description = "A trusted voice inside the resistance's own command - access to cells and plans most sympathizers never see.",
+            condition = function()
+                return Luadventure.player.stats.level >= 5
+            end,
+        },
+    },
+    mitg = {
+        name = "Markenson's Interstellar Trading Guild",
+        abbreviation = "M.I.T.G.",
+        description = "Markenson's Interstellar Trading Guild presents itself as commerce; in practice it's one of the wealthiest power blocs in the settled galaxy, and it didn't get there cleanly. Every contract comes wrapped in leverage, every rival's misfortune is worth investigating before anyone believes it was an accident, and the Guild's own ledgers would embarrass half the Coalition's oversight committees if anyone with the authority to look ever actually did. Membership itself is a wall, not a door - the Guild trades with anyone, but it only inducts the wealthy or the well-connected. It also keeps the Wayfarers paid and, by extension, off its own ships - an arrangement everyone with any sense pretends not to notice.",
+        ranks = {
+            { name = "Marked Debtor", effect = "Blacklisted from Guild contracts outright, and more than one captain may be collecting on the marker." },
+            { name = "Bad Risk", effect = "Prices run high and terms run short - the Guild deals with you, but never generously." },
+            { name = "Client", effect = "An ordinary paying customer - standard Guild trade rates, nothing more." },
+            { name = "Preferred Client", effect = "Priority contracts and Guild resources are quietly made available - for a price, of course." },
+            { name = "Guild Asset", effect = "Treated as an investment worth protecting - Guild muscle and favors are yours to call on." },
+        },
+        -- Same stand-in-condition convention as UGFC's own Enforcer - real
+        -- faction-quest content to gate this properly is future work.
+        special = {
+            name = "Guild Partner",
+            description = "A name on the Guild's own ledger, not just its client list - access to the Guild's less legal services, on request.",
+            condition = function()
+                return Luadventure.player.stats.level >= 5
+            end,
+        },
+    },
+    wayfarers = {
+        name = "Wayfarers",
+        abbreviation = "Wayfarers",
+        description = "The Wayfarers aren't really an organization so much as an agreement: don't shoot each other, split the take fairly enough that nobody starts a war over it, and whoever's got the nerve and the guns to back a claim gets to make the calls. There's no charter, no chain of command, and no shortage of captains willing to test that arrangement the moment it looks convenient. MITG pays them well enough to keep from becoming a target, which suits everyone but the systems stuck watching Wayfarer ships come and go with cargo that was never on any manifest. Whatever needs doing that nobody wants their name attached to, some Wayfarer captain has probably already done it for the right price.",
+        ranks = {
+            { name = "Marked", effect = "A standing bounty among the fleets - approach any Wayfarer ship at your own risk." },
+            { name = "Unwelcome", effect = "Tolerated at best, and never trusted with anything worth stealing." },
+            { name = "Unknown Face", effect = "Just another name nobody's bothered to decide about yet." },
+            { name = "Crew Friend", effect = "Vouched for by at least one captain - fair prices and an open berth if you need one." },
+            { name = "Captain's Word", effect = "Your name carries weight across the fleets - passage, muscle, and silence are all yours for the asking." },
+        },
+        -- Same stand-in-condition convention as UGFC's own Enforcer - real
+        -- faction-quest content to gate this properly is future work.
+        special = {
+            name = "Fleet Captain",
+            description = "A captain in your own right, with a crew and a claim the other fleets actually recognize.",
+            condition = function()
+                return Luadventure.player.stats.level >= 5
+            end,
+        },
+    },
+    signus = {
+        name = "Signus Biomedical",
+        abbreviation = "Signus",
+        description = "Signus Biomedical's slogan promises a better tomorrow; its own compliance department mostly just tries to survive the current one. It's a genuinely accomplished corporation - real breakthroughs in genetic splicing, GMO agriculture, and animal domestication all carry its name - and a genuinely compromised one, since a fair share of that progress came from human trials that stayed just quiet enough, and just technically legal enough, to slip through gaps the UGFC never got around to closing. Public opinion has been souring on them for years, but profit keeps outrunning the backlash, and Signus keeps finding new gaps.",
+        ranks = {
+            { name = "Terminated Subject", effect = "Flagged as a liability in Signus's own records - company security won't hesitate." },
+            { name = "Problem Case", effect = "Handled with visible reluctance, and only when a contract actually requires it." },
+            { name = "Unlisted", effect = "No file worth mentioning - an ordinary outsider as far as Signus is concerned." },
+            { name = "Program Associate", effect = "Trusted with early access to Signus's own products and facilities." },
+            { name = "Flagship Result", effect = "Held up internally as proof the program works - resources and protection follow accordingly." },
+        },
+        -- Same stand-in-condition convention as UGFC's own Enforcer - real
+        -- faction-quest content to gate this properly is future work.
+        special = {
+            name = "In-House Asset",
+            description = "Kept close as Signus's own proof of concept - facilities, funding, and protection ordinary test subjects never see.",
+            condition = function()
+                return Luadventure.player.stats.level >= 5
+            end,
+        },
+    },
 }
 
 -- Greetings that depend on live player state (rather than always showing
@@ -1621,6 +1771,7 @@ return {
     abilityEntries = abilityEntries,
     talentEntries = talentEntries,
     speciesEntries = speciesEntries,
+    backgroundEntries = backgroundEntries,
     enemyEntries = enemyEntries,
     world = world,
     questEntries = questEntries,
