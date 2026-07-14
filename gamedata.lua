@@ -462,10 +462,20 @@ end
 -- consumes it from the belt instead of starting a cooldown - that's
 -- handled generically by the engine, keyed off whether the ability entry
 -- came from an item.
+--
+-- `value`/`category` (see "Shops") are what any shop's own pricing reads -
+-- `value` is the base credit price a store sells at (or a barter's price
+-- before charisma/reputation adjust it, see engine.getShopBuyPrice), and
+-- `category` (medical/explosive/weapon/ammo/armor) is what a barter's own
+-- `interest` table keys off to decide whether - and how eagerly - it'll
+-- buy one at all (see engine.getShopSellPrice). Both are starting
+-- numbers, not balanced ones.
 local itemEntries = {
     dermoregenesis_salve = {
         name = "Dermoregenesis Salve",
         bulk = 1,
+        value = 40,
+        category = "medical",
         abilities = { "use_dermoregenesis_salve" },
     },
 
@@ -476,6 +486,8 @@ local itemEntries = {
     splint = {
         name = "Splint",
         bulk = 1,
+        value = 15,
+        category = "medical",
         abilities = { "use_splint" },
     },
 
@@ -490,6 +502,8 @@ local itemEntries = {
     grenade = {
         name = "Grenade",
         bulk = 1,
+        value = 60,
+        category = "explosive",
         abilities = { "throw_grenade" },
         range = 4,
         radius = 2,
@@ -502,21 +516,21 @@ local itemEntries = {
     -- the reverse of the weapon's own `itemId` (used going the other way,
     -- putting a *displaced* weapon back into the bag). Name is duplicated
     -- from the weapon entry rather than looked up, same as any other item.
-    chain_sword = { name = "Chain Sword", bulk = 2, weaponId = "chain_sword" },
-    laser_pistol = { name = "Laser Pistol", bulk = 1, weaponId = "laser_pistol" },
-    rifle = { name = "Rifle", bulk = 4, weaponId = "rifle" },
-    shotgun = { name = "Shotgun", bulk = 4, weaponId = "shotgun" },
+    chain_sword = { name = "Chain Sword", bulk = 2, value = 150, category = "weapon", weaponId = "chain_sword" },
+    laser_pistol = { name = "Laser Pistol", bulk = 1, value = 200, category = "weapon", weaponId = "laser_pistol" },
+    rifle = { name = "Rifle", bulk = 4, value = 350, category = "weapon", weaponId = "rifle" },
+    shotgun = { name = "Shotgun", bulk = 4, value = 300, category = "weapon", weaponId = "shotgun" },
 
     -- Kinetic ammo: a bullet is one shot, plain and simple, reloaded exactly
     -- like you'd expect - pull however many are missing from the gun out of
     -- inventory.
-    bullet = { name = "Bullet", bulk = 0.1, ammoClass = "kinetic" },
+    bullet = { name = "Bullet", bulk = 0.1, value = 2, category = "ammo", ammoClass = "kinetic" },
 
     -- Shotgun shells are their own ammo class - different enough from a
     -- bullet or a charge to deserve one - but reload the exact same way,
     -- one shell in inventory per shot of capacity regained (see
     -- engine.getAmmoItemId).
-    shotgun_shell = { name = "Shotgun Shell", bulk = 0.1, ammoClass = "shotgun" },
+    shotgun_shell = { name = "Shotgun Shell", bulk = 0.1, value = 3, category = "ammo", ammoClass = "shotgun" },
 
     -- A "special" shell: never loaded into the gun's ordinary ammo pool at
     -- all (no ammoClass - engine.getAmmoItemId/engine.reloadWeapon never
@@ -536,6 +550,8 @@ local itemEntries = {
     slug_round = {
         name = "Slug Round",
         bulk = 0.3,
+        value = 12,
+        category = "ammo",
         specialAmmoFor = "shotgun",
         damage = { min = 35, max = 50 },
         ignoresEndurance = true,
@@ -549,8 +565,8 @@ local itemEntries = {
     -- chargeCapacity each, which is what actually keeps two batteries'
     -- worth of charges at a svelte 0.2 Bulk instead of the 2.0 Bulk the
     -- same twenty shots would cost as bullets.
-    battery = { name = "Battery", bulk = 0.1, ammoClass = "energy", chargeCapacity = 10 },
-    energy_charge = { name = "Energy Charge", bulk = 0, ammoClass = "energy" },
+    battery = { name = "Battery", bulk = 0.1, value = 25, category = "ammo", ammoClass = "energy", chargeCapacity = 10 },
+    energy_charge = { name = "Energy Charge", bulk = 0, value = 1, category = "ammo", ammoClass = "energy" },
 
     -- Apparel: `layer` is "inner" or "outer" (can't stack two of the same
     -- layer over overlapping areas), `covers` is which areas it claims, and
@@ -559,7 +575,7 @@ local itemEntries = {
     -- physical types; a shield-type item would instead lean on energy
     -- types like fire/radiation.
     padded_shirt = {
-        name = "Padded Shirt", bulk = 1, layer = "inner",
+        name = "Padded Shirt", bulk = 1, value = 30, category = "armor", layer = "inner",
         covers = { "upper_body", "lower_body" },
         coverage = { bludgeoning = 2, piercing = 1, slashing = 1 },
     },
@@ -572,22 +588,22 @@ local itemEntries = {
     -- nudges the torso's average up slightly - a long underlayer riding up
     -- to the waist plausibly does that too.
     ballistic_underlayer_top = {
-        name = "Ballistic Underlayer Top", bulk = 1, layer = "inner",
+        name = "Ballistic Underlayer Top", bulk = 1, value = 60, category = "armor", layer = "inner",
         covers = { "upper_body", "lower_body", "left_upper_arm", "right_upper_arm", "left_lower_arm", "right_lower_arm" },
         coverage = { bludgeoning = 1, piercing = 2, slashing = 1 },
     },
     ballistic_underlayer_bottom = {
-        name = "Ballistic Underlayer Bottom", bulk = 1, layer = "inner",
+        name = "Ballistic Underlayer Bottom", bulk = 1, value = 60, category = "armor", layer = "inner",
         covers = { "left_upper_leg", "right_upper_leg", "left_lower_leg", "right_lower_leg", "pelvis" },
         coverage = { bludgeoning = 1, piercing = 2, slashing = 1 },
     },
     ballistic_vest = {
-        name = "Ballistic Vest", bulk = 2, layer = "outer",
+        name = "Ballistic Vest", bulk = 2, value = 180, category = "armor", layer = "outer",
         covers = { "upper_body" },
         coverage = { bludgeoning = 5, piercing = 8, slashing = 5 },
     },
     helmet = {
-        name = "Helmet", bulk = 1, layer = "outer",
+        name = "Helmet", bulk = 1, value = 90, category = "armor", layer = "outer",
         covers = { "head" },
         coverage = { bludgeoning = 4, piercing = 3, slashing = 3 },
     },
@@ -600,22 +616,22 @@ local itemEntries = {
     -- an arm guard) should follow rather than trying to add a "which side"
     -- choice to wearing one generic item.
     left_glove = {
-        name = "Left Glove", bulk = 0.1, layer = "outer",
+        name = "Left Glove", bulk = 0.1, value = 20, category = "armor", layer = "outer",
         covers = { "left_hand" },
         coverage = { bludgeoning = 2, piercing = 2, slashing = 3 },
     },
     right_glove = {
-        name = "Right Glove", bulk = 0.1, layer = "outer",
+        name = "Right Glove", bulk = 0.1, value = 20, category = "armor", layer = "outer",
         covers = { "right_hand" },
         coverage = { bludgeoning = 2, piercing = 2, slashing = 3 },
     },
     left_boot = {
-        name = "Left Boot", bulk = 0.5, layer = "outer",
+        name = "Left Boot", bulk = 0.5, value = 25, category = "armor", layer = "outer",
         covers = { "left_foot" },
         coverage = { bludgeoning = 3, piercing = 2, slashing = 2 },
     },
     right_boot = {
-        name = "Right Boot", bulk = 0.5, layer = "outer",
+        name = "Right Boot", bulk = 0.5, value = 25, category = "armor", layer = "outer",
         covers = { "right_foot" },
         coverage = { bludgeoning = 3, piercing = 2, slashing = 2 },
     },
@@ -1471,7 +1487,8 @@ local world = {
         -- * is an item, auto-collected the moment the player steps onto
         -- it; !/?/0 are people (quest not yet taken / quest active /
         -- nothing more to say); $ is a save point - `saveId` is how a
-        -- save file remembers which one made it.
+        -- save file remembers which one made it; % is a store (walked
+        -- into directly, no dialogue) - see "Shops".
         objects = {
             { kind = "item", x = 12, y = 12, itemId = "bullet" },
             { kind = "person", x = 10, y = 8, name = "Old Soldier", npcId = "old_soldier" },
@@ -1479,6 +1496,17 @@ local world = {
               greeting = { "\"Nice weather we're having, isn't it?\"" } },
             { kind = "person", x = 5, y = 25, name = "Villager", greetingId = "villager_gossip" },
             { kind = "person", x = 6, y = 25, name = "Villager", greetingId = "villager_gossip" },
+
+            -- A little "market" cluster proving out both store shapes at
+            -- once (see shopEntries) - an ordinary storefront, and the
+            -- pawn-shop/scrap-hauler case right next to it.
+            { kind = "shop", x = 15, y = 15, shopId = "general_store", name = "General Store" },
+            { kind = "shop", x = 15, y = 17, shopId = "scrap_hauler", name = "Scrap Hauler" },
+            -- A barter, not a store - reached by talking to them and
+            -- picking "Trade" (see engine.interactWithPerson), not by
+            -- walking into them the way the two shops above work.
+            { kind = "person", x = 25, y = 25, name = "Shady Dealer", shopId = "shady_dealer",
+              greeting = { "\"...Looking for something? Or selling?\"" } },
 
             -- A small terminal building, walled and doored - a save
             -- point genuinely worth walking into rather than just
@@ -1728,6 +1756,74 @@ local factionEntries = {
     },
 }
 
+-- A shop is either a `kind = "store"` (a place, walked into directly on the
+-- map - see the "shop" object kind) or a `kind = "barter"` (a person, only
+-- reachable by talking to them and picking "Trade" - see engine.
+-- interactWithPerson). Both share `sells` (a plain array of
+-- `{ itemId, price }` - `price` optional, falling back to
+-- itemEntries[itemId].value).
+--
+-- A store's own prices are exactly what's given - "fixed prices... you
+-- can't haggle them down or have your reputation raise the price" - see
+-- engine.getShopBuyPrice. `buys` (optional; most stores don't have one -
+-- "you typically cannot sell your own gear to a store") is a plain array
+-- of itemIds it'll accept back, at a flat `buybackRate` (a fraction of the
+-- item's own `value`, also unaffected by reputation/charisma) - the pawn-
+-- shop/scrap-hauler case.
+--
+-- A barter's prices move with the player: `factionId` (optional - "if they
+-- care") is whose reputation swings them, and every barter's own
+-- `interest` table (category -> a base buyback rate, the same shape as a
+-- store's flat `buybackRate` but per-category instead of one number for
+-- everything) is what it'll actually buy from the player at all - a
+-- category simply absent from `interest` means the barter won't touch it,
+-- "outright won't buy things unrelated to combat." `interestOverrides`
+-- (optional, itemId -> rate, checked before `interest`) is the escape
+-- hatch for "certain obviously valuable items" outside a barter's normal
+-- categories - supported here, but no barter below actually needs one yet.
+-- See engine.getShopSellPrice/engine.getBarterLeverage for how charisma
+-- and reputation actually move a barter's numbers.
+local shopEntries = {
+    -- An ordinary licensed convenience store - fixed prices, no `buys` at
+    -- all (see scrap_hauler below for the pawn-shop/scrap-hauler case that
+    -- does buy).
+    general_store = {
+        kind = "store",
+        name = "General Store",
+        sells = {
+            { itemId = "bullet" },
+            { itemId = "shotgun_shell" },
+            { itemId = "dermoregenesis_salve" },
+            { itemId = "splint" },
+        },
+    },
+    -- Sells nothing of its own - just a place to offload gear for scrap
+    -- value, at a single flat store-wide rate (a store's own buyback is
+    -- never per-category the way a barter's `interest` is).
+    scrap_hauler = {
+        kind = "store",
+        name = "Scrap Hauler",
+        sells = {},
+        buys = { "chain_sword", "laser_pistol", "rifle", "shotgun", "bullet", "shotgun_shell", "battery" },
+        buybackRate = 0.4,
+    },
+    -- The "shady weapons dealer" case: happily buys spare guns (weapon),
+    -- will take armor but not gladly (a noticeably worse rate), and
+    -- doesn't touch anything else (no medical/explosive/ammo entry in
+    -- `interest` at all). Cares about Wayfarer reputation specifically,
+    -- not UGFC's - a Wayfarer gang's own fence, not a lawful business.
+    shady_dealer = {
+        kind = "barter",
+        name = "Shady Dealer",
+        factionId = "wayfarers",
+        sells = {
+            { itemId = "bullet" },
+            { itemId = "grenade" },
+        },
+        interest = { weapon = 0.7, armor = 0.25 },
+    },
+}
+
 -- Greetings that depend on live player state (rather than always showing
 -- the same lines) can't just be a table sitting on the object - a save
 -- captures the whole world snapshot as plain data, and a function isn't
@@ -1776,5 +1872,6 @@ return {
     world = world,
     questEntries = questEntries,
     factionEntries = factionEntries,
+    shopEntries = shopEntries,
     dynamicGreetings = dynamicGreetings,
 }

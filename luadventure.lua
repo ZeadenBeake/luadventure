@@ -62,6 +62,7 @@ local backgroundEntries = gamedata.backgroundEntries
 local enemyEntries = gamedata.enemyEntries
 local questEntries = gamedata.questEntries
 local factionEntries = gamedata.factionEntries
+local shopEntries = gamedata.shopEntries
 local dynamicGreetings = gamedata.dynamicGreetings
 world = gamedata.world
 
@@ -1051,6 +1052,8 @@ local character = {
         strength = 1, -- Base multiplier for melee damage; a limb's own bonuses stack on top of this.
         aim = 1, -- Chance to hit is aim * (1 - target's reflex / 2); a busted head penalizes this.
         reflex = 1, -- Chance to be missed rides on this; worn-down legs penalize it.
+        intelligence = 1, -- No mechanical effect yet - reserved for future use.
+        charisma = 1, -- Tilts a barter's buy/sell prices in the player's favor - see engine.getBarterLeverage.
     },
     inventory = {},
     equipped = {
@@ -1155,6 +1158,11 @@ player.spareLog = {}
 -- "Factions & reputation".
 player.reputation = {}
 player.specialFaction = nil
+
+-- Standard currency, accepted basically anywhere - see "Shops". Just a
+-- plain number, same convention as beltSize/bulkBonus; nothing else about
+-- an item's own price lives on the player.
+player.credits = 0
 
 -- Banked, unspent level-up rewards (see engine.grantExperience) - one of
 -- each per level gained, spent any time via the Character screen
@@ -1528,6 +1536,82 @@ function engine.formatProgressBar(current, max, width)
     return "[" .. string.rep("#", filled) .. string.rep("-", width - filled) .. "]"
 end
 
+-- How much charisma (and, if this barter "cares" - has a factionId -
+-- reputation) tilts a barter's prices in the player's favor - a signed
+-- fraction, positive always favoring the player (cheaper buys, better
+-- sells): 0 at baseline charisma (1) with no reputation swing, growing
+-- with charisma above that (BARTER_CHARISMA_WEIGHT per point of "extra"
+-- charisma, the same +0.05-per-skill-point unit every other stat already
+-- uses) and with reputation toward the Loved end of the scale (a full
+-- +/-100 reputation is worth BARTER_REPUTATION_WEIGHT on its own). Clamped
+-- to +/-BARTER_LEVERAGE_CAP so neither can push a price to free or
+-- infinite. A store never calls this at all - see engine.getShopBuyPrice/
+-- engine.getShopSellPrice - its own prices are fixed by design.
+local BARTER_CHARISMA_WEIGHT = 0.5
+local BARTER_REPUTATION_WEIGHT = 0.15
+local BARTER_LEVERAGE_CAP = 0.5
+
+function engine.getBarterLeverage(shop)
+    local leverage = (player.stats.charisma - 1) * BARTER_CHARISMA_WEIGHT
+    if shop.factionId then
+        local rep = player.reputation[shop.factionId] or 0
+        leverage = leverage + (rep / REPUTATION_MAX) * BARTER_REPUTATION_WEIGHT
+    end
+    return math.max(-BARTER_LEVERAGE_CAP, math.min(BARTER_LEVERAGE_CAP, leverage))
+end
+
+-- What the player pays to buy `itemId` from `shop` - `priceOverride` is a
+-- sells-entry's own optional `price` (falls back to itemEntries[itemId].
+-- value otherwise). A store's price is exactly that number, full stop -
+-- "you can't haggle them down or have your reputation raise the price." A
+-- barter's price moves with engine.getBarterLeverage - positive leverage
+-- (favoring the player) makes buying cheaper.
+function engine.getShopBuyPrice(shop, itemId, priceOverride)
+    local base = priceOverride or itemEntries[itemId].value
+    if shop.kind == "store" then
+        return base
+    end
+    return math.max(1, math.floor(base * (1 - engine.getBarterLeverage(shop)) + 0.5))
+end
+
+-- What `shop` will pay the player for `itemId`, or nil if it won't buy it
+-- at all. A store only ever buys what's on its own `buys` whitelist, at
+-- one flat `buybackRate` - fixed, same as its own sell prices. A barter
+-- instead checks `interestOverrides[itemId]` first (the "certain
+-- obviously valuable items" exception), then falls back to `interest
+-- [item.category]` - a category (or item) simply absent from both means
+-- this barter won't touch it - and, if it will, applies
+-- engine.getBarterLeverage the other way around from buying: positive
+-- leverage (favoring the player) makes selling pay *more*.
+function engine.getShopSellPrice(shop, itemId)
+    local item = itemEntries[itemId]
+    if shop.kind == "store" then
+        if not shop.buys then
+            return nil
+        end
+        local accepted = false
+        for _, id in ipairs(shop.buys) do
+            if id == itemId then
+                accepted = true
+                break
+            end
+        end
+        if not accepted then
+            return nil
+        end
+        return math.max(1, math.floor(item.value * (shop.buybackRate or 0.5) + 0.5))
+    end
+
+    local rate = shop.interestOverrides and shop.interestOverrides[itemId]
+    if not rate then
+        rate = item.category and shop.interest and shop.interest[item.category]
+    end
+    if not rate or rate <= 0 then
+        return nil
+    end
+    return math.max(1, math.floor(item.value * rate * (1 + engine.getBarterLeverage(shop)) + 0.5))
+end
+
 function engine.drawStats()
     statsWin.setVisible(false)
     statsWin.clear()
@@ -1582,6 +1666,8 @@ function engine.getObjectGlyph(obj)
         return "E"
     elseif obj.kind == "save_point" then
         return "$"
+    elseif obj.kind == "shop" then
+        return "%"
     elseif obj.kind == "door" then
         if obj.open then
             return "."
@@ -3652,6 +3738,175 @@ function engine.runFactionsScreen()
                 local _, height = factionDescWin.getSize()
                 local maxScroll = math.max(0, #lines - height)
                 descScroll = math.min(maxScroll, descScroll + 1)
+            end
+            redraw()
+        end
+    end
+end
+
+-- Buy and Sell share one list layout, switched with Left/Right rather than
+-- each getting its own key - the store/barter distinction (see "Shops")
+-- doesn't need two separate screens to express, just two different row
+-- builders underneath the same draw/run code.
+local SHOP_LIST_TOP = 5 -- row 1: name/credits, row 2: feedback, row 3: tabs, row 4: column header
+
+-- Every item a shop currently offers to sell to the player, with its
+-- resolved price (engine.getShopBuyPrice) and however many the player
+-- already has of it (informational only - nothing stops buying more).
+function engine.buildShopBuyRows(shop)
+    local rows = {}
+    for _, entry in ipairs(shop.sells or {}) do
+        table.insert(rows, {
+            itemId = entry.itemId,
+            name = itemEntries[entry.itemId].name,
+            price = engine.getShopBuyPrice(shop, entry.itemId, entry.price),
+            owned = engine.countCarriedItem(player, entry.itemId),
+        })
+    end
+    return rows
+end
+
+-- Every unique item currently in the player's own inventory (never belt/
+-- equipped/worn - selling is scoped to plain carried items) that this shop
+-- is actually willing to buy at all - engine.getShopSellPrice returning
+-- nil skips it entirely rather than showing an unbuyable row.
+function engine.buildShopSellRows(shop)
+    local counts, order = {}, {}
+    for _, itemId in ipairs(player.inventory) do
+        if not counts[itemId] then
+            counts[itemId] = 0
+            table.insert(order, itemId)
+        end
+        counts[itemId] = counts[itemId] + 1
+    end
+    local rows = {}
+    for _, itemId in ipairs(order) do
+        local price = engine.getShopSellPrice(shop, itemId)
+        if price then
+            table.insert(rows, {
+                itemId = itemId,
+                name = itemEntries[itemId].name,
+                price = price,
+                owned = counts[itemId],
+            })
+        end
+    end
+    return rows
+end
+
+-- Buys one unit of `row.itemId` if the player can afford it - straight
+-- onto player.inventory, same as engine.collectItem's own free pickup;
+-- bulk capacity is purely informational everywhere else in the game (see
+-- "Inventory & equipment"), so a purchase doesn't enforce it either.
+-- Returns a feedback line for the screen to show.
+function engine.buyShopItem(shop, row)
+    if player.credits < row.price then
+        return "Not enough credits."
+    end
+    player.credits = player.credits - row.price
+    table.insert(player.inventory, row.itemId)
+    return "Bought " .. row.name .. " for " .. row.price .. "cr."
+end
+
+-- Sells one unit of `row.itemId` - always possible once it's showing in
+-- the Sell list at all (engine.buildShopSellRows already filtered out
+-- anything this shop won't buy, or that the player doesn't actually have).
+function engine.sellShopItem(shop, row)
+    engine.removeInventoryItems(player, row.itemId, 1)
+    player.credits = player.credits + row.price
+    return "Sold " .. row.name .. " for " .. row.price .. "cr."
+end
+
+function engine.drawShopScreen(shop, mode, rows, selection, scrollOffset, feedback)
+    inventoryWin.setVisible(false)
+    inventoryWin.clear()
+    local width, height = inventoryWin.getSize()
+
+    inventoryWin.setCursorPos(1, 1)
+    inventoryWin.write(shop.name)
+    local creditsText = player.credits .. "cr"
+    inventoryWin.setCursorPos(math.max(1, width - #creditsText + 1), 1)
+    inventoryWin.write(creditsText)
+
+    inventoryWin.setCursorPos(1, 2)
+    inventoryWin.write(feedback or "")
+
+    inventoryWin.setCursorPos(1, 3)
+    inventoryWin.write((mode == "buy" and "[Buy]" or " Buy ") .. "  " .. (mode == "sell" and "[Sell]" or " Sell "))
+
+    inventoryWin.setCursorPos(1, 4)
+    inventoryWin.write(("%-16s %-6s %s"):format("Item", "Price", "Have"))
+
+    if #rows == 0 then
+        inventoryWin.setCursorPos(1, SHOP_LIST_TOP)
+        inventoryWin.write(mode == "buy" and "Nothing for sale." or "Doesn't buy anything.")
+    else
+        local visibleCount = height - 1 - SHOP_LIST_TOP + 1
+        for i = 1, math.min(visibleCount, #rows - scrollOffset) do
+            local row = rows[scrollOffset + i]
+            local marker = (scrollOffset + i == selection) and "> " or "  "
+            inventoryWin.setCursorPos(1, SHOP_LIST_TOP + i - 1)
+            inventoryWin.write(marker .. ("%-14s %-6s %s"):format(row.name:sub(1, 14), row.price .. "cr", tostring(row.owned)))
+        end
+    end
+
+    inventoryWin.setTextColor(colors.yellow)
+    inventoryWin.setCursorPos(1, height)
+    inventoryWin.write("[L/R] mode [U/D] select [Enter] trade [S] close")
+    inventoryWin.setTextColor(colors.white)
+    inventoryWin.setVisible(true)
+end
+
+-- `shop` is a shopEntries entry - a store (walked into on the map) or a
+-- barter (reached by talking to a person and picking "Trade"), both
+-- handled identically from here on (see "Shops"). Closes on `S`, same
+-- mnemonic-letter convention as every other screen's own close key -
+-- there's no single natural hotkey for opening a shop the way i/m/a/c/j/f
+-- each have, since a shop is reached by walking into it or through
+-- dialogue rather than a page.
+function engine.runShopScreen(shop)
+    local mode = "buy"
+    local selection = 1
+    local scrollOffset = 0
+    local feedback = ""
+    local rows = {}
+
+    local function redraw()
+        rows = mode == "buy" and engine.buildShopBuyRows(shop) or engine.buildShopSellRows(shop)
+        selection = math.min(selection, math.max(1, #rows))
+        local _, height = inventoryWin.getSize()
+        local visibleCount = height - 1 - SHOP_LIST_TOP + 1
+        scrollOffset = engine.clampInventoryScroll(selection, scrollOffset, #rows, visibleCount)
+        engine.drawShopScreen(shop, mode, rows, selection, scrollOffset, feedback)
+    end
+
+    redraw()
+
+    while true do
+        local _, key = os.pullEvent("key")
+
+        if key == keys.s then
+            return
+        elseif key == keys.left or key == keys.right then
+            mode = mode == "buy" and "sell" or "buy"
+            selection = 1
+            scrollOffset = 0
+            feedback = ""
+            redraw()
+        elseif key == keys.up then
+            if #rows > 0 then
+                selection = math.max(1, selection - 1)
+            end
+            redraw()
+        elseif key == keys.down then
+            if #rows > 0 then
+                selection = math.min(#rows, selection + 1)
+            end
+            redraw()
+        elseif key == keys.enter then
+            local row = rows[selection]
+            if row then
+                feedback = mode == "buy" and engine.buyShopItem(shop, row) or engine.sellShopItem(shop, row)
             end
             redraw()
         end
@@ -6064,6 +6319,20 @@ end
 -- rather than a field this object holds directly, so different steps of
 -- the same quest can belong to different NPCs.
 function engine.interactWithPerson(obj)
+    -- A barter (see "Shops") is a person, not a map-placed "shop" object -
+    -- reached only by talking to them and picking "Trade", never by
+    -- walking into them. A barter here is trade-only (no `npcId`, so no
+    -- quest branch below ever runs for one) - nothing stops a future NPC
+    -- from having both, but no content needs that combination yet.
+    if obj.shopId then
+        local greeting = obj.greetingId and dynamicGreetings[obj.greetingId]() or obj.greeting
+        local choice = engine.showInteraction(greeting or { "\"...\"" }, { "Trade", "Leave" })
+        if choice == 1 then
+            engine.runShopScreen(shopEntries[obj.shopId])
+        end
+        return
+    end
+
     local found = obj.npcId and engine.findActionableQuestStep(obj.npcId)
     if not found then
         local greeting = obj.greetingId and dynamicGreetings[obj.greetingId]() or obj.greeting
@@ -6246,6 +6515,7 @@ function engine.buildSaveData(saveId, label)
         spareLog = spareLog,
         reputation = reputation,
         specialFaction = player.specialFaction,
+        credits = player.credits,
         activityLog = savedActivityLog,
         skillPoints = player.skillPoints,
         talentPoints = player.talentPoints,
@@ -6271,6 +6541,9 @@ function engine.applySaveData(data)
     -- A pre-leveling save's stats table has no xp field at all - same
     -- backward-compat convention as everything else below.
     player.stats.xp = player.stats.xp or 0
+    -- Same convention: a pre-Shops save has neither stat at all.
+    player.stats.intelligence = player.stats.intelligence or 1
+    player.stats.charisma = player.stats.charisma or 1
 
     player.inventory = {}
     for i, id in ipairs(data.inventory) do player.inventory[i] = id end
@@ -6317,6 +6590,10 @@ function engine.applySaveData(data)
     player.reputation = {}
     for id, value in pairs(data.reputation or {}) do player.reputation[id] = value end
     player.specialFaction = data.specialFaction or nil
+
+    -- A pre-Shops save has no credits field at all - same convention,
+    -- comes back to 0 rather than erroring.
+    player.credits = data.credits or 0
 
     -- Same backward-compat convention for the activity log - restored
     -- wholesale (already-wrapped lines, same as engine.logActivity always
@@ -6641,6 +6918,8 @@ function engine.interactWithObject(loc, obj)
         engine.interactWithPerson(obj)
     elseif obj.kind == "save_point" then
         return engine.interactWithSavePoint(obj)
+    elseif obj.kind == "shop" then
+        engine.runShopScreen(shopEntries[obj.shopId])
     elseif obj.kind == "enemy" then
         -- Bumping straight into one enemy still pulls in anyone else who
         -- noticed (see engine.propagateAwareness) - `obj` itself always
@@ -7021,6 +7300,17 @@ debugConsole.commands = {
             .. ", " .. player.skillPoints .. " skill pt, " .. player.talentPoints .. " talent pt)"
     end,
 
+    -- grantCredits <amount> - straight onto player.credits, no shop
+    -- involved - same "give" philosophy as the item command above.
+    grantCredits = function(args)
+        local amount = tonumber(args[1])
+        if not amount then
+            return "Usage: grantCredits <amount>"
+        end
+        player.credits = player.credits + amount
+        return "player.credits = " .. player.credits
+    end,
+
     -- setQuestStep <questId> <stepId> - a raw poke, the direct analog to
     -- setLevel: sets player.quests[questId] straight to stepId (or "done"),
     -- bypassing offer/condition/reward/onComplete logic entirely. This is
@@ -7141,7 +7431,7 @@ debugConsole.commands = {
     end,
 
     help = function()
-        return "setHealth <limb> <hp> [@t] | give <item> [n] | wear/unwear <item> | attachLimb <parentLimb> <slot> <template> [@t] | setLevel <n> | grantExperience <amt> | setQuestStep <questId> <stepId> | setReputation <factionId> <amt> | setSpecialFaction <factionId|none> | addStatus <limb> <status> [n] [@t] | clearStatus <limb> <status|all> [@t] | targets | exit"
+        return "setHealth <limb> <hp> [@t] | give <item> [n] | wear/unwear <item> | attachLimb <parentLimb> <slot> <template> [@t] | setLevel <n> | grantExperience <amt> | grantCredits <amt> | setQuestStep <questId> <stepId> | setReputation <factionId> <amt> | setSpecialFaction <factionId|none> | addStatus <limb> <status> [n] [@t] | clearStatus <limb> <status|all> [@t] | targets | exit"
     end,
 }
 
@@ -7344,15 +7634,21 @@ function engine.pickSpecies()
     return SPECIES_ORDER[choice]
 end
 
--- Five points, each worth a flat +5% to one of strength/reflex/aim (added
--- once, in engine.runCharacterCreation - not compounding, so 3 points in strength
--- is stats.strength = 1 + 3*0.05 = 1.15). "Reset" clears all of them back to
--- 0 rather than supporting per-point undo, which is enough for a one-time
--- five-point spend. Confirm is locked out until every point is spent.
+-- Five points, each worth a flat +5% to one of strength/reflex/aim/
+-- intelligence/charisma (added once, in engine.runCharacterCreation - not
+-- compounding, so 3 points in strength is stats.strength = 1 + 3*0.05 =
+-- 1.15). "Reset" clears all of them back to 0 rather than supporting
+-- per-point undo, which is enough for a one-time five-point spend. Confirm
+-- is locked out until every point is spent.
 local STAT_ALLOCATION = { points = 5, step = 0.05 }
+local ALLOCATABLE_STATS = { "strength", "reflex", "aim", "intelligence", "charisma" }
+local ALLOCATABLE_STAT_LABELS = {
+    strength = "Strength", reflex = "Reflex", aim = "Aim",
+    intelligence = "Intelligence", charisma = "Charisma",
+}
 
 function engine.runStatAllocation()
-    local points = { strength = 0, reflex = 0, aim = 0 }
+    local points = { strength = 0, reflex = 0, aim = 0, intelligence = 0, charisma = 0 }
     local remaining = STAT_ALLOCATION.points
 
     while true do
@@ -7360,32 +7656,26 @@ function engine.runStatAllocation()
         combatWin.clear()
         combatWin.setCursorPos(1, 1)
         combatWin.write("Allocate your stat points - " .. remaining .. " remaining")
-        combatWin.setCursorPos(1, 3)
-        combatWin.write("[1] Strength  +" .. (points.strength * 5) .. "%")
-        combatWin.setCursorPos(1, 4)
-        combatWin.write("[2] Reflex    +" .. (points.reflex * 5) .. "%")
-        combatWin.setCursorPos(1, 5)
-        combatWin.write("[3] Aim       +" .. (points.aim * 5) .. "%")
-        combatWin.setCursorPos(1, 6)
-        combatWin.write("[4] Reset")
-        combatWin.setCursorPos(1, 7)
-        combatWin.write(remaining == 0 and "[5] Confirm" or "[5] Confirm (spend all points first)")
+        for i, stat in ipairs(ALLOCATABLE_STATS) do
+            combatWin.setCursorPos(1, i + 2)
+            combatWin.write("[" .. i .. "] " .. ALLOCATABLE_STAT_LABELS[stat] .. "  +" .. (points[stat] * 5) .. "%")
+        end
+        combatWin.setCursorPos(1, #ALLOCATABLE_STATS + 3)
+        combatWin.write("[6] Reset")
+        combatWin.setCursorPos(1, #ALLOCATABLE_STATS + 4)
+        combatWin.write(remaining == 0 and "[7] Confirm" or "[7] Confirm (spend all points first)")
         combatWin.setVisible(true)
 
         local _, key = os.pullEvent("key")
-        if key == keys.one and remaining > 0 then
-            points.strength = points.strength + 1
+        local index = keyToNumber[key]
+        if index and ALLOCATABLE_STATS[index] and remaining > 0 then
+            local stat = ALLOCATABLE_STATS[index]
+            points[stat] = points[stat] + 1
             remaining = remaining - 1
-        elseif key == keys.two and remaining > 0 then
-            points.reflex = points.reflex + 1
-            remaining = remaining - 1
-        elseif key == keys.three and remaining > 0 then
-            points.aim = points.aim + 1
-            remaining = remaining - 1
-        elseif key == keys.four then
-            points = { strength = 0, reflex = 0, aim = 0 }
+        elseif key == keys.six then
+            points = { strength = 0, reflex = 0, aim = 0, intelligence = 0, charisma = 0 }
             remaining = STAT_ALLOCATION.points
-        elseif key == keys.five and remaining == 0 then
+        elseif key == keys.seven and remaining == 0 then
             return points
         end
     end
@@ -7402,28 +7692,22 @@ function engine.spendSkillPoint()
     combatWin.clear()
     combatWin.setCursorPos(1, 1)
     combatWin.write("Spend 1 skill point on:")
-    combatWin.setCursorPos(1, 3)
-    combatWin.write("[1] Strength (+5%)")
-    combatWin.setCursorPos(1, 4)
-    combatWin.write("[2] Reflex (+5%)")
-    combatWin.setCursorPos(1, 5)
-    combatWin.write("[3] Aim (+5%)")
-    combatWin.setCursorPos(1, 6)
-    combatWin.write("[4] Back")
+    for i, stat in ipairs(ALLOCATABLE_STATS) do
+        combatWin.setCursorPos(1, i + 2)
+        combatWin.write("[" .. i .. "] " .. ALLOCATABLE_STAT_LABELS[stat] .. " (+5%)")
+    end
+    combatWin.setCursorPos(1, #ALLOCATABLE_STATS + 3)
+    combatWin.write("[6] Back")
     combatWin.setVisible(true)
 
     while true do
         local _, key = os.pullEvent("key")
-        if key == keys.one then
-            player.stats.strength = player.stats.strength + STAT_ALLOCATION.step
+        local index = keyToNumber[key]
+        if index and ALLOCATABLE_STATS[index] then
+            local stat = ALLOCATABLE_STATS[index]
+            player.stats[stat] = player.stats[stat] + STAT_ALLOCATION.step
             return true
-        elseif key == keys.two then
-            player.stats.reflex = player.stats.reflex + STAT_ALLOCATION.step
-            return true
-        elseif key == keys.three then
-            player.stats.aim = player.stats.aim + STAT_ALLOCATION.step
-            return true
-        elseif key == keys.four then
+        elseif key == keys.six then
             return false
         end
     end
@@ -7477,9 +7761,9 @@ function engine.runCharacterCreation()
     end
 
     local points = engine.runStatAllocation()
-    player.stats.strength = player.stats.strength + points.strength * STAT_ALLOCATION.step
-    player.stats.reflex = player.stats.reflex + points.reflex * STAT_ALLOCATION.step
-    player.stats.aim = player.stats.aim + points.aim * STAT_ALLOCATION.step
+    for _, stat in ipairs(ALLOCATABLE_STATS) do
+        player.stats[stat] = player.stats[stat] + points[stat] * STAT_ALLOCATION.step
+    end
 end
 
 -- The title screen, shown once at startup before there's any character to

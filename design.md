@@ -531,14 +531,22 @@ either to react with.
 ## Stats & combat
 
 Character-level stats (`character.stats`): `strength`, `aim`, `reflex`,
-`level`, plus a few fields (`dr`, `defense`, `speed`, `weight`,
-`max_inventory`) that are declared but not wired into anything yet.
-`stats.health`/`max_health` are set once at creation and never read
-again - the corner HP readout (see "Screen layout") instead sums raw
-health/maxHealth across the whole body (`engine.getBodyHealthTotals`,
-shared with `getBodyHealthFraction` - see "Body system"), since that's
-what the game's actual health tracking is.
+`intelligence`, `charisma`, `level`, plus a few fields (`dr`, `defense`,
+`speed`, `weight`, `max_inventory`) that are declared but not wired into
+anything yet. `stats.health`/`max_health` are set once at creation and
+never read again - the corner HP readout (see "Screen layout") instead
+sums raw health/maxHealth across the whole body
+(`engine.getBodyHealthTotals`, shared with `getBodyHealthFraction` - see
+"Body system"), since that's what the game's actual health tracking is.
 plus `level`/`health`/`max_health`.
+
+`intelligence` has no mechanical effect yet - it exists as a stat (spendable
+the same way as every other one, see "Character creation"/"Leveling &
+talents") specifically so it's already in place whenever something needs
+it, rather than being bolted on as a special case later. `charisma` is the
+one that already does something: it's what tilts a barter's own prices in
+the player's favor (see "Shops") - everywhere else in the game, `charisma`
+is inert too.
 
 - **Hit chance**: `aim * (1 - target's reflex / 2)`, then a flat
   per-tile-of-distance penalty from the weapon's `spread` stat
@@ -1691,6 +1699,81 @@ same content wraps correctly on a narrow real computer screen and a wide
 one alike. Scrolling (`descScroll`, the `Up`/`Down` handlers) works
 against this same freshly-wrapped line list each time, not a stored one.
 
+## Shops
+
+Credits (`player.credits`, a plain number, save/loaded like any other
+scalar) are the one standard currency, accepted basically anywhere -
+nothing about a shop, or an item's own price, involves more than one
+currency. Every carryable `itemEntries` entry has a base `value` (credits)
+and a `category` (`medical`/`explosive`/`weapon`/`ammo`/`armor`) - what any
+shop's own pricing (below) actually reads. Both are starting numbers for
+proving the mechanism out, not a balanced economy yet.
+
+A shop (`shopEntries`, gamedata.lua) is either a **store** (`kind =
+"store"`) or a **barter** (`kind = "barter"`) - the distinction the user
+asked for directly: a store is a place, walked straight into on the map
+(a `{ kind = "shop", shopId = ... }` object, glyph `%`, dispatched in
+`engine.interactWithObject` exactly like a save point) with fixed prices
+- "you can't haggle them down or have your reputation raise the price."
+A barter is a person instead (`{ kind = "person", shopId = ... }`, no
+`npcId` - trade-only, no quest involvement for now), only reached by
+talking to them and picking **Trade** over **Leave**
+(`engine.interactWithPerson`'s own `obj.shopId` branch) - its prices move
+with the player's own charisma and (optionally) reputation.
+
+Both share `sells` - a plain array of `{ itemId, price }`, `price` optional
+and falling back to `itemEntries[itemId].value` - what's offered *to* the
+player. What a shop is willing to buy *from* the player works differently
+per kind:
+
+- A **store**'s `buys` (optional - most stores don't have one, "you
+  typically cannot sell your own gear to a store") is a flat whitelist of
+  itemIds, bought back at one flat `buybackRate` (a fraction of `value`,
+  also fixed) - the pawn-shop/scrap-hauler case.
+- A **barter**'s `interest` table (category -> a base buyback rate) is
+  what it'll actually buy at all - a category simply absent means it won't
+  touch that kind of item, "outright won't buy things unrelated to
+  combat." `interestOverrides` (itemId -> rate, checked first) is the
+  escape hatch for "certain obviously valuable items" outside a barter's
+  normal categories - supported, but no barter defined so far actually
+  needs one.
+
+**Pricing** (`engine.getShopBuyPrice`/`engine.getShopSellPrice`): a store's
+number is exactly what's given, always. A barter's moves by
+`engine.getBarterLeverage(shop)` - a signed fraction, positive always
+favoring the player (cheaper buys, better sells): `(charisma - 1) *
+BARTER_CHARISMA_WEIGHT` (0 at baseline charisma, growing with points spent
+into it - see "Stats & combat"), plus, only if the barter has a
+`factionId` ("if they care"), `(reputation / REPUTATION_MAX) *
+BARTER_REPUTATION_WEIGHT` - clamped overall to
+`+/-BARTER_LEVERAGE_CAP` so neither stat can push a price to free or
+infinite. A barter with no `factionId` is charisma-only, a yard sale
+having an opinion about how personable you are but nothing to hold a
+grudge (or a favor) over.
+
+**The Shop screen** (`engine.runShopScreen`, reusing `inventoryWin` - a
+full-screen modal like Inventory/Medical, not a top-bar page, since a shop
+is reached by walking into it or through dialogue rather than a page)
+shows one list at a time, `Left`/`Right` switching between **Buy**
+(`engine.buildShopBuyRows`) and **Sell** (`engine.buildShopSellRows`,
+scoped to plain `player.inventory` only - never belt/equipped/worn),
+`Up`/`Down` to select, `Enter` to transact one unit
+(`engine.buyShopItem`/`engine.sellShopItem`), `S` to close (no natural
+single-letter hotkey opens a shop the way i/m/a/c/j/f do, so this follows
+the same mnemonic-close-key convention anyway). Buying never checks bulk
+capacity - purely informational everywhere else in the game (see
+"Inventory & equipment"), so a purchase doesn't enforce it either, same as
+a free pickup.
+
+Three shops exist so far, proving all three pricing paths at once:
+**General Store** (a store, sells only, no `buys`), **Scrap Hauler** (a
+store, buys weapons/ammo back at a flat 0.4 rate, sells nothing of its
+own), and **Shady Dealer** (a barter, cares about Wayfarer reputation,
+buys weapons readily (0.7) and armor less gladly (0.25), sells a couple of
+basics) - the "shady weapons dealer" case from the original pitch, made
+real. `grantCredits <amount>` (debug console) is the one new debug
+command, same "give" philosophy as everything else there.
+
 ## Main menu
 
 The very first thing shown at startup (`runMainMenu`, a `showInteraction`
@@ -1751,15 +1834,15 @@ pronouns (Male/Female/Nonbinary presets, or "Custom pronouns" for two
 direct text fields), background (see "Backgrounds" - who the player was
 before any of this), species (see "Species" - this is where `player.body`
 actually gets built, since it needs a menu, which needs the game's windows
-to already exist), then 5 points to spend across strength/reflex/aim, each
-worth a flat +5% (`stats.x = stats.x + points*0.05`, not compounding,
-stacking on top of whatever the chosen background/species already
-adjusted). Confirm
-is locked until all 5 points are spent; a Reset option clears an
-in-progress allocation back to zero. `STAT_ALLOCATION.step` (the +5%
-figure) is reused directly by the single-point skill spend a level-up
-grants later (see "Leveling & talents") - same rule, same constant, just
-one point at a time instead of five up front.
+to already exist), then 5 points to spend across strength/reflex/aim/
+intelligence/charisma (`ALLOCATABLE_STATS`), each worth a flat +5%
+(`stats.x = stats.x + points*0.05`, not compounding, stacking on top of
+whatever the chosen background/species already adjusted). Confirm is
+locked until all 5 points are spent; a Reset option clears an in-progress
+allocation back to zero. `STAT_ALLOCATION.step` (the +5% figure) is reused
+directly by the single-point skill spend a level-up grants later (see
+"Leveling & talents") - same rule, same constant, same 5-stat list
+(`ALLOCATABLE_STATS`), just one point at a time instead of five up front.
 
 ## Debug console
 
@@ -1817,6 +1900,8 @@ own list already uses. Reaches an enemy mid-fight, not just the player:
   `engine.grantExperience`, so it chains multi-level-ups and awards
   skill/talent points exactly like a quest/kill reward would - reports
   levels gained and current banked points. Player-only.
+- **`grantCredits <amount>`** - straight onto `player.credits`, no shop
+  involved - same "give" philosophy as `give`/`grantExperience`. Player-only.
 - **`setQuestStep <questId> <stepId>`** - a raw poke, the direct analog to
   `setLevel`: sets `player.quests[questId]` straight to `stepId` (or
   `"done"`), bypassing offer/condition/reward/`onComplete` logic entirely
@@ -2053,14 +2138,25 @@ NPC-to-NPC conversation system.
   `engine.grantExperience`'s own dialogue-choice hook is in.
 - Pronouns are consumed by name/`{{subject}}`/`{{object}}` templating;
   `UNSIGHTLY` by one hardcoded dialogue check. Neither affects anything
-  beyond that yet - social mechanics (haggling, reactions) wait on NPCs and
-  a shop system that don't exist yet either.
+  beyond that yet - social mechanics beyond a barter's own price (see
+  "Shops") wait on NPCs that don't exist yet.
 - `backgroundEntries` (see "Backgrounds") has five ids with real names,
   stat/reputation bonuses, and `player.background` is kept around
   specifically for future content (dialogue, quests) to check directly -
   but every `description` (the in-world flavor text shown in the picker)
   is still blank. Narrative content, not mechanical wiring; nothing else
   about the feature needs to change once it's written.
+- `intelligence` (see "Stats & combat") is a real, spendable stat with
+  zero mechanical effect anywhere - it exists purely so future content has
+  somewhere to hook into rather than needing a new stat added later.
+  `shopEntries`' own `interestOverrides` (see "Shops" - a barter's "certain
+  obviously valuable items" exception) is likewise real, working code that
+  no shop defined so far actually uses; both are proven only by direct
+  testing during development, not by anything reachable in play yet.
+  Nothing else generates credits either - the three shops so far are the
+  only source of prices, and nothing (a quest reward, a kill, selling
+  loot back for a profit loop) grants `player.credits` outside
+  `grantCredits` and a shop transaction itself.
 - Only one non-human species exists. Adding another is just a `build`
   function plus a `speciesEntries` entry - nothing else references a
   species by name anywhere.
